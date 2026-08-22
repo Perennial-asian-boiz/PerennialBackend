@@ -1,0 +1,20 @@
+# Environment variables
+backend/.env
+
+# Local data files
+database/local_data/
+
+# Python cache
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Mac/Windows junk
+.DS_Store
+Thumbs.db
