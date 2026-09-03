@@ -35,6 +35,14 @@ UPGRADE PATH:
     params: marketCapLowerThan=5B, priceLowerThan=50
 """
 import requests
+# ── shared path resolution (see paths.py) ──
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(next(
+    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
+)))
+from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+
 import json
 import time
 from datetime import datetime, timezone
@@ -154,8 +162,7 @@ def save_to_json(holdings: list, filename=None):
     Replace with write_to_db() once DB is set up.
     """
     if filename is None:
-        base = Path(__file__).resolve().parents[5]
-        output_dir = base / "database" / "local_data"
+        output_dir = LOCAL_DATA_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
         filename = output_dir / "ark_holdings.json"
 

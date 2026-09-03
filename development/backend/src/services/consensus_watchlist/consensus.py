@@ -26,6 +26,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 import requests
 from dotenv import load_dotenv
+# ── shared path resolution (see paths.py) ──
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(next(
+    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
+)))
+from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+
 
 # ─────────────────────────────────────────────────────────
 # CONFIG & LOGGING
@@ -38,8 +46,7 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-dotenv_path = Path(__file__).resolve().parents[4] / ".env"
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv(dotenv_path=ENV_PATH)
 
 FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
@@ -56,18 +63,7 @@ def resolve_data_dirs() -> List[Path]:
     Returns candidate database/local_data directories.
     Ensures directories exist.
     """
-    curr = Path(__file__).resolve()
-    project_root = None
-    for p in [curr] + list(curr.parents):
-        if p.name == "project-perennial" or (p / "development" / "backend").exists():
-            project_root = p
-            break
-    if not project_root:
-        project_root = curr.parents[4]
-
-    candidates = [
-        project_root / "development" / "database" / "local_data",
-    ]
+    candidates = [local_data_dir()]
     existing = []
     for d in candidates:
         d.mkdir(parents=True, exist_ok=True)

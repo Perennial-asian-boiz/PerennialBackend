@@ -15,14 +15,21 @@ import os
 from datetime import datetime, timezone
 from collections import Counter
 from dotenv import load_dotenv
+# ── shared path resolution (see paths.py) ──
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(next(
+    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
+)))
+from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+
 from pathlib import Path
 
 # ─────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────
 
-dotenv_path = Path(__file__).resolve().parents[4] / ".env"
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv(dotenv_path=ENV_PATH)
 
 FMP_API_KEY = os.getenv("FMP_API_KEY", "YOUR_FMP_KEY_HERE")
 BASE_URL = "https://financialmodelingprep.com/stable"
@@ -271,8 +278,7 @@ def analyze_trades(trades: list):
 
 def save_to_json(trades: list, filename=None):
     if filename is None:
-        base = Path(__file__).resolve().parents[5]  # goes up to development/
-        output_dir = base / "database" / "local_data"
+        output_dir = LOCAL_DATA_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
         filename = output_dir / "trades_congress.json"
 

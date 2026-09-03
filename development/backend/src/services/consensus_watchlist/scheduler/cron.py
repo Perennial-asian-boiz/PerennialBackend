@@ -10,12 +10,12 @@ PIPELINE ORDER:
     1. fmp.py            → Congress trades       → trades_congress.json
     2. ark.py            → ARK ETF holdings      → ark_holdings.json
     3. insider.py        → Insider buys          → trades_insider.json
-    4. short_interest.py → FINRA short interest  → short_interest.json
+    4. short_interest.py → Nasdaq short interest → short_interest.json
     5. consensus.py      → Cross-reference/rank  → consensus_watchlist.json
 
 SCHEDULE (automatic mode):
     9:00am daily     → fmp → ark → insider → consensus
-    9:10am 1st/15th  → short_interest (FINRA publishes bi-weekly)
+    9:10am 1st/15th  → short_interest (settlement data lands bi-monthly)
 
 HOW TO RUN:
     Test everything now:
@@ -27,7 +27,7 @@ HOW TO RUN:
     Ctrl+C to stop.
 
 DEPENDENCIES:
-    pip install apscheduler
+    pip install -r requirements.txt
 """
 
 import sys
@@ -41,7 +41,9 @@ from apscheduler.triggers.cron import CronTrigger
 # Add fetchers/ and consensus_watchlist/ to import path
 # ─────────────────────────────────────────────────────────
 
-BASE_DIR = Path(__file__).resolve().parents[1]  # consensus_watchlist/
+BASE_DIR = next(
+    p for p in Path(__file__).resolve().parents if p.name == "consensus_watchlist"
+)
 FETCHERS_DIR = BASE_DIR / "fetchers"
 
 sys.path.insert(0, str(FETCHERS_DIR))  # so we can: import fmp, ark, ...
@@ -55,18 +57,8 @@ import fmp
 import ark
 import insider
 
-# Aalind's files — import defensively in case names differ
-try:
-    import short_interest
-except ImportError:
-    short_interest = None
-    print("[cron] ⚠️  short_interest.py not found — will skip")
-
-try:
-    import consensus
-except ImportError:
-    consensus = None
-    print("[cron] ⚠️  consensus.py not found — will skip")
+import short_interest
+import consensus
 
 
 # ─────────────────────────────────────────────────────────
@@ -104,9 +96,6 @@ def run_insider():
 
 
 def run_short_interest():
-    if short_interest is None:
-        print("[cron] ⚠️  short_interest.py not available — skipping")
-        return
     _banner("Running short_interest.py")
     try:
         short_interest.run()
@@ -115,9 +104,6 @@ def run_short_interest():
 
 
 def run_consensus():
-    if consensus is None:
-        print("[cron] ⚠️  consensus.py not available — skipping")
-        return
     _banner("Running consensus.py")
     try:
         consensus.run()
@@ -171,7 +157,7 @@ def main():
         run_short_interest,
         CronTrigger(day="1,15", hour=9, minute=10),
         id="short_interest",
-        name="Short interest (FINRA bi-weekly)",
+        name="Short interest (bi-monthly)",
         replace_existing=True,
     )
 

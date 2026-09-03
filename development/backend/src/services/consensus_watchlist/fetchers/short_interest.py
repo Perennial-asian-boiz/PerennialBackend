@@ -40,6 +40,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Any
 import requests
 
+# ── shared path resolution (see paths.py) ──
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(next(
+    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
+)))
+from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+
 # ─────────────────────────────────────────────────────────
 # CONFIG & LOGGING
 # ─────────────────────────────────────────────────────────
@@ -76,18 +84,7 @@ def resolve_data_dir() -> Path:
     """
     Returns the database/local_data directory, creating it if needed.
     """
-    curr = Path(__file__).resolve()
-    project_root = None
-    for p in [curr] + list(curr.parents):
-        if (p / "development" / "backend").exists():
-            project_root = p
-            break
-    if not project_root:
-        project_root = curr.parents[6]
-
-    data_dir = project_root / "development" / "database" / "local_data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir
+    return local_data_dir()
 
 
 def get_input_file(filename: str) -> Optional[Path]:

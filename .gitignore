@@ -1,0 +1,35 @@
+# Environment variables — never commit credentials
+.env
+.env.*
+!.env.example
+
+# Fetcher JSON output (written pre-DB by the consensus_watchlist pipeline)
+development/database/local_data/*
+!development/database/local_data/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# IDE
+.idea/
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Database dumps
+*.dump
+*.sql.gz
+
+# Logs
+*.log

@@ -38,13 +38,20 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from collections import Counter, defaultdict
 from dotenv import load_dotenv
+# ── shared path resolution (see paths.py) ──
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(next(
+    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
+)))
+from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+
 
 # ─────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────
 
-dotenv_path = Path(__file__).resolve().parents[4] / ".env"
-load_dotenv(dotenv_path=dotenv_path)
+load_dotenv(dotenv_path=ENV_PATH)
 
 SECURITIES_URL      = "https://securitiesdb.com/api/v1/stocks"
 LOOKBACK_DAYS       = 180    # 6 months
@@ -62,8 +69,7 @@ def load_congress_tickers():
     Reads trades_congress.json produced by fmp.py.
     Returns top purchased tickers for Bucket 1.
     """
-    base       = Path(__file__).resolve().parents[5]
-    input_file = base / "database" / "local_data" / "trades_congress.json"
+    input_file = LOCAL_DATA_DIR / "trades_congress.json"
 
     if not input_file.exists():
         print("[insider] ❌ trades_congress.json not found — run fmp.py first")
@@ -101,8 +107,7 @@ def load_ark_tickers():
     Prioritizes multi-fund tickers (appear in 2+ ARK funds)
     as they represent stronger ARK conviction.
     """
-    base       = Path(__file__).resolve().parents[5]
-    input_file = base / "database" / "local_data" / "ark_holdings.json"
+    input_file = LOCAL_DATA_DIR / "ark_holdings.json"
 
     if not input_file.exists():
         print("[insider] ❌ ark_holdings.json not found — run ark.py first")
@@ -311,8 +316,7 @@ def analyze_insider_buys(all_buys: list):
 
 def save_to_json(all_buys: list, summary: list, filename=None):
     if filename is None:
-        base       = Path(__file__).resolve().parents[5]
-        output_dir = base / "database" / "local_data"
+        output_dir = LOCAL_DATA_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
         filename   = output_dir / "trades_insider.json"
 

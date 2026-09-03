@@ -1,0 +1,13 @@
+# Perennial backend — Python dependencies
+# Install:  pip install -r requirements.txt
+
+# HTTP for every fetcher (FMP, arkfunds.io, SecuritiesDB, Nasdaq)
+requests==2.34.2
+urllib3==2.7.0
+certifi==2026.6.17
+
+# Reads development/backend/.env
+python-dotenv==1.2.2
+
+# Pipeline scheduling — scheduler/cron.py
+apscheduler>=3.10,<4
