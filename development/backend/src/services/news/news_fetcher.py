@@ -4,7 +4,7 @@ import collections
 import trafilatura
 import json
 from pathlib import Path
-from utils.logger import logger
+from src.utils.logger import create_logger
 
 RSS_FEEDS = {
     "bbc": {
@@ -60,6 +60,7 @@ RSS_FEEDS = {
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent.parent
 DATA_DIR = BACKEND_DIR/"data"
 DATA_DIR.mkdir(exist_ok=True)
+logger = create_logger("articles.log")
 
 def collect_article_urls():
     articles = collections.defaultdict(list)
@@ -138,7 +139,7 @@ def main():
             if not article_text:
                 logger.warning("Could not extract article text: %s", obj["url"])
                 continue
-            
+
             content.append({
                 "url": obj["url"],
                 "title": obj["title"],
