@@ -1,8 +1,7 @@
 """
 Bluesky Jetstream listener: streams public posts and filters for ticker cashtags.
 
-dependencies: websockets
-Run: python jetstream_listener.py
+Run: python bluesky.py
 """
 
 import asyncio
@@ -15,12 +14,75 @@ import websockets
 # ---------- Config ----------
 JETSTREAM_URL = "wss://jetstream2.us-east.bsky.network/subscribe"
 # Other public instances: jetstream1.us-east, jetstream1.us-west, jetstream2.us-west
-TICKERS = {"TSLA", "NVDA", "AAPL", "AMD", "MSFT", "GME", "AMC", "SPY"}  # replace with ticker list from ARC
+
+FALLBACK_TICKERS = {"TSLA", "NVDA", "AAPL", "AMD", "MSFT", "GME", "AMC", "SPY"}
+TICKER_FILE = Path("tickers.json")   # format: {"tickers": ["TSLA", "NVDA"]}
+TICKER_POLL_SECONDS = 5              # how often to check the ticker source
+
 CURSOR_FILE = Path("cursor.txt")   # remembers where we left off so a restart doesn't lose data
 ENGLISH_ONLY = True
 
 # Matches $TSLA, $nvda, etc. Requires letters, so "$5" or "$100" won't match.
 CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Za-z]{1,5})\b")
+
+async def fetch_tickers() -> set[str] | None:
+    """
+    Return the current ticker set from database.
+    Return None if the source is unavailable or unreadable right now 
+    the watcher will then keep the current set instead of wiping it
+
+    returns a set of UPPERCASE tickers without "$", or None.
+    """
+    # ---- JSON file implementation (current) ----
+    try:
+        data = json.loads(TICKER_FILE.read_text())
+        return {t.strip().upper().lstrip("$") for t in data["tickers"] if t and t.strip()}
+    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
+        return None
+
+    # ---- Supabase implementation (later) ----
+    # Needs a client created once at startup (e.g. a module-level `sb`).
+    # rows = (await sb.table("ticker_config").select("tickers").eq("id", 1).execute()).data
+    # if not rows:
+    #     return None
+    # return {t.strip().upper().lstrip("$") for t in rows[0]["tickers"] if t}
+
+
+class TickerWatcher:
+    """
+    Holds the current ticker set in memory and hot-swaps it when
+    fetch_tickers() returns something different.
+    The Jetstream websocket is never touched.
+    """
+
+    def __init__(self):
+        self.tickers: frozenset[str] = frozenset(FALLBACK_TICKERS)
+
+    async def refresh(self):
+        try:
+            fetched = await fetch_tickers()
+        except Exception as e:
+            print(f"Ticker fetch failed (keeping current set): {e}")
+            return
+        if fetched is None:
+            return  # source unavailable -> keep current set
+        new = frozenset(fetched)
+        if new != self.tickers:
+            added, removed = new - self.tickers, self.tickers - new
+            self.tickers = new  # atomic reference swap; in-flight events are safe
+            print(f"Tickers updated: +{sorted(added)} -{sorted(removed)}")
+        # same set -> do nothing
+
+    async def run(self):
+        """Check the source on an interval. Swap this loop for push-based
+        updates (e.g. Supabase Realtime) later if you want instant reloads."""
+        while True:
+            await self.refresh()
+            await asyncio.sleep(TICKER_POLL_SECONDS)
+
+
+watcher = TickerWatcher()
+
 
 # ---------- Helpers ----------
 def load_cursor():
@@ -40,7 +102,7 @@ def build_url(cursor=None):
     return url
 
 def extract_tickers(text):
-    return {m.upper() for m in CASHTAG_RE.findall(text)} & TICKERS
+    return {m.upper() for m in CASHTAG_RE.findall(text)} & watcher.tickers
 
 # pipeline
 async def handle_post(post):
@@ -107,8 +169,11 @@ async def listen():
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 60)
 
+async def main():
+    await asyncio.gather(listen(), watcher.run())
+
 if __name__ == "__main__":
     try:
-        asyncio.run(listen())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("Stopped.")
