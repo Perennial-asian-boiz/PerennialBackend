@@ -36,3 +36,9 @@ Thumbs.db
 
 # Data directory
 data/
+
+# virtual environment
+.venv
+
+# cursor file for blue sky
+cursor.txt
