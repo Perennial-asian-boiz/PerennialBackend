@@ -10,13 +10,13 @@ import re
 import time
 from pathlib import Path
 import websockets
+from utils.fetch_tickers import fetch_tickers
 
 # ---------- Config ----------
 JETSTREAM_URL = "wss://jetstream2.us-east.bsky.network/subscribe"
 # Other public instances: jetstream1.us-east, jetstream1.us-west, jetstream2.us-west
 
 FALLBACK_TICKERS = {"TSLA", "NVDA", "AAPL", "AMD", "MSFT", "GME", "AMC", "SPY"}
-TICKER_FILE = Path("tickers.json")   # format: {"tickers": ["TSLA", "NVDA"]}
 TICKER_POLL_SECONDS = 5              # how often to check the ticker source
 
 CURSOR_FILE = Path("cursor.txt")   # remembers where we left off so a restart doesn't lose data
@@ -24,28 +24,6 @@ ENGLISH_ONLY = True
 
 # Matches $TSLA, $nvda, etc. Requires letters, so "$5" or "$100" won't match.
 CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Za-z]{1,5})\b")
-
-async def fetch_tickers() -> set[str] | None:
-    """
-    Return the current ticker set from database.
-    Return None if the source is unavailable or unreadable right now 
-    the watcher will then keep the current set instead of wiping it
-
-    returns a set of UPPERCASE tickers without "$", or None.
-    """
-    # ---- JSON file implementation (current) ----
-    try:
-        data = json.loads(TICKER_FILE.read_text())
-        return {t.strip().upper().lstrip("$") for t in data["tickers"] if t and t.strip()}
-    except (FileNotFoundError, json.JSONDecodeError, KeyError, TypeError):
-        return None
-
-    # ---- Supabase implementation (later) ----
-    # Needs a client created once at startup (e.g. a module-level `sb`).
-    # rows = (await sb.table("ticker_config").select("tickers").eq("id", 1).execute()).data
-    # if not rows:
-    #     return None
-    # return {t.strip().upper().lstrip("$") for t in rows[0]["tickers"] if t}
 
 
 class TickerWatcher:
