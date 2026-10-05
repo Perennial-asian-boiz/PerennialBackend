@@ -13,6 +13,14 @@ PURPOSE:
 
     Outputs deterministic Version 1 candidate watchlist:
       database/local_data/consensus_watchlist.json
+
+    MISSING vs NEGATIVE:
+      An absent signal is not evidence of absence. Each candidate's insider
+      signal carries an explicit status — has_buys, no_qualifying_buys,
+      unknown, not_evaluated — and anything inconclusive is flagged with the
+      warning `insider_data_unavailable`. Only `no_qualifying_buys` means
+      "we checked and there was no insider buying". Input health is
+      summarized at the top level under `source_health`.
 """
 
 import json
@@ -208,15 +216,66 @@ def load_ark_signals(file_path: Optional[Path] = None) -> Dict[str, Dict[str, An
         return {}
 
 
-def load_insider_signals(file_path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
+def _absent_insider_meta(reason: str) -> Dict[str, Any]:
+    """Provenance for 'we have no usable insider file at all'."""
+    return {
+        "run_status": "failed",
+        "reason": reason,
+        "data_as_of": None,
+        "scanned": set(),
+        "failed": set(),
+        "last_attempt_status": None,
+        "retained_previous_data": False,
+        "errors_by_code": {},
+        "degraded_inputs": [],
+    }
+
+
+def load_insider_signals(
+    file_path: Optional[Path] = None
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """
+    Returns (signals, meta). `meta` is what makes an absent ticker
+    interpretable: which tickers insider.py actually scanned, which ones it
+    failed to get an answer for, and how healthy the run was. Without it a
+    missing ticker is indistinguishable from a collection failure.
+    """
     path = file_path or get_input_file_path("trades_insider.json")
     if not path or not path.exists():
-        logger.warning("trades_insider.json not found — Insider signal will be empty")
-        return {}
+        logger.warning("trades_insider.json not found — Insider signal unavailable")
+        return {}, _absent_insider_meta("file_missing")
 
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        coverage = data.get("coverage") or {}
+        attempt = data.get("last_attempt") or {}
+        meta = {
+            "run_status": coverage.get("run_status", "unknown"),
+            "reason": None,
+            "data_as_of": data.get("data_as_of") or data.get("fetched_at"),
+            "scanned": set(coverage.get("scanned_tickers") or []),
+            "failed": set(coverage.get("failed_tickers") or []),
+            "last_attempt_status": attempt.get("run_status"),
+            "retained_previous_data": bool(attempt.get("retained_previous_data")),
+            # Why collection degraded, grouped by cause — carried through so a
+            # dev can diagnose from the watchlist without opening the fetcher
+            # output or the console log.
+            "errors_by_code": coverage.get("errors_by_code") or {},
+            "degraded_inputs": coverage.get("degraded_inputs") or [],
+        }
+
+        # Pre-contract files have no coverage block. Treat the scan scope as
+        # unknown rather than inventing one — every absence becomes
+        # inconclusive, which is the safe reading.
+        if not coverage:
+            meta["run_status"] = "unknown"
+            meta["reason"] = "no_coverage_block"
+            logger.warning(
+                "trades_insider.json has no coverage block (pre-status format) "
+                "— insider absences will be reported as inconclusive"
+            )
 
         transactions = data.get("transactions", [])
         signals: Dict[str, Dict[str, Any]] = {}
@@ -252,16 +311,28 @@ def load_insider_signals(file_path: Optional[Path] = None) -> Dict[str, Dict[str
         out: Dict[str, Dict[str, Any]] = {}
         for ticker, s in signals.items():
             out[ticker] = {
+                "status": "has_buys",
                 "buy_count": s["buy_count"],
                 "distinct_insider_count": len(s["insiders"]),
                 "total_value": s["total_value"],
                 "most_recent_buy": s["most_recent_buy"] or None,
             }
-        logger.info(f"Loaded Insider purchase signals for {len(out)} tickers")
-        return out
+
+        logger.info(
+            f"Loaded Insider purchase signals for {len(out)} tickers "
+            f"(run_status={meta['run_status']}, scanned={len(meta['scanned'])}, "
+            f"unknown={len(meta['failed'])})"
+        )
+        if meta["retained_previous_data"]:
+            logger.warning(
+                f"Insider data is held over — last attempt "
+                f"({meta['last_attempt_status']}) did not replace it; "
+                f"data_as_of={meta['data_as_of']}"
+            )
+        return out, meta
     except Exception as e:
         logger.error(f"Error loading Insider signals: {e}")
-        return {}
+        return {}, _absent_insider_meta(f"unreadable: {type(e).__name__}")
 
 
 def load_short_interest_signals(file_path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
@@ -342,6 +413,63 @@ def fetch_market_cap(
 
 
 # ─────────────────────────────────────────────────────────
+# SIGNAL INTERPRETATION
+# ─────────────────────────────────────────────────────────
+
+def resolve_insider_signal(
+    ticker: str,
+    signal: Optional[Dict[str, Any]],
+    meta: Dict[str, Any]
+) -> Tuple[Dict[str, Any], Optional[str]]:
+    """
+    Decides what an absent insider signal actually means, and returns
+    (signal, warning). Four outcomes, only one of which is a finding:
+
+        has_buys           — qualifying purchases found
+        no_qualifying_buys — scanned and answered; nothing met the filters
+        unknown            — scanned but we never got an answer
+        not_evaluated      — outside insider.py's scan scope
+
+    Only `no_qualifying_buys` licenses the claim "no insider buying". The
+    other two absences are missing data and must not read as a negative.
+    """
+    if signal is not None:
+        return signal, None
+
+    if meta["run_status"] == "failed":
+        return {
+            "status": "unknown",
+            "reason": meta.get("reason") or "collection_failed",
+            "data_as_of": meta["data_as_of"],
+        }, "insider_data_unavailable"
+
+    if ticker in meta["failed"]:
+        return {
+            "status": "unknown",
+            "reason": "request_failed",
+            "data_as_of": meta["data_as_of"],
+        }, "insider_data_unavailable"
+
+    if ticker in meta["scanned"]:
+        return {
+            "status": "no_qualifying_buys",
+            "buy_count": 0,
+            "distinct_insider_count": 0,
+            "total_value": 0.0,
+            "most_recent_buy": None,
+            "data_as_of": meta["data_as_of"],
+        }, None
+
+    # Not in the scanned set — either outside scan scope, or the file predates
+    # the coverage contract so the scope is unknowable.
+    return {
+        "status": "not_evaluated",
+        "reason": meta.get("reason") or "outside_scan_scope",
+        "data_as_of": meta["data_as_of"],
+    }, "insider_data_unavailable"
+
+
+# ─────────────────────────────────────────────────────────
 # DETERMINISTIC RANKING HEURISTICS
 # ─────────────────────────────────────────────────────────
 
@@ -408,7 +536,7 @@ def run(
 
     congress_signals = load_congress_signals(congress_file)
     ark_signals = load_ark_signals(ark_file)
-    insider_signals = load_insider_signals(insider_file)
+    insider_signals, insider_meta = load_insider_signals(insider_file)
     short_interest_signals = load_short_interest_signals(short_interest_file)
 
     # Union of candidates from Congress (purchases) and ARK
@@ -426,10 +554,19 @@ def run(
     for ticker in candidate_tickers:
         mcap = fetch_market_cap(ticker, market_cap_cache, session=session)
 
+        warnings: List[str] = []
+
         c_sig = congress_signals.get(ticker)
-        i_sig = insider_signals.get(ticker)
         si_sig = short_interest_signals.get(ticker)
         a_sig = ark_signals.get(ticker)
+
+        # An absent insider signal is ambiguous on its own — resolve it
+        # against what insider.py reported it actually established.
+        i_sig, insider_warning = resolve_insider_signal(
+            ticker, insider_signals.get(ticker), insider_meta
+        )
+        if insider_warning:
+            warnings.append(insider_warning)
 
         # Build source dates dict
         source_dates = {
@@ -450,8 +587,6 @@ def run(
             "short_interest": si_sig,
             "ark": a_sig_clean,
         }
-
-        warnings: List[str] = []
 
         if mcap is None or mcap <= 0:
             bucket = "unresolved"
@@ -504,9 +639,30 @@ def run(
     # Sort Unresolved by Ticker A-Z
     unresolved.sort(key=lambda r: r["ticker"])
 
+    insider_unknown = sum(
+        1 for r in popular_stable + affordable_growing + unresolved
+        if "insider_data_unavailable" in r["warnings"]
+    )
+
     output_payload = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # Health of the inputs this watchlist was built from. generated_at
+        # says when we aggregated; this says whether the data was any good.
+        "source_health": {
+            "insider": {
+                "run_status": insider_meta["run_status"],
+                "data_as_of": insider_meta["data_as_of"],
+                "tickers_scanned": len(insider_meta["scanned"]),
+                "tickers_unknown": len(insider_meta["failed"]),
+                "last_attempt_status": insider_meta["last_attempt_status"],
+                "retained_previous_data": insider_meta["retained_previous_data"],
+                "reason": insider_meta.get("reason"),
+                "candidates_without_insider_data": insider_unknown,
+                "errors_by_code": insider_meta["errors_by_code"],
+                "degraded_inputs": insider_meta["degraded_inputs"],
+            },
+        },
         "popular_stable": popular_stable,
         "affordable_growing": affordable_growing,
         "unresolved": unresolved,
@@ -522,6 +678,17 @@ def run(
         f"Affordable & Growing: {len(affordable_growing)}, "
         f"Unresolved: {len(unresolved)}"
     )
+    if insider_unknown:
+        logger.warning(
+            f"{insider_unknown} candidate(s) have no usable insider data — "
+            f"their absence of insider buying is inconclusive "
+            f"(insider run_status={insider_meta['run_status']})"
+        )
+        for code, g in (insider_meta["errors_by_code"] or {}).items():
+            logger.warning(
+                f"  insider {code} [{g.get('category')}] x{g.get('count')} — "
+                f"e.g. {g.get('sample_detail')}"
+            )
     return output_payload
 
 
