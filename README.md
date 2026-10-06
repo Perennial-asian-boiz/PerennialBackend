@@ -27,6 +27,8 @@ development/
       fetchers/           # fmp, ark, insider, short_interest
       scheduler/cron.py   # pipeline entry point (--test runs everything now)
   database/local_data/    # fetcher JSON output, gitignored
+  database/               # PostgreSQL Compose, Alembic migrations — see database/README.md
+  backend/src/db/, backend/src/ingestion/  # schema, importer, live collectors, CLI
 requirements.txt
 ```
 
