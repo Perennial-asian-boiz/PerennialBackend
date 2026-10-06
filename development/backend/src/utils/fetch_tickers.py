@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-SRC_DIR = Path(__file__).resolve().parent.parent.parent
+SRC_DIR = Path(__file__).resolve().parent.parent
 TICKER_FILE = SRC_DIR / "services" / "sentiment" / "tickers.json"
 
 async def fetch_tickers() -> set[str] | None:
