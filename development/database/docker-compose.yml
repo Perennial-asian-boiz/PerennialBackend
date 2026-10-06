@@ -1,0 +1,24 @@
+# Local development PostgreSQL for Perennial.
+#   docker compose -f development/database/docker-compose.yml up -d
+# Published on loopback only (127.0.0.1:5433). The credentials below are
+# development-only defaults and must never be reused for a shared database.
+services:
+  postgres:
+    image: postgres:17
+    container_name: perennial-postgres
+    environment:
+      POSTGRES_USER: ${PERENNIAL_DB_USER:-perennial}
+      POSTGRES_PASSWORD: ${PERENNIAL_DB_PASSWORD:-perennial}
+      POSTGRES_DB: ${PERENNIAL_DB_NAME:-perennial}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - perennial-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  perennial-pgdata:
