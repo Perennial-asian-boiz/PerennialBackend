@@ -283,8 +283,8 @@ def load_short_interest_signals(file_path: Optional[Path] = None) -> Dict[str, D
                 continue
 
             signals[norm_ticker] = {
-                "short_position_shares": r.get("short_position_shares"),
-                "average_daily_volume": r.get("average_daily_volume"),
+                "short_position_shares": r.get("short_interest_shares", r.get("short_interest", r.get("short_position_shares"))),
+                "average_daily_volume": r.get("average_daily_volume", r.get("avg_daily_volume")),
                 "days_to_cover": r.get("days_to_cover"),
                 "settlement_date": r.get("settlement_date"),
             }

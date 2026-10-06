@@ -1,193 +1,63 @@
+"""Supervised daily database pipeline. --test executes one complete live run.
+
+Every stage uses the shared collectors and importer; publication occurs only
+when all required sources meet coverage, lineage and freshness rules. JSON-only
+experimentation remains available via consensus.py, outside this production path.
 """
-Perennial — Pipeline Scheduler
-File: services/consensus_watchlist/scheduler/cron.py
-
-PURPOSE:
-    Single entry point to run the entire Consensus Watchlist pipeline.
-    Either runs on an automatic schedule OR runs everything now (--test).
-
-PIPELINE ORDER:
-    1. fmp.py            → Congress trades       → trades_congress.json
-    2. ark.py            → ARK ETF holdings      → ark_holdings.json
-    3. insider.py        → Insider buys          → trades_insider.json
-    4. short_interest.py → Nasdaq short interest → short_interest.json
-    5. consensus.py      → Cross-reference/rank  → consensus_watchlist.json
-
-SCHEDULE (automatic mode):
-    9:00am daily     → fmp → ark → insider → consensus
-    9:10am 1st/15th  → short_interest (settlement data lands bi-monthly)
-
-HOW TO RUN:
-    Test everything now:
-        py scheduler/cron.py --test
-
-    Run on schedule (leave running in background):
-        py scheduler/cron.py
-
-    Ctrl+C to stop.
-
-DEPENDENCIES:
-    pip install -r requirements.txt
-"""
-
+import logging
 import sys
 from pathlib import Path
-from datetime import datetime
+
+BACKEND = Path(__file__).resolve().parents[4]
+if str(BACKEND) not in sys.path:
+    sys.path.insert(0, str(BACKEND))
+
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+from src.db.session import make_engine
+from src.ingestion.redaction import describe_exception
+from src.pipeline.runner import run_pipeline
 
-# ─────────────────────────────────────────────────────────
-# PATH SETUP
-# Add fetchers/ and consensus_watchlist/ to import path
-# ─────────────────────────────────────────────────────────
-
-BASE_DIR = next(
-    p for p in Path(__file__).resolve().parents if p.name == "consensus_watchlist"
-)
-FETCHERS_DIR = BASE_DIR / "fetchers"
-
-sys.path.insert(0, str(FETCHERS_DIR))  # so we can: import fmp, ark, ...
-sys.path.insert(0, str(BASE_DIR))  # so we can: import consensus
-
-# ─────────────────────────────────────────────────────────
-# IMPORT PIPELINE MODULES
-# ─────────────────────────────────────────────────────────
-
-import fmp
-import ark
-import insider
-
-import short_interest
-import consensus
+logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────────────────
-# JOB WRAPPERS
-# ─────────────────────────────────────────────────────────
-
-def _banner(name):
-    print(f"\n[cron] ─────────────────────────────────────")
-    print(f"[cron] {name} — {datetime.now()}")
-    print(f"[cron] ─────────────────────────────────────")
-
-
-def run_fmp():
-    _banner("Running fmp.py")
+def run_full_pipeline(include_short_interest=True):
+    # Always refresh the selected universe, even when settlement observations
+    # themselves have not changed. An old short-interest plan can miss new tickers.
+    engine = make_engine()
     try:
-        fmp.run()
-    except Exception as e:
-        print(f"[cron] ❌ fmp.py failed: {e}")
+        return run_pipeline(engine)
+    except Exception as exc:
+        logger.error("pipeline failed: %s", describe_exception(exc))
+        raise
+    finally:
+        engine.dispose()
 
-
-def run_ark():
-    _banner("Running ark.py")
-    try:
-        ark.run()
-    except Exception as e:
-        print(f"[cron] ❌ ark.py failed: {e}")
-
-
-def run_insider():
-    _banner("Running insider.py")
-    try:
-        insider.run()
-    except Exception as e:
-        print(f"[cron] ❌ insider.py failed: {e}")
-
-
-def run_short_interest():
-    _banner("Running short_interest.py")
-    try:
-        short_interest.run()
-    except Exception as e:
-        print(f"[cron] ❌ short_interest.py failed: {e}")
-
-
-def run_consensus():
-    _banner("Running consensus.py")
-    try:
-        consensus.run()
-    except Exception as e:
-        print(f"[cron] ❌ consensus.py failed: {e}")
-
-
-# ─────────────────────────────────────────────────────────
-# FULL PIPELINE
-# ─────────────────────────────────────────────────────────
-
-def run_full_pipeline(include_short_interest=False):
-    """
-    Runs the complete pipeline in order.
-    short_interest only runs bi-weekly so it's optional here.
-    """
-    print(f"\n[cron] ═════════════════════════════════════")
-    print(f"[cron] FULL PIPELINE START — {datetime.now()}")
-    print(f"[cron] ═════════════════════════════════════")
-
-    run_fmp()
-    run_ark()
-    run_insider()
-    if include_short_interest:
-        run_short_interest()
-    run_consensus()
-
-    print(f"\n[cron] ═════════════════════════════════════")
-    print(f"[cron] FULL PIPELINE DONE — {datetime.now()}")
-    print(f"[cron] ═════════════════════════════════════\n")
-
-
-# ─────────────────────────────────────────────────────────
-# SCHEDULER (automatic mode)
-# ─────────────────────────────────────────────────────────
 
 def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     scheduler = BlockingScheduler(timezone="America/Los_Angeles")
-
-    # Daily pipeline at 9:00am PT
-    scheduler.add_job(
-        run_full_pipeline,
-        CronTrigger(hour=9, minute=0),
-        id="daily_pipeline",
-        name="Daily pipeline (fmp→ark→insider→consensus)",
-        replace_existing=True,
-    )
-
-    # Short interest at 9:10am on 1st and 15th
-    scheduler.add_job(
-        run_short_interest,
-        CronTrigger(day="1,15", hour=9, minute=10),
-        id="short_interest",
-        name="Short interest (bi-monthly)",
-        replace_existing=True,
-    )
-
-    print("\n" + "=" * 55)
-    print("  PERENNIAL — Pipeline Scheduler")
-    print("=" * 55)
-    print("  Daily 9:00am PT   → fmp → ark → insider → consensus")
-    print("  1st+15th 9:10am   → short_interest")
-    print("  Ctrl+C to stop")
-    print("=" * 55 + "\n")
-
-    for job in scheduler.get_jobs():
-        print(f"  [{job.name}]")
-    print()
-
+    scheduler.add_job(run_full_pipeline,
+        CronTrigger(hour=9, minute=0, timezone="America/Los_Angeles"),
+        id="daily_pipeline", replace_existing=True, max_instances=1,
+        coalesce=True, misfire_grace_time=3600)
+    # Perform one recovery/catch-up run whenever a supervisor starts this worker.
+    # PostgreSQL locks prevent overlapping source work across worker processes.
+    try:
+        run_full_pipeline()
+    except Exception:
+        pass  # Logged above; remain supervised and retry at the next schedule.
     try:
         scheduler.start()
-    except KeyboardInterrupt:
-        print("\n[cron] Scheduler stopped.")
-        scheduler.shutdown()
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown(wait=False)
 
-
-# ─────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--test":
-        print("[cron] TEST MODE — running full pipeline now")
-        # In test mode, include short_interest so we test everything
-        run_full_pipeline(include_short_interest=True)
+    if "--test" in sys.argv:
+        try:
+            run_full_pipeline()
+        except Exception:
+            sys.exit(1)
     else:
         main()
