@@ -36,3 +36,16 @@ Thumbs.db
 
 # Data directory
 data/
+
+# Optional local agent tooling (not required by the backend)
+/.local-tools/
+/.agents/skills/archify/
+/.agents/skills/openrig-*/
+/.openrig/
+/.codex/plugins/openrig-core/
+/.codex/rules/openrig.rules
+/.claude/settings.local.json
+/AGENTS.md
+/CLAUDE.md
+/.agents/skills/
+/.codex/plugins/

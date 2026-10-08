@@ -1,0 +1,41 @@
+{
+  "source": "ARK Invest ETF Holdings (arkfunds.io)",
+  "funds_tracked": ["ARKK", "ARKQ", "ARKG", "ARKW"],
+  "fetched_at": "2026-09-30T13:02:00+00:00",
+  "total_tickers": 3,
+  "multi_fund_tickers": 1,
+  "single_fund_tickers": 2,
+  "note": "multi_fund_tickers appear in 2+ ARK funds = stronger conviction signal",
+  "holdings": [
+    {
+      "ticker": "ZZAA",
+      "company": "Synthetic Alpha Corp",
+      "funds": ["ARKW", "ARKK"],
+      "fund_count": 2,
+      "share_price": 123.45,
+      "total_weight": 10.300000000000001,
+      "bucket": "affordable_growing",
+      "data_source": "ark_etf"
+    },
+    {
+      "ticker": "ZZDD",
+      "company": "Synthetic Delta Bio",
+      "funds": ["ARKG"],
+      "fund_count": 1,
+      "share_price": 0.0,
+      "total_weight": 0.3,
+      "bucket": "affordable_growing",
+      "data_source": "ark_etf"
+    },
+    {
+      "ticker": "ZZEE",
+      "company": "Synthetic Epsilon Robotics",
+      "funds": ["ARKQ"],
+      "fund_count": 1,
+      "share_price": 7.5,
+      "total_weight": 101.25,
+      "bucket": "affordable_growing",
+      "data_source": "ark_etf"
+    }
+  ]
+}

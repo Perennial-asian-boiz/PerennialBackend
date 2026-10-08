@@ -116,7 +116,22 @@ def fetch_senate_watcher():
 # PARSE
 # ─────────────────────────────────────────────────────────
 
-def parse_trades(raw_data: list):
+def _provider_record_id(item):
+    """A transaction identifier, never a filing URL (one filing can contain many trades)."""
+    for key in ("transactionId", "transaction_id", "id"):
+        value = item.get(key)
+        if value is None or value == "":
+            continue
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            raise ValueError("malformed provider transaction identity")
+        value = str(value).strip()
+        if not value or len(value) > 200:
+            raise ValueError("malformed provider transaction identity")
+        return value
+    return None
+
+
+def parse_trades(raw_data: list, *, preserve_provenance: bool = True):
     """
     Cleans raw FMP response into structured dicts.
     Skips entries with no ticker symbol.
@@ -158,10 +173,12 @@ def parse_trades(raw_data: list):
             "source_link": item.get("link", "").strip(),
             "fetched_at": datetime.now(timezone.utc).isoformat(),
         })
+        if preserve_provenance:
+            trades[-1].update(data_source="fmp", provider_record_id=_provider_record_id(item))
 
     return trades
 
-def parse_watcher_trade(item: dict):
+def parse_watcher_trade(item: dict, *, preserve_provenance: bool = True):
     """
     Parses Senate Stock Watcher format into standard Perennial format.
     Different from FMP — uses MM/DD/YYYY dates and different field names.
@@ -181,7 +198,7 @@ def parse_watcher_trade(item: dict):
     except ValueError:
         trade_date_str = raw_date
 
-    return {
+    trade = {
         "politician_name":   item.get("senator", "").strip(),
         "chamber":           "Senate",
         "ticker":            ticker,
@@ -197,6 +214,9 @@ def parse_watcher_trade(item: dict):
         "data_source":       "senate_watcher",
         "fetched_at":        datetime.now(timezone.utc).isoformat(),
     }
+    if preserve_provenance:
+        trade["provider_record_id"] = _provider_record_id(item)
+    return trade
 
 def deduplicate(trades: list):
     """
@@ -216,6 +236,37 @@ def deduplicate(trades: list):
         if key not in seen:
             seen[key] = True
             result.append(trade)
+
+    removed = len(trades) - len(result)
+    print(f"[fmp] Deduplication: removed {removed} duplicates → {len(result)} unique")
+    return result
+
+
+def deduplicate_proven_repeats(trades: list):
+    """
+    Remove proven repeats only: same provider transaction ID and same content.
+
+    Amount, disclosure date, filing, chamber and asset fields remain identity
+    dimensions. A filing URL alone is not a transaction ID. Rows without an
+    explicit provider transaction ID retain their multiplicity, and providers
+    never merge: a politician/ticker/date/type match cannot prove two reported
+    transactions are the same. This deliberately favors preservation over
+    speculative cross-provider deduplication.
+    """
+    seen = set()
+    result = []
+
+    for trade in trades:
+        identity = trade.get("provider_record_id")
+        provider = trade.get("data_source")
+        if identity and provider:
+            # Restamping a fetch must not change identity; all other fields
+            # participate so conflicting reports of one ID remain visible.
+            key = json.dumps({k: v for k, v in trade.items() if k != "fetched_at"}, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+        result.append(trade)
 
     removed = len(trades) - len(result)
     print(f"[fmp] Deduplication: removed {removed} duplicates → {len(result)} unique")
@@ -341,13 +392,15 @@ def run():
     print(f"\n[fmp] Total raw records: {len(all_raw)}")
 
     # Parse — FMP records already parsed by existing parse_trades()
-    fmp_trades = parse_trades(fmp_senate + fmp_house)
+    # Legacy file output keeps fab7188 fields; database collection keeps the
+    # provider transaction identity and provenance via the default parsers.
+    fmp_trades = parse_trades(fmp_senate + fmp_house, preserve_provenance=False)
 
     # Parse Senate Watcher records separately
     sw_trades = []
     skipped = 0
     for item in sw_senate:
-        parsed = parse_watcher_trade(item)
+        parsed = parse_watcher_trade(item, preserve_provenance=False)
         if parsed:
             sw_trades.append(parsed)
         else:

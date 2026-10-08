@@ -1,0 +1,276 @@
+{
+  "baseline_commit": "fab7188c37b89299a916da716123d4ccf3996edc",
+  "generation": "Scratch-imported fab7188 fmp.run/short_interest.run and their save functions; frozen UTC clock, synthetic fetches only.",
+  "frozen_now": "2026-10-07T00:00:00+00:00",
+  "baseline_source_sha256": {
+    "fetchers/fmp.py": "e11324d31ea193c022acf90726acfb4bd7b367e7706e78b5b9004187c5d0db19",
+    "fetchers/short_interest.py": "c137967cd63d03be693b53759665eccf62f9172730e7961c549c6591b5284e10",
+    "consensus.py": "65f40413376d7feae3f6a769a6c5c5617389e7f1690f14e45638efa4274313c5"
+  },
+  "inputs": {
+    "fmp_senate": [
+      {
+        "symbol": "ZZAA",
+        "firstName": "Synthetic",
+        "lastName": "Member",
+        "type": "Purchase",
+        "amount": "$1,001 - $15,000",
+        "transactionDate": "2026-09-01",
+        "disclosureDate": "2026-09-10",
+        "assetDescription": "Synthetic Alpha",
+        "assetType": "Stock",
+        "district": "",
+        "link": "https://disclosures.example.invalid/1",
+        "_chamber": "Senate"
+      }
+    ],
+    "fmp_house": [
+      {
+        "symbol": "ZZBB",
+        "firstName": "Synthetic",
+        "lastName": "Other",
+        "type": "Purchase",
+        "amount": "$15,001 - $50,000",
+        "transactionDate": "2026-09-02",
+        "disclosureDate": "2026-09-12",
+        "assetDescription": "Synthetic Beta",
+        "assetType": "Stock",
+        "district": "",
+        "link": "https://disclosures.example.invalid/2",
+        "_chamber": "House"
+      }
+    ],
+    "senate_watcher": [
+      {
+        "ticker": "ZZAA",
+        "senator": "Synthetic Member",
+        "type": "Purchase",
+        "amount": "$1,001 - $15,000",
+        "transaction_date": "09/01/2026",
+        "asset_description": "Synthetic Alpha",
+        "asset_type": "Stock",
+        "ptr_link": "https://disclosures.example.invalid/1"
+      }
+    ],
+    "short_interest": {
+      "ticker": "ZZAA",
+      "payload": {
+        "data": {
+          "shortInterestTable": {
+            "rows": [
+              {
+                "settlementDate": "09/15/2026",
+                "interest": "not-a-number",
+                "avgDailyShareVolume": "500",
+                "daysToCover": "2.0"
+              },
+              {
+                "settlementDate": "08/31/2026",
+                "interest": "1,000",
+                "avgDailyShareVolume": "400",
+                "daysToCover": "2.5"
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "expected": {
+    "trades_congress.json": {
+      "source": "Financial Modeling Prep (FMP)",
+      "endpoints": [
+        "https://financialmodelingprep.com/stable/senate-latest",
+        "https://financialmodelingprep.com/stable/house-latest"
+      ],
+      "fetched_at": "2026-10-07T00:00:00+00:00",
+      "total_trades": 2,
+      "trades": [
+        {
+          "politician_name": "Synthetic Member",
+          "chamber": "Senate",
+          "ticker": "ZZAA",
+          "asset_description": "Synthetic Alpha",
+          "asset_type": "Stock",
+          "trade_type": "Purchase",
+          "amount_range": "$1,001 - $15,000",
+          "transaction_date": "2026-09-01",
+          "disclosure_date": "2026-09-10",
+          "days_to_disclose": 9,
+          "district": "",
+          "source_link": "https://disclosures.example.invalid/1",
+          "fetched_at": "2026-10-07T00:00:00+00:00"
+        },
+        {
+          "politician_name": "Synthetic Other",
+          "chamber": "House",
+          "ticker": "ZZBB",
+          "asset_description": "Synthetic Beta",
+          "asset_type": "Stock",
+          "trade_type": "Purchase",
+          "amount_range": "$15,001 - $50,000",
+          "transaction_date": "2026-09-02",
+          "disclosure_date": "2026-09-12",
+          "days_to_disclose": 10,
+          "district": "",
+          "source_link": "https://disclosures.example.invalid/2",
+          "fetched_at": "2026-10-07T00:00:00+00:00"
+        }
+      ]
+    },
+    "short_interest.json": {
+      "schema_version": "1.0",
+      "source": "nasdaq",
+      "fetched_at": "2026-10-07T00:00:00+00:00",
+      "total_records": 1,
+      "note": "Short interest is an attention/risk signal for consensus.py. High days_to_cover can mean bearish sentiment OR squeeze potential.",
+      "records": [
+        {
+          "ticker": "ZZAA",
+          "short_interest": null,
+          "avg_daily_volume": 500,
+          "days_to_cover": 2.0,
+          "settlement_date": "2026-09-15",
+          "history": [
+            {
+              "settlement_date": "2026-09-15",
+              "short_interest": null,
+              "avg_daily_volume": 500,
+              "days_to_cover": 2.0
+            },
+            {
+              "settlement_date": "2026-08-31",
+              "short_interest": 1000,
+              "avg_daily_volume": 400,
+              "days_to_cover": 2.5
+            }
+          ],
+          "data_source": "nasdaq",
+          "fetched_at": "2026-10-07T00:00:00+00:00"
+        }
+      ],
+      "errors": []
+    },
+    "congress_signals": {
+      "ZZAA": {
+        "buy_count": 1,
+        "distinct_buyer_count": 1,
+        "most_recent_transaction_date": "2026-09-01",
+        "most_recent_disclosure_date": "2026-09-10",
+        "amount_range": "$1,001 - $15,000"
+      },
+      "ZZBB": {
+        "buy_count": 1,
+        "distinct_buyer_count": 1,
+        "most_recent_transaction_date": "2026-09-02",
+        "most_recent_disclosure_date": "2026-09-12",
+        "amount_range": "$15,001 - $50,000"
+      }
+    }
+  },
+  "database": {
+    "source": "congress_trades",
+    "hash_version": "v2",
+    "content_hash": "f853d51c0bb7dbfb061deec842bdcb1d4ed0e9707a90b9091fb831259c5692b6",
+    "records": [
+      {
+        "amount_label": "$1,001 - $15,000",
+        "asset_description": "Synthetic Alpha",
+        "asset_type": "Stock",
+        "chamber": "Senate",
+        "currency": null,
+        "data_source": "fmp",
+        "disclosure_date": "2026-09-10",
+        "district": null,
+        "exchange": null,
+        "politician_name": "Synthetic Member",
+        "provider_record_id": null,
+        "source_link": "https://disclosures.example.invalid/1",
+        "ticker": "ZZAA",
+        "trade_type": "Purchase",
+        "transaction_date": "2026-09-01"
+      },
+      {
+        "amount_label": "$1,001 - $15,000",
+        "asset_description": "Synthetic Alpha",
+        "asset_type": "Stock",
+        "chamber": "Senate",
+        "currency": null,
+        "data_source": "senate_watcher",
+        "disclosure_date": null,
+        "district": null,
+        "exchange": null,
+        "politician_name": "Synthetic Member",
+        "provider_record_id": null,
+        "source_link": "https://disclosures.example.invalid/1",
+        "ticker": "ZZAA",
+        "trade_type": "Purchase",
+        "transaction_date": "2026-09-01"
+      },
+      {
+        "amount_label": "$15,001 - $50,000",
+        "asset_description": "Synthetic Beta",
+        "asset_type": "Stock",
+        "chamber": "House",
+        "currency": null,
+        "data_source": "fmp",
+        "disclosure_date": "2026-09-12",
+        "district": null,
+        "exchange": null,
+        "politician_name": "Synthetic Other",
+        "provider_record_id": null,
+        "source_link": "https://disclosures.example.invalid/2",
+        "ticker": "ZZBB",
+        "trade_type": "Purchase",
+        "transaction_date": "2026-09-02"
+      }
+    ],
+    "rows": [
+      {
+        "politician_name": "Synthetic Member",
+        "chamber": "Senate",
+        "trade_type": "Purchase",
+        "transaction_date": "2026-09-01",
+        "disclosure_date": "2026-09-10",
+        "amount_label": "$1,001 - $15,000",
+        "asset_description": "Synthetic Alpha",
+        "asset_type": "Stock",
+        "district": null,
+        "source_link": "https://disclosures.example.invalid/1",
+        "data_source": "fmp",
+        "symbol": "ZZAA",
+        "row_number": 1
+      },
+      {
+        "politician_name": "Synthetic Member",
+        "chamber": "Senate",
+        "trade_type": "Purchase",
+        "transaction_date": "2026-09-01",
+        "disclosure_date": null,
+        "amount_label": "$1,001 - $15,000",
+        "asset_description": "Synthetic Alpha",
+        "asset_type": "Stock",
+        "district": null,
+        "source_link": "https://disclosures.example.invalid/1",
+        "data_source": "senate_watcher",
+        "symbol": "ZZAA",
+        "row_number": 2
+      },
+      {
+        "politician_name": "Synthetic Other",
+        "chamber": "House",
+        "trade_type": "Purchase",
+        "transaction_date": "2026-09-02",
+        "disclosure_date": "2026-09-12",
+        "amount_label": "$15,001 - $50,000",
+        "asset_description": "Synthetic Beta",
+        "asset_type": "Stock",
+        "district": null,
+        "source_link": "https://disclosures.example.invalid/2",
+        "data_source": "fmp",
+        "symbol": "ZZBB",
+        "row_number": 3
+      }
+    ]
+  }
+}

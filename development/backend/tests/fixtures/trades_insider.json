@@ -1,0 +1,46 @@
+{
+  "source": "SecuritiesDB (SEC Form 4)",
+  "fetched_at": "2026-09-30T13:05:00+00:00",
+  "lookback_days": 180,
+  "min_buy_value": 10000,
+  "total_buys": 3,
+  "tickers_with_buys": 2,
+  "note": "insider.py is a SCORER not a gate.",
+  "popular_stable": {"count": 1, "tickers": []},
+  "affordable_growing": {"count": 1, "tickers": []},
+  "transactions": [
+    {
+      "ticker": "ZZAA",
+      "insider_name": "Synthetic Insider A",
+      "transaction_type": "Purchase",
+      "value": 25000.1,
+      "shares": 1000,
+      "transaction_date": "2026-09-01",
+      "bucket": "popular_stable",
+      "data_source": "securitiesdb",
+      "fetched_at": "2026-09-30T13:05:01+00:00"
+    },
+    {
+      "ticker": "ZZAA",
+      "insider_name": "Synthetic Insider A",
+      "transaction_type": "Purchase",
+      "value": 25000.1,
+      "shares": 1000,
+      "transaction_date": "2026-09-01",
+      "bucket": "popular_stable",
+      "data_source": "securitiesdb",
+      "fetched_at": "2026-09-30T13:05:02+00:00"
+    },
+    {
+      "ticker": "ZZEE",
+      "insider_name": "Synthetic Insider B",
+      "transaction_type": "Purchase",
+      "value": 1500000,
+      "shares": 200000.5,
+      "transaction_date": "2026-08-20",
+      "bucket": "affordable_growing",
+      "data_source": "securitiesdb",
+      "fetched_at": "2026-09-30T13:05:03+00:00"
+    }
+  ]
+}

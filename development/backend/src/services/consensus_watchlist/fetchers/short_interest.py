@@ -33,9 +33,12 @@ OUTPUT:
 
 import json
 import logging
+import math
+import re
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Any
 import requests
@@ -153,8 +156,59 @@ def get_candidate_tickers() -> List[str]:
 # PARSE — Convert Nasdaq strings to numbers
 # ─────────────────────────────────────────────────────────
 
+NULL_NUMBER_MARKERS = frozenset({"", "N/A", "--", "-"})
+_NUMBER_TEXT = re.compile(r"^(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?$")
+
+
+def _number(value: Any) -> Optional[Decimal]:
+    """Nasdaq null markers are unknown; malformed, negative and nonfinite values fail.
+
+    Grouping commas must be in thousands, so '1,2,3' cannot silently become 123.
+    Error messages deliberately exclude the provider's input value.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+        raise ValueError("unsupported short-interest number")
+    if isinstance(value, str):
+        value = value.strip()
+        if value.upper() in NULL_NUMBER_MARKERS:
+            return None
+        if len(value) > 64 or not _NUMBER_TEXT.fullmatch(value):
+            raise ValueError("malformed short-interest number")
+        value = value.replace(",", "")
+    try:
+        result = Decimal(str(value))
+    except InvalidOperation:
+        raise ValueError("malformed short-interest number") from None
+    if not result.is_finite() or result < 0 or result > 2**63 - 1:
+        raise ValueError("short-interest number out of range")
+    return result
+
+
+def _to_int_strict(value: Any) -> Optional[int]:
+    """Parse a nonnegative whole share count, retaining only explicit nulls."""
+    result = _number(value)
+    if result is None:
+        return None
+    if result != result.to_integral_value():
+        raise ValueError("share count must be a whole number")
+    return int(result)
+
+
+def _to_float_strict(value: Any) -> Optional[float]:
+    """Parse days to cover, retaining only explicit nulls."""
+    result = _number(value)
+    if result is None:
+        return None
+    number = float(result)
+    if not math.isfinite(number) or number >= 100_000_000:
+        raise ValueError("days to cover out of range")
+    return number
+
+
 def _to_int(value: Any) -> Optional[int]:
-    """Converts '292,667,375' → 292667375. Returns None if invalid."""
+    """Legacy fab7188 conversion: malformed values mean unknown, not a dropped ticker."""
     if value is None:
         return None
     try:
@@ -164,7 +218,7 @@ def _to_int(value: Any) -> Optional[int]:
 
 
 def _to_float(value: Any) -> Optional[float]:
-    """Converts a days-to-cover value to float. Returns None if invalid."""
+    """Legacy fab7188 conversion; database adapters use _to_float_strict only."""
     if value is None:
         return None
     try:
@@ -183,7 +237,7 @@ def _normalize_date(date_str: str) -> str:
         return date_str.strip()
 
 
-def parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
+def parse_short_interest_strict(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
     """
     Parses Nasdaq short interest response into canonical schema.
     Takes the MOST RECENT settlement row (rows[0]) as current value,
@@ -206,24 +260,65 @@ def parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
         for r in rows:
             history.append({
                 "settlement_date":       _normalize_date(r.get("settlementDate", "")),
-                "short_interest":        _to_int(r.get("interest")),
-                "avg_daily_volume":      _to_int(r.get("avgDailyShareVolume")),
-                "days_to_cover":         _to_float(r.get("daysToCover")),
+                "short_interest_shares": _to_int_strict(r.get("interest")),
+                "average_daily_volume":  _to_int_strict(r.get("avgDailyShareVolume")),
+                # Legacy JSON consumers retain these aliases; normalized models
+                # archive the canonical names above, including in history.
+                "short_interest":        _to_int_strict(r.get("interest")),
+                "avg_daily_volume":      _to_int_strict(r.get("avgDailyShareVolume")),
+                "days_to_cover":         _to_float_strict(r.get("daysToCover")),
             })
 
         return {
             "ticker":            ticker,
-            "short_interest":    _to_int(latest.get("interest")),
-            "avg_daily_volume":  _to_int(latest.get("avgDailyShareVolume")),
-            "days_to_cover":     _to_float(latest.get("daysToCover")),
+            "short_interest_shares": _to_int_strict(latest.get("interest")),
+            "average_daily_volume": _to_int_strict(latest.get("avgDailyShareVolume")),
+            "short_interest":    _to_int_strict(latest.get("interest")),
+            "avg_daily_volume":  _to_int_strict(latest.get("avgDailyShareVolume")),
+            "days_to_cover":     _to_float_strict(latest.get("daysToCover")),
             "settlement_date":   _normalize_date(latest.get("settlementDate", "")),
             "history":           history,
             "data_source":       "nasdaq",
             "fetched_at":        datetime.now(timezone.utc).isoformat(),
         }
 
-    except Exception as e:
-        logger.warning(f"Parse error for {ticker}: {e}")
+    except (ValueError, TypeError, AttributeError, KeyError):
+        logger.warning("Short-interest payload could not be parsed")
+        return None
+
+
+def parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
+    """Lenient legacy file parser: fab7188 fields and null-on-malformed numbers.
+
+    The database collector calls parse_short_interest_strict explicitly, so
+    malformed values in this compatibility path cannot certify a DB snapshot.
+    """
+    try:
+        table = raw.get("data", {}).get("shortInterestTable")
+        if not table:
+            return None
+        rows = table.get("rows", [])
+        if not rows:
+            return None
+        latest = rows[0]
+        history = [{
+            "settlement_date": _normalize_date(r.get("settlementDate", "")),
+            "short_interest": _to_int(r.get("interest")),
+            "avg_daily_volume": _to_int(r.get("avgDailyShareVolume")),
+            "days_to_cover": _to_float(r.get("daysToCover")),
+        } for r in rows]
+        return {
+            "ticker": ticker,
+            "short_interest": _to_int(latest.get("interest")),
+            "avg_daily_volume": _to_int(latest.get("avgDailyShareVolume")),
+            "days_to_cover": _to_float(latest.get("daysToCover")),
+            "settlement_date": _normalize_date(latest.get("settlementDate", "")),
+            "history": history,
+            "data_source": "nasdaq",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception:
+        logger.warning("Legacy short-interest payload could not be parsed")
         return None
 
 

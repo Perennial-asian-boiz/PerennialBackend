@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "source": "nasdaq",
+  "fetched_at": "2026-09-30T13:10:00+00:00",
+  "total_records": 2,
+  "note": "Short interest is an attention/risk signal for consensus.py.",
+  "records": [
+    {
+      "ticker": "ZZAA",
+      "short_interest": 2926673,
+      "avg_daily_volume": 1500000,
+      "days_to_cover": 1.95,
+      "settlement_date": "2026-09-15",
+      "history": [
+        {"settlement_date": "2026-09-15", "short_interest": 2926673, "avg_daily_volume": 1500000, "days_to_cover": 1.95},
+        {"settlement_date": "2026-08-29", "short_interest": 2800000, "avg_daily_volume": 1400000, "days_to_cover": 2.0}
+      ],
+      "data_source": "nasdaq",
+      "fetched_at": "2026-09-30T13:10:01+00:00"
+    },
+    {
+      "ticker": "ZZDD",
+      "short_interest": 10000,
+      "avg_daily_volume": null,
+      "days_to_cover": null,
+      "settlement_date": "2026-09-15",
+      "history": [
+        {"settlement_date": "2026-09-15", "short_interest": 10000, "avg_daily_volume": null, "days_to_cover": null}
+      ],
+      "data_source": "nasdaq",
+      "fetched_at": "2026-09-30T13:10:02+00:00"
+    }
+  ],
+  "errors": []
+}

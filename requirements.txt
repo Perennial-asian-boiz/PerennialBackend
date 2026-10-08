@@ -11,3 +11,12 @@ python-dotenv==1.2.2
 
 # Pipeline scheduling — scheduler/cron.py
 apscheduler>=3.10,<4
+
+# Database — development/database (migrations) and development/backend/src/db, src/ingestion
+SQLAlchemy==2.0.54
+psycopg[binary]==3.3.6
+alembic==1.20.0
+pydantic==2.13.5
+
+# Tests — development/backend/tests
+pytest==8.4.2
