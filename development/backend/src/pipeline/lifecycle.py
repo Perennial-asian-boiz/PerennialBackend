@@ -1,7 +1,9 @@
 """Durable collection lifecycle; no transaction is held during provider I/O."""
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
+from time import monotonic
 
 from sqlalchemy import insert, select, update, text
 
@@ -26,10 +28,20 @@ def begin_run(engine, source, mode="live", *, dependencies=None):
     return run_id
 
 
+class RunIdentityError(RuntimeError):
+    """The caller supplied a missing run or the wrong source/mode."""
+
+
+class RunInactive(RuntimeError):
+    """The matching run has already reached a final durable state."""
+
+
 def require_active(conn, run_id, source, mode):
     run = conn.execute(select(ingestion_runs).where(ingestion_runs.c.id == run_id).with_for_update()).mappings().one_or_none()
-    if not run or run["status"] != "running" or run["source"] != source or run["collection_mode"] != mode:
-        raise RuntimeError("run is not active for this source and mode")
+    if not run or run["source"] != source or run["collection_mode"] != mode:
+        raise RunIdentityError("run identity does not match this source and mode")
+    if run["status"] != "running":
+        raise RunInactive("run is no longer active")
     return run
 
 
@@ -48,21 +60,38 @@ def abandon_stale_runs(engine, max_idle=timedelta(minutes=10)):
             error_code="worker_abandoned", error_summary="Worker heartbeat expired.", accepted_count=0)).rowcount
 
 
+@dataclass
+class HeartbeatLease:
+    lost: bool = False
+
+
 @contextmanager
-def heartbeat_worker(engine, run_id, interval=15):
+def heartbeat_worker(engine, run_id, interval=15, *, max_backoff=60,
+                     wait=None, clock=monotonic):
+    if interval <= 0 or max_backoff < interval:
+        raise ValueError("heartbeat intervals must be positive and backoff at least the interval")
     stop = Event()
+    lease = HeartbeatLease()
+    wait = stop.wait if wait is None else lambda delay, injected=wait: injected(stop, delay)
     def beat():
-        while not stop.wait(interval):
+        retry_delay = interval
+        due = clock() + interval
+        while not wait(max(0, due - clock())):
             try:
                 if not heartbeat(engine, run_id):
+                    lease.lost = True
                     return
             except Exception:
-                # The durable lease expires when database connectivity is lost.
-                return
+                # Connectivity failure does not prove the guarded lease is gone.
+                due = clock() + retry_delay
+                retry_delay = min(max_backoff, retry_delay * 2)
+            else:
+                due = clock() + interval
+                retry_delay = interval
     worker = Thread(target=beat, daemon=True)
     worker.start()
     try:
-        yield
+        yield lease
     finally:
         stop.set()
         worker.join(timeout=2)

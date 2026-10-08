@@ -11,7 +11,7 @@ being ported branch by branch onto a trunk that is settled first.
 | Landed | Component | From |
 |---|---|---|
 | ✅ | Consensus watchlist pipeline (Phase B) | `hong-working` |
-| ⬜ | Postgres schema, Alembic migrations, ADRs | `bryan-working` |
+| ✅ | PostgreSQL snapshots, migrations, publication pipeline and tests (deployment pending) | `database-ingestion-pipeline` |
 | ⬜ | YouTube / web-search ingestion | `cohen-working` |
 | ⬜ | Cloudflare worker | `cohen-cloudflare` |
 
@@ -25,10 +25,11 @@ development/
       paths.py            # repo-root, .env and data-dir resolution
       consensus.py        # aggregates + ranks the four signals
       fetchers/           # fmp, ark, insider, short_interest
-      scheduler/cron.py   # pipeline entry point (--test runs everything now)
+      scheduler/cron.py   # legacy JSON pipeline (--test makes live calls)
   database/local_data/    # fetcher JSON output, gitignored
   database/               # PostgreSQL Compose, Alembic migrations — see database/README.md
   backend/src/db/, backend/src/ingestion/  # schema, importer, live collectors, CLI
+  backend/src/pipeline/   # database orchestration, replay, health, production scheduler
 requirements.txt
 ```
 
@@ -41,7 +42,11 @@ python3 development/backend/src/services/consensus_watchlist/scheduler/cron.py -
 ```
 
 See [`consensus_watchlist/README.md`](development/backend/src/services/consensus_watchlist/README.md)
-for data sources, bucket rules, and per-stage commands.
+for legacy JSON commands. For the database workflow, follow
+[`database/README.md`](development/database/README.md) to migrate PostgreSQL,
+then run `python -m src.ingestion.cli run-pipeline` from `development/backend`.
+It publishes a verified watchlist without source JSON files. Read the
+[operations runbook](docs/technical-specs/OPERATIONS.md) before deployment.
 
 ## Conventions for the branches still to land
 

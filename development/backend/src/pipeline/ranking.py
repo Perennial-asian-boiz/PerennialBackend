@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-VERSION = "watchlist-v1"
+VERSION = "watchlist-v2"
 DEFAULT_CONFIG = {"market_cap_threshold": "10000000000"}
 
 
@@ -30,13 +30,34 @@ def json_ready(value):
     return json.loads(json.dumps(value, default=encode, allow_nan=False))
 
 
+def _cross_provider_purchases(rows):
+    """Keep the largest provider group per trade key; raw snapshots are untouched."""
+    groups = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        if "purchase" not in row["trade_type"].lower():
+            continue
+        key = (row["politician_name"].strip().casefold(), row["symbol"],
+               row["transaction_date"], row["trade_type"].strip().casefold())
+        groups[key][row.get("data_source")].append(row)
+    kept = []
+    for providers in groups.values():
+        # NULL is its own provider. Canonical row_number breaks equal-size ties.
+        chosen = min(providers.values(),
+                     key=lambda group: (-len(group), min(r["row_number"] for r in group)))
+        kept.extend(chosen)
+    return kept
+
+
 def calculate(rows, market_caps, generated_at, config=None, *, version=VERSION):
-    if version != VERSION:
+    if version not in ("watchlist-v1", "watchlist-v2"):
         raise ValueError("unsupported ranking version")
     config = dict(DEFAULT_CONFIG if config is None else config)
     threshold = Decimal(config["market_cap_threshold"])
     congress, insiders = defaultdict(list), defaultdict(list)
-    for row in rows["congress_trades"]:
+    congress_rows = rows["congress_trades"]
+    if version == "watchlist-v2":
+        congress_rows = _cross_provider_purchases(congress_rows)
+    for row in congress_rows:
         if "purchase" in row["trade_type"].lower():
             congress[row["symbol"]].append(row)
     for row in rows["insider_trades"]:

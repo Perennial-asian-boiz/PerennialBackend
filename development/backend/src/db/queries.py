@@ -1,8 +1,8 @@
 """
-Read helpers. "Current" data for a source is the batch referenced by its most
-recent successful ingestion run, even when that run reused an older batch.
-Rows are never aggregated across batches, and failed runs are ignored, so a
-failed import leaves the previous good snapshot as current.
+Operational read helpers. Latest data for a source is the batch referenced by
+its most recent successful ingestion run, including fixture and file modes.
+Production reads instead use the current_publication pointer and pinned batches.
+Rows are never aggregated across snapshots.
 """
 
 from typing import Any, Dict, List, Optional

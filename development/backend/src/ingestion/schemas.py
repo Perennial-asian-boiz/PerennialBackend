@@ -310,6 +310,9 @@ class CongressTrade(SourceRecord):
     district: _text(20) = None
     source_link: OptionalLink = None
     data_source: _text(32) = None
+    # Provider transaction identity is retained in the archived batch payload;
+    # it is not a filing identity and does not require a source-table column.
+    provider_record_id: _text(200) = None
 
 
 class ArkHolding(SourceRecord):
@@ -366,12 +369,19 @@ class InsiderTrade(SourceRecord):
 class ShortInterestHistory(BaseModel):
     """One settlement row of returned history. Stored in the batch payload only."""
 
-    model_config = ConfigDict(extra="ignore", frozen=True)
+    model_config = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
 
     settlement_date: OptionalDate = None
-    short_interest: OptionalInt = None
-    avg_daily_volume: OptionalInt = None
-    days_to_cover: OptionalDecimal = None
+    short_interest_shares: OptionalInt = Field(default=None, alias="short_interest")
+    average_daily_volume: OptionalInt = Field(default=None, alias="avg_daily_volume")
+    days_to_cover: _decimal(4, 12) = None
+
+    @field_validator("short_interest_shares", "average_daily_volume")
+    @classmethod
+    def _non_negative(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("value must not be negative")
+        return v
 
 
 class ShortInterestRecord(SourceRecord):

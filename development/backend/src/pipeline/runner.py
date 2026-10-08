@@ -10,6 +10,7 @@ from sqlalchemy import select
 from src.db import models as m
 from src.db.queries import batch_rows, latest_successful_run
 from src.ingestion.importer import CollectionOutcome, import_collection
+from src.ingestion.diagnostics import exception_diagnostics
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock, abandon_stale_runs
 from src.pipeline.publication import publish, PublicationError
 from src.pipeline.ranking import candidate_symbols
@@ -54,9 +55,12 @@ def collect_source(engine, source, *, upstream_batches=None, collector=None):
                     outcome = collector(upstream=upstream) if downstream else collector()
                     if not isinstance(outcome, CollectionOutcome) or outcome.source != source or outcome.mode != "live":
                         raise ValueError("collector returned mismatched outcome")
-                except Exception:
-                    # Provider exception strings may contain credentials or response data.
-                    outcome = CollectionOutcome.failure(source, "live", "collection_failed")
+                except Exception as exc:
+                    # Known transport failures differ from bugs in the collector contract.
+                    # The importer allowlists class names and never stores messages.
+                    code = "collection_failed" if isinstance(exc, requests.RequestException) else "internal_error"
+                    outcome = CollectionOutcome.failure(source, "live", code,
+                        diagnostics=exception_diagnostics(exc))
             result = import_collection(engine, outcome, run_id=run_id)
         logger.info("collection source=%s run_id=%s status=%s code=%s", source, run_id, result.status, result.error_code)
         return result
@@ -74,10 +78,14 @@ def collect_market_caps(symbols, *, session=None, api_key=None, max_seconds=300)
     observations = {}
     try:
         for symbol in symbols:
-            if time.monotonic() >= deadline:
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
                 raise PublicationError("market-cap collection deadline exceeded")
             response = _get_json(session, "https://financialmodelingprep.com/stable/profile",
-                params={"symbol": symbol, "apikey": key}, timeout=min(10, max(0.1, deadline-time.monotonic())))
+                params={"symbol": symbol, "apikey": key}, timeout=min(10, remaining),
+                deadline_seconds=remaining)
+            if time.monotonic() >= deadline:
+                raise PublicationError("market-cap collection deadline exceeded")
             if not response.ok:
                 raise PublicationError("market-cap collection failed")
             payload = response.data

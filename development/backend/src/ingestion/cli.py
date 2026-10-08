@@ -6,8 +6,9 @@ Command line for imports and inspection. Run from development/backend:
     python -m src.ingestion.cli fetch ark_holdings
     python -m src.ingestion.cli latest ark_holdings --limit 5
 
-Exit codes: 0 succeeded, 1 import recorded as failed, 2 configuration or
-database connection problem (nothing recorded). Output never includes the
+Exit codes: 0 succeeded, 1 import recorded as failed or unhealthy report,
+2 command/configuration/database failure. Earlier pipeline stages may already
+have recorded runs when a later stage fails. Output never includes the
 database URL, request URLs or exception messages.
 """
 

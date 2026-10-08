@@ -45,6 +45,11 @@ LOOPBACK = {"127.0.0.1": "127.0.0.1", "localhost": "127.0.0.1", "::1": "::1"}
 ALLOWED_QUERY_KEYS = {"sslmode"}
 
 
+def pytest_configure(config):
+    if os.environ.get("REQUIRE_DATABASE_TESTS") == "1" and not os.environ.get("TEST_DATABASE_URL"):
+        raise pytest.UsageError("REQUIRE_DATABASE_TESTS=1 requires TEST_DATABASE_URL")
+
+
 def check_test_server_url(url) -> None:
     """Raise ValueError unless the URL can only reach a loopback *test* database."""
     if url.host not in LOOPBACK or "test" not in (url.database or ""):

@@ -61,7 +61,7 @@ from src.ingestion.diagnostics import (
 )
 from src.ingestion.schemas import ONE_ROW_PER_SECURITY, RECORD_MODELS, SourceRecord
 
-from src.pipeline.lifecycle import begin_run, require_active
+from src.pipeline.lifecycle import begin_run, require_active, RunInactive, RunIdentityError
 
 
 def safe_coverage(value):
@@ -277,6 +277,13 @@ def _write_batch(conn: Connection, batch: CanonicalBatch, source_as_of: Optional
     return batch_id, False
 
 
+def _inactive_result(outcome, run_id):
+    """Leave a finalized run untouched when its collection loses the lease."""
+    return ImportResult(source=outcome.source, status="failed", run_id=run_id,
+                        accepted_count=0, error_code="worker_abandoned",
+                        error_summary="Worker heartbeat expired.")
+
+
 def _record_failed_run(
     engine: Engine,
     outcome: CollectionOutcome,
@@ -290,7 +297,10 @@ def _record_failed_run(
     diag = safe_diagnostics(diagnostics)
     summary = render_summary(code, diag)[:ERROR_SUMMARY_MAX]
     with engine.begin() as conn:
-        require_active(conn, run_id, outcome.source, outcome.mode)
+        try:
+            require_active(conn, run_id, outcome.source, outcome.mode)
+        except RunInactive:
+            return _inactive_result(outcome, run_id)
         conn.execute(
             update(ingestion_runs).where(ingestion_runs.c.id == run_id)
             .values(
@@ -353,7 +363,10 @@ def import_collection(engine: Engine, outcome: CollectionOutcome, *, run_id: Opt
     if run_id is None:
         run_id = begin_run(engine, outcome.source, outcome.mode)
     with engine.begin() as conn:
-        active = require_active(conn, run_id, outcome.source, outcome.mode)
+        try:
+            active = require_active(conn, run_id, outcome.source, outcome.mode)
+        except RunInactive:
+            return _inactive_result(outcome, run_id)
         started_at = active["started_at"]
     collected_at = _now()
 
@@ -407,6 +420,10 @@ def import_collection(engine: Engine, outcome: CollectionOutcome, *, run_id: Opt
                 reused_batch=reused, content_hash=batch.content_hash, input_count=input_count,
                 accepted_count=len(batch.records),
             )
+        except RunInactive:
+            return _inactive_result(outcome, run_id)
+        except RunIdentityError:
+            raise
         except ImportFailure as failure:
             code, diag = failure.code, failure.diagnostics
         except DBAPIError as exc:

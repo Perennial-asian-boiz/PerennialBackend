@@ -4,7 +4,8 @@ Canonical batch identity.
 HASH_VERSION names the rule below; change it whenever the rule changes so
 old and new hashes are never compared as if they meant the same thing.
 
-Rule "v1":
+Rule "v2" (v1 serialization plus canonical short-interest history field names,
+quantized history ratios and retained Congress provider transaction identity):
   * Hash only validated business fields (SourceRecord.canonical()): no
     `fetched_at`, no top-level totals/notes/endpoints, no unknown keys.
   * Each record is serialized as JSON with sorted keys, compact separators,
@@ -33,7 +34,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from src.ingestion.envelope import sanitize_envelope
 from src.ingestion.schemas import SourceRecord
 
-HASH_VERSION = "v1"
+HASH_VERSION = "v2"
 
 
 def _dumps(value: Any) -> str:

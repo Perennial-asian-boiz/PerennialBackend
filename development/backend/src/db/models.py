@@ -5,9 +5,9 @@ These mirror development/database/migrations; a test asserts that the
 migrated database and this metadata do not drift apart.
 
 Batches are immutable snapshots of one source's fetcher output. Source rows
-belong to exactly one batch. Consumers read the batch referenced by the
-latest *successful* ingestion run per source (see src/db/queries.py) and never
-aggregate rows across batches.
+belong to exactly one batch. Operational queries can read the latest successful ingestion run per source.
+Production readers use current_publication and its pinned source batches.
+Neither read path aggregates rows across snapshots.
 """
 
 from sqlalchemy import (
@@ -301,3 +301,12 @@ current_publication = Table(
     Column("publication_id", BigInteger, ForeignKey(f"{SCHEMA}.publications.id"), nullable=False),
     Column("promoted_at", DateTime(timezone=True), nullable=False),
 )
+
+# Supporting indexes for referencing FKs and per-source health lookups.
+Index("ix_publication_sources_run_batch_source", publication_sources.c.run_id,
+      publication_sources.c.batch_id, publication_sources.c.source)
+Index("ix_run_dependencies_batch_source", run_dependencies.c.batch_id, run_dependencies.c.source)
+Index("ix_publication_market_caps_observation_security", publication_market_caps.c.observation_id,
+      publication_market_caps.c.security_id)
+Index("ix_ingestion_runs_source_started", ingestion_runs.c.source,
+      ingestion_runs.c.started_at.desc(), ingestion_runs.c.id.desc())

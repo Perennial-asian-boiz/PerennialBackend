@@ -34,6 +34,7 @@ MAX_ENTRIES = 20
 MAX_BYTES = 8192  # half the column CHECK; jsonb::text renders larger than json.dumps
 
 ERROR_SUMMARIES = {
+    "worker_abandoned": "Worker heartbeat expired.",
     "collection_failed": "collection did not complete",
     "partial_collection": "collection was incomplete; some units failed",
     "missing_credential": "a required provider credential is not configured",
@@ -49,7 +50,7 @@ ERROR_SUMMARIES = {
     "validation_failed": "one or more records failed validation",
     "validation_error": "input could not be validated",
     "security_conflict": "a ticker conflicts with an existing or in-batch security mapping",
-    "missing_upstream": "upstream fetcher files are missing or unreadable",
+    "missing_upstream": "upstream rows or fetcher files are missing or malformed",
     "plan_too_large": "too many tickers planned; collection refused rather than truncated",
     "database_error": "database write failed",
     "internal_error": "unexpected error; nothing was written",
@@ -58,7 +59,7 @@ ERROR_SUMMARIES = {
 UNIT_KINDS = frozenset({
     "ARK funds", "Congress requests", "insider tickers", "short-interest tickers", "upstream files",
 })
-_COUNT_KEYS = ("input_count", "error_count", "attempted", "completed", "failed")
+_COUNT_KEYS = ("input_count", "error_count", "planned", "attempted", "completed", "failed", "not_attempted")
 
 _OWN_ERROR_TYPES = {"not_an_object", "duplicate_security", "conflicting_exchange"}
 VALIDATION_ERROR_TYPES = frozenset(typing.get_args(core_schema.ErrorType)) | _OWN_ERROR_TYPES
@@ -67,6 +68,7 @@ FAILURE_CODES = frozenset({
     "timeout", "invalid_json", "response_too_large", "empty_or_malformed_holdings",
     "malformed_holding", "malformed_response", "exchange_conflict", "currency_conflict",
     "parse_error", "missing_file", "unreadable_file", "malformed_file", "file_too_large",
+    "pagination_exhausted", "deadline_exceeded",
 })
 _REQUEST_ERRORS = frozenset(
     name for name, obj in vars(requests.exceptions).items()

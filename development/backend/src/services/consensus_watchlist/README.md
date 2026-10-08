@@ -4,7 +4,13 @@ Aggregates Congressional stock trades, ARK ETF holdings, corporate insider
 transactions, and short interest into two beginner-friendly candidate lists:
 `popular_stable` and `affordable_growing`.
 
-Five modules, run in order. Each fetcher writes one JSON file; `consensus.py`
+This page describes the retained legacy JSON workflow. The database production
+workflow has a separate scheduler (`python -m src.pipeline.scheduler` from
+`development/backend`), publication/replay and health commands. See
+[database setup](../../../../database/README.md) before switching consumers.
+The database scheduler does not write the JSON output described below.
+
+Five legacy modules, run in order. Each fetcher writes one JSON file; `consensus.py`
 reads all four back and ranks them.
 
 ---
@@ -67,6 +73,28 @@ directory name — both broke when this code moved out of `project-perennial`.
 
 Ranking is deterministic: same inputs, same order, every run.
 
+The legacy JSON path keeps the `fab7188` Congress dedup key:
+`(politician_name.lower(), ticker, transaction_date, trade_type.lower())`,
+keeping the first row. `fmp.deduplicate` serves that legacy writer; the database
+collector uses `deduplicate_proven_repeats`, which retains cross-provider
+observations and unidentified repeated rows. The legacy short-interest parser
+keeps a ticker when a number is malformed and sets that field to null. The
+database collector uses `parse_short_interest_strict` and fails the collection
+on malformed numbers.
+
+**Intentional output change:** `consensus.py` now reads the short-interest
+field aliases correctly. These signals were always null at `fab7188`; valid
+short-interest values now populate the JSON watchlist.
+
+Database rankings use `watchlist-v2`. Before counting Congress purchases, they
+group by `(politician_name.strip().casefold(), symbol, transaction_date,
+trade_type.strip().casefold())`, keeping the provider group with the most rows.
+A null `data_source` is its own provider; ties use the provider whose lowest
+canonical `row_number` comes first. A cross-provider pair counts once, while two
+rows from one provider count twice. Signal dates and amounts come from those
+kept rows. Raw database snapshots retain every observation, and historical
+`watchlist-v1` publications replay with their original counting rules.
+
 ---
 
 ## Setup
@@ -106,10 +134,9 @@ Order matters — `insider.py` reads `trades_congress.json` and
 
 ## Known Limitations
 
-- **No tests yet in this repo.** A 319-line `test_consensus.py` exists on
-  `aalind-working` in the old repo and should port over roughly as-is. The
-  companion `test_short_interest.py` was written against the FINRA response
-  shape and needs rewriting before it means anything.
+- **Legacy failure behavior.** This JSON scheduler may continue after a stage
+  fails. Use the database pipeline for fail-closed publication. Synthetic
+  collector, scheduler and PostgreSQL integration tests are in `backend/tests`.
 - **Flat imports.** `cron.py` puts `fetchers/` on `sys.path` so the modules can
   import each other by bare name, which is what keeps direct `python3 …/ark.py`
   execution working. If the backend adopts a real package layout, this and the

@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "ranking_version": "watchlist-v1",
+  "generated_at": "2026-10-07T09:00:00+00:00",
+  "popular_stable": [
+    {
+      "ticker": "ZZAA",
+      "bucket": "popular_stable",
+      "rank": 1,
+      "market_cap": 20000000000.0,
+      "signals": {
+        "congress": {
+          "buy_count": 3,
+          "distinct_buyer_count": 1,
+          "most_recent_transaction_date": "2026-10-01",
+          "most_recent_disclosure_date": "2026-10-02",
+          "amount_range": "$1,001 - $15,000"
+        },
+        "insider": null,
+        "ark": null,
+        "short_interest": null
+      },
+      "source_dates": {
+        "congress": "2026-10-02",
+        "insider": null,
+        "ark": null,
+        "short_interest": null
+      },
+      "warnings": []
+    },
+    {
+      "ticker": "ZZBB",
+      "bucket": "popular_stable",
+      "rank": 2,
+      "market_cap": 20000000000.0,
+      "signals": {
+        "congress": {
+          "buy_count": 2,
+          "distinct_buyer_count": 1,
+          "most_recent_transaction_date": "2026-10-01",
+          "most_recent_disclosure_date": "2026-10-02",
+          "amount_range": "$1,001 - $15,000"
+        },
+        "insider": null,
+        "ark": null,
+        "short_interest": null
+      },
+      "source_dates": {
+        "congress": "2026-10-02",
+        "insider": null,
+        "ark": null,
+        "short_interest": null
+      },
+      "warnings": []
+    }
+  ],
+  "affordable_growing": [],
+  "unresolved": [],
+  "errors": []
+}

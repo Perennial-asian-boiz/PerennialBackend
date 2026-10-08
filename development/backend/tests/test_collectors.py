@@ -125,7 +125,7 @@ def congress_session(fail_with=None):
 
 def test_congress_success_and_page_end():
     outcome = collectors.collect_congress(congress_session(), api_key="synthetic-key", sleep=NO_SLEEP)
-    assert outcome.succeeded and len(outcome.records) == 1  # deduplicated across chambers
+    assert outcome.succeeded and len(outcome.records) == 2  # chamber observations remain distinct
 
 
 def test_congress_exception_text_with_key_never_leaks(capsys):
@@ -143,7 +143,7 @@ def test_congress_402_truncation_is_failure():
     def limited(url, params):
         if params["page"] >= 1:
             return FakeResponse(status=402, body={})
-        return FakeResponse(body=[fmp_item()])
+        return FakeResponse(body=[fmp_item() for _ in range(20)])
 
     outcome = collectors.collect_congress(congress_session(limited), api_key="k", sleep=NO_SLEEP)
     assert outcome.error_code == "partial_collection"
@@ -219,7 +219,7 @@ def test_insider_buys_collected(upstream):
 ])
 def test_insider_malformed_payload_fails_instead_of_dropping(upstream, body):
     outcome = collectors.collect_insider(insider_session({"ZZAA": FakeResponse(body=body)}), sleep=NO_SLEEP)
-    assert outcome.error_code == "partial_collection"
+    assert outcome.error_code == "collection_failed"  # first unit failed; later successes never run
     assert outcome.diagnostics["failures"] == [{"unit": "ZZAA", "code": "malformed_response"}]
 
 
