@@ -10,6 +10,8 @@ Production readers use current_publication and its pinned source batches.
 Neither read path aggregates rows across snapshots.
 """
 
+from typing import Any, Iterable
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -53,11 +55,11 @@ metadata = MetaData(
 )
 
 
-def _in(column: str, values) -> str:
+def _in(column: str, values: Iterable[str]) -> str:
     return f"{column} IN ({', '.join(repr(v) for v in values)})"
 
 
-def _id() -> Column:
+def _id() -> Column[Any]:
     return Column("id", BigInteger, Identity(always=True), primary_key=True)
 
 
@@ -68,11 +70,23 @@ securities = Table(
     Column("symbol", String(20), nullable=False),
     Column("exchange", String(20)),
     Column("currency", String(3)),
-    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
     UniqueConstraint("symbol"),
-    CheckConstraint("symbol = upper(symbol) AND symbol ~ '^[A-Z0-9][A-Z0-9./-]*$'", name="symbol_format"),
-    CheckConstraint("exchange IS NULL OR exchange = upper(exchange)", name="exchange_upper"),
-    CheckConstraint("currency IS NULL OR currency ~ '^[A-Z]{3}$'", name="currency_format"),
+    CheckConstraint(
+        "symbol = upper(symbol) AND symbol ~ '^[A-Z0-9][A-Z0-9./-]*$'",
+        name="symbol_format",
+    ),
+    CheckConstraint(
+        "exchange IS NULL OR exchange = upper(exchange)", name="exchange_upper"
+    ),
+    CheckConstraint(
+        "currency IS NULL OR currency ~ '^[A-Z]{3}$'", name="currency_format"
+    ),
 )
 
 source_batches = Table(
@@ -82,7 +96,12 @@ source_batches = Table(
     Column("source", String(32), nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("hash_version", String(16), nullable=False),
-    Column("imported_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column(
+        "imported_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
     Column("source_as_of", Date),
     Column("record_count", Integer, nullable=False),
     Column("payload", JSONB, nullable=False),
@@ -130,8 +149,14 @@ ingestion_runs = Table(
         "(status = 'running' AND batch_id IS NULL AND error_code IS NULL AND finished_at IS NULL)",
         name="status_consistency",
     ),
-    CheckConstraint(f"char_length(error_summary) <= {ERROR_SUMMARY_MAX}", name="error_summary_length"),
-    CheckConstraint(f"octet_length(diagnostics::text) <= {DIAGNOSTICS_MAX_BYTES}", name="diagnostics_size"),
+    CheckConstraint(
+        f"char_length(error_summary) <= {ERROR_SUMMARY_MAX}",
+        name="error_summary_length",
+    ),
+    CheckConstraint(
+        f"octet_length(diagnostics::text) <= {DIAGNOSTICS_MAX_BYTES}",
+        name="diagnostics_size",
+    ),
     CheckConstraint("finished_at >= started_at", name="finished_after_started"),
     UniqueConstraint("id", "batch_id", "source"),
 )
@@ -145,7 +170,7 @@ Index(
 Index("ix_ingestion_runs_batch_id", ingestion_runs.c.batch_id)
 
 
-def _batch_fk() -> Column:
+def _batch_fk() -> Column[Any]:
     return Column(
         "batch_id",
         BigInteger,
@@ -154,8 +179,10 @@ def _batch_fk() -> Column:
     )
 
 
-def _security_fk() -> Column:
-    return Column("security_id", BigInteger, ForeignKey(f"{SCHEMA}.securities.id"), nullable=False)
+def _security_fk() -> Column[Any]:
+    return Column(
+        "security_id", BigInteger, ForeignKey(f"{SCHEMA}.securities.id"), nullable=False
+    )
 
 
 congress_trades = Table(
@@ -194,7 +221,9 @@ ark_holdings = Table(
     Column("total_weight", Numeric(20, 8), nullable=False),
     Column("share_price", Numeric(20, 6)),
     UniqueConstraint("batch_id", "security_id"),
-    CheckConstraint("fund_count >= 1 AND fund_count = cardinality(funds)", name="fund_count"),
+    CheckConstraint(
+        "fund_count >= 1 AND fund_count = cardinality(funds)", name="fund_count"
+    ),
     CheckConstraint("total_weight >= 0", name="total_weight"),
     CheckConstraint("share_price IS NULL OR share_price > 0", name="share_price"),
 )
@@ -230,9 +259,15 @@ short_interest = Table(
     Column("average_daily_volume", BigInteger),
     Column("days_to_cover", Numeric(12, 4)),
     UniqueConstraint("batch_id", "security_id"),
-    CheckConstraint("short_interest_shares IS NULL OR short_interest_shares >= 0", name="shares"),
-    CheckConstraint("average_daily_volume IS NULL OR average_daily_volume >= 0", name="volume"),
-    CheckConstraint("days_to_cover IS NULL OR days_to_cover >= 0", name="days_to_cover"),
+    CheckConstraint(
+        "short_interest_shares IS NULL OR short_interest_shares >= 0", name="shares"
+    ),
+    CheckConstraint(
+        "average_daily_volume IS NULL OR average_daily_volume >= 0", name="volume"
+    ),
+    CheckConstraint(
+        "days_to_cover IS NULL OR days_to_cover >= 0", name="days_to_cover"
+    ),
 )
 Index("ix_short_interest_security_id", short_interest.c.security_id)
 
@@ -246,16 +281,26 @@ SOURCE_TABLES = {
 # These tables make collection lineage and publication explicit. Historical
 # imports never change the single current-publication pointer by themselves.
 run_dependencies = Table(
-    "run_dependencies", metadata,
-    Column("run_id", BigInteger, ForeignKey(f"{SCHEMA}.ingestion_runs.id"), primary_key=True),
+    "run_dependencies",
+    metadata,
+    Column(
+        "run_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.ingestion_runs.id"),
+        primary_key=True,
+    ),
     Column("source", String(32), primary_key=True),
     Column("batch_id", BigInteger, nullable=False),
-    ForeignKeyConstraint(["batch_id", "source"],
-        [f"{SCHEMA}.source_batches.id", f"{SCHEMA}.source_batches.source"]),
+    ForeignKeyConstraint(
+        ["batch_id", "source"],
+        [f"{SCHEMA}.source_batches.id", f"{SCHEMA}.source_batches.source"],
+    ),
 )
 
 publications = Table(
-    "publications", metadata, _id(),
+    "publications",
+    metadata,
+    _id(),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("ranking_version", String(32), nullable=False),
     Column("ranking_config", JSONB, nullable=False),
@@ -263,17 +308,32 @@ publications = Table(
 )
 
 publication_sources = Table(
-    "publication_sources", metadata,
-    Column("publication_id", BigInteger, ForeignKey(f"{SCHEMA}.publications.id"), primary_key=True),
+    "publication_sources",
+    metadata,
+    Column(
+        "publication_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.publications.id"),
+        primary_key=True,
+    ),
     Column("source", String(32), primary_key=True),
     Column("run_id", BigInteger, nullable=False),
     Column("batch_id", BigInteger, nullable=False),
-    ForeignKeyConstraint(["run_id", "batch_id", "source"],
-        [f"{SCHEMA}.ingestion_runs.id", f"{SCHEMA}.ingestion_runs.batch_id", f"{SCHEMA}.ingestion_runs.source"]),
+    ForeignKeyConstraint(
+        ["run_id", "batch_id", "source"],
+        [
+            f"{SCHEMA}.ingestion_runs.id",
+            f"{SCHEMA}.ingestion_runs.batch_id",
+            f"{SCHEMA}.ingestion_runs.source",
+        ],
+    ),
 )
 
 market_cap_observations = Table(
-    "market_cap_observations", metadata, _id(), _security_fk(),
+    "market_cap_observations",
+    metadata,
+    _id(),
+    _security_fk(),
     Column("value", Numeric(24, 2)),
     Column("currency", String(3), nullable=False),
     Column("provider", String(32), nullable=False),
@@ -283,30 +343,65 @@ market_cap_observations = Table(
     CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency"),
     UniqueConstraint("id", "security_id"),
 )
-Index("ix_market_cap_observations_security_time", market_cap_observations.c.security_id,
-      market_cap_observations.c.retrieved_at.desc())
+Index(
+    "ix_market_cap_observations_security_time",
+    market_cap_observations.c.security_id,
+    market_cap_observations.c.retrieved_at.desc(),
+)
 
 publication_market_caps = Table(
-    "publication_market_caps", metadata,
-    Column("publication_id", BigInteger, ForeignKey(f"{SCHEMA}.publications.id"), primary_key=True),
+    "publication_market_caps",
+    metadata,
+    Column(
+        "publication_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.publications.id"),
+        primary_key=True,
+    ),
     Column("security_id", BigInteger, primary_key=True),
     Column("observation_id", BigInteger, nullable=False),
-    ForeignKeyConstraint(["observation_id", "security_id"],
-        [f"{SCHEMA}.market_cap_observations.id", f"{SCHEMA}.market_cap_observations.security_id"]),
+    ForeignKeyConstraint(
+        ["observation_id", "security_id"],
+        [
+            f"{SCHEMA}.market_cap_observations.id",
+            f"{SCHEMA}.market_cap_observations.security_id",
+        ],
+    ),
 )
 
 current_publication = Table(
-    "current_publication", metadata,
+    "current_publication",
+    metadata,
     Column("channel", String(32), primary_key=True),
-    Column("publication_id", BigInteger, ForeignKey(f"{SCHEMA}.publications.id"), nullable=False),
+    Column(
+        "publication_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.publications.id"),
+        nullable=False,
+    ),
     Column("promoted_at", DateTime(timezone=True), nullable=False),
 )
 
 # Supporting indexes for referencing FKs and per-source health lookups.
-Index("ix_publication_sources_run_batch_source", publication_sources.c.run_id,
-      publication_sources.c.batch_id, publication_sources.c.source)
-Index("ix_run_dependencies_batch_source", run_dependencies.c.batch_id, run_dependencies.c.source)
-Index("ix_publication_market_caps_observation_security", publication_market_caps.c.observation_id,
-      publication_market_caps.c.security_id)
-Index("ix_ingestion_runs_source_started", ingestion_runs.c.source,
-      ingestion_runs.c.started_at.desc(), ingestion_runs.c.id.desc())
+Index(
+    "ix_publication_sources_run_batch_source",
+    publication_sources.c.run_id,
+    publication_sources.c.batch_id,
+    publication_sources.c.source,
+)
+Index(
+    "ix_run_dependencies_batch_source",
+    run_dependencies.c.batch_id,
+    run_dependencies.c.source,
+)
+Index(
+    "ix_publication_market_caps_observation_security",
+    publication_market_caps.c.observation_id,
+    publication_market_caps.c.security_id,
+)
+Index(
+    "ix_ingestion_runs_source_started",
+    ingestion_runs.c.source,
+    ingestion_runs.c.started_at.desc(),
+    ingestion_runs.c.id.desc(),
+)

@@ -55,7 +55,9 @@ def canonicalize(
     source_as_of: Optional[date] = None,
     envelope: Optional[Dict[str, Any]] = None,
 ) -> CanonicalBatch:
-    keyed = sorted(((_dumps(r.canonical()), r) for r in records), key=lambda pair: pair[0])
+    keyed = sorted(
+        ((_dumps(r.canonical()), r) for r in records), key=lambda pair: pair[0]
+    )
     identity = {
         "hash_version": HASH_VERSION,
         "source": source,

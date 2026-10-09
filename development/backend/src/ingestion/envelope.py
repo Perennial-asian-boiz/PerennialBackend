@@ -22,11 +22,20 @@ from src.ingestion.redaction import redact
 ENVELOPE_KEYS = {
     "congress_trades": ("source", "endpoints", "fetched_at", "total_trades"),
     "ark_holdings": (
-        "source", "funds_tracked", "fetched_at", "total_tickers",
-        "multi_fund_tickers", "single_fund_tickers",
+        "source",
+        "funds_tracked",
+        "fetched_at",
+        "total_tickers",
+        "multi_fund_tickers",
+        "single_fund_tickers",
     ),
     "insider_trades": (
-        "source", "fetched_at", "lookback_days", "min_buy_value", "total_buys", "tickers_with_buys",
+        "source",
+        "fetched_at",
+        "lookback_days",
+        "min_buy_value",
+        "total_buys",
+        "tickers_with_buys",
     ),
     "short_interest": ("schema_version", "source", "fetched_at", "total_records"),
 }
@@ -43,7 +52,9 @@ def _scalar(value: Any) -> Any:
     raise TypeError
 
 
-def sanitize_envelope(source: str, envelope: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def sanitize_envelope(
+    source: str, envelope: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
     if not isinstance(envelope, dict):
         return {}
     clean: Dict[str, Any] = {}

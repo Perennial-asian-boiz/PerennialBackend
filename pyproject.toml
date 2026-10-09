@@ -1,0 +1,34 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+# Phase 0 gates the database production path. Legacy services and the separately
+# owned database contract test are not swept into a formatting-only rewrite.
+include = [
+    "development/backend/src/db/**/*.py",
+    "development/backend/src/ingestion/**/*.py",
+    "development/backend/src/pipeline/**/*.py",
+    "development/database/ops/quality_gate.py",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "development/backend"
+files = [
+    "development/backend/src/db",
+    "development/backend/src/ingestion",
+    "development/backend/src/pipeline",
+]
+strict = true
+show_error_codes = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["src.services.*"]
+follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+module = ["apscheduler.*"]
+ignore_missing_imports = true

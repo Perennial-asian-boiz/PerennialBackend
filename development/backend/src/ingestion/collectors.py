@@ -51,6 +51,7 @@ import re
 import sys
 import time
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -60,8 +61,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 
 from src.ingestion.files import read_json_bounded
-from src.services.consensus_watchlist.paths import PACKAGE_DIR
 from src.ingestion.importer import CollectionOutcome
+from src.services.consensus_watchlist.paths import PACKAGE_DIR
 
 FETCHERS_DIR = PACKAGE_DIR / "fetchers"
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024
@@ -75,9 +76,10 @@ HTTP_DEADLINE_SECONDS = 60.0
 MAX_RETRY_DELAY_SECONDS = 10.0
 RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+UpstreamRows = Dict[str, List[Dict[str, Any]]]
 
 
-def _fetcher(name: str):
+def _fetcher(name: str) -> Any:
     """Import a fetcher module the same way scheduler/cron.py does."""
     if str(FETCHERS_DIR) not in sys.path:
         sys.path.insert(0, str(FETCHERS_DIR))
@@ -100,6 +102,7 @@ def _is_iso_date(value: Any) -> bool:
 
 # ── HTTP ─────────────────────────────────────────────────
 
+
 @dataclass
 class _Response:
     ok: bool
@@ -112,7 +115,12 @@ class _DeadlineExceeded(Exception):
     pass
 
 
-def _read_capped(resp, *, deadline=None, monotonic=time.monotonic) -> Optional[bytes]:
+def _read_capped(
+    resp: requests.Response,
+    *,
+    deadline: Optional[float] = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> Optional[bytes]:
     declared = resp.headers.get("Content-Length") if resp.headers is not None else None
     if declared and declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES:
         return None
@@ -126,7 +134,9 @@ def _read_capped(resp, *, deadline=None, monotonic=time.monotonic) -> Optional[b
     return bytes(body)
 
 
-def _retry_after(headers, wall_time):
+def _retry_after(
+    headers: Optional[Mapping[str, str]], wall_time: Callable[[], float]
+) -> float:
     value = (headers or {}).get("Retry-After")
     if not isinstance(value, str) or len(value) > 100:
         return 0.0
@@ -170,7 +180,13 @@ def _get_json(
         retry_after = 0.0
         resp = None
         try:
-            resp = session.get(url, params=params, headers=headers, timeout=min(timeout, remaining), stream=True)
+            resp = session.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=min(timeout, remaining),
+                stream=True,
+            )
             if monotonic() >= deadline:
                 return _Response(False, code="deadline_exceeded")
             status = resp.status_code
@@ -209,7 +225,9 @@ def _get_json(
                 resp.close()
         if attempt == retries:
             return failure
-        backoff = min(MAX_RETRY_DELAY_SECONDS, 2.0**attempt + min(1.0, max(0.0, jitter())))
+        backoff = min(
+            MAX_RETRY_DELAY_SECONDS, 2.0**attempt + min(1.0, max(0.0, jitter()))
+        )
         delay = max(backoff, retry_after)
         if delay >= deadline - monotonic():
             return _Response(False, code="deadline_exceeded")
@@ -218,6 +236,7 @@ def _get_json(
 
 
 # ── Outcome tracking ─────────────────────────────────────
+
 
 @dataclass
 class _Tracker:
@@ -232,11 +251,11 @@ class _Tracker:
         self.attempted += 1
         self.completed += 1
 
-    def fail(self, unit: str, code: str) -> None:
+    def fail(self, unit: str, code: Optional[str]) -> None:
         self.attempted += 1
         self.failure_count += 1
         if len(self.failures) < MAX_REPORTED_FAILURES:
-            self.failures.append({"unit": unit, "code": code})
+            self.failures.append({"unit": unit, "code": code or "failed"})
 
     def diagnostics(self) -> Dict[str, Any]:
         counts = {
@@ -247,18 +266,29 @@ class _Tracker:
             "failures": self.failures,
         }
         if self.planned is not None:
-            counts.update(planned=self.planned, not_attempted=max(0, self.planned - self.attempted))
+            counts.update(
+                planned=self.planned,
+                not_attempted=max(0, self.planned - self.attempted),
+            )
         return counts
 
-    def outcome(self, source: str, records: List[Dict[str, Any]], **kw) -> CollectionOutcome:
+    def outcome(
+        self, source: str, records: List[Dict[str, Any]], **kw: Any
+    ) -> CollectionOutcome:
         if self.failure_count:
             code = "partial_collection" if self.completed else "collection_failed"
-            return CollectionOutcome.failure(source, "live", code, diagnostics=self.diagnostics())
+            return CollectionOutcome.failure(
+                source, "live", code, diagnostics=self.diagnostics()
+            )
         kw.setdefault("coverage", {"complete": True, "scope": "snapshot"})
-        return CollectionOutcome.success(source, "live", records, diagnostics=self.diagnostics(), **kw)
+        return CollectionOutcome.success(
+            source, "live", records, diagnostics=self.diagnostics(), **kw
+        )
 
     def parse_failure(self, source: str) -> CollectionOutcome:
-        return CollectionOutcome.failure(source, "live", "parse_error", diagnostics=self.diagnostics())
+        return CollectionOutcome.failure(
+            source, "live", "parse_error", diagnostics=self.diagnostics()
+        )
 
 
 def _now_iso() -> str:
@@ -272,7 +302,9 @@ def _single_iso_date(values: List[Any]) -> Optional[date]:
     return date.fromisoformat(values[0])
 
 
-def _read_upstream(source: str, data_dir: Path):
+def _read_upstream(
+    source: str, data_dir: Path
+) -> Tuple[Optional[UpstreamRows], Optional[CollectionOutcome]]:
     """
     Read and validate both upstream fetcher files with bounded reads.
     Returns ({"trades": [...], "holdings": [...]}, None) or (None, failure outcome).
@@ -281,17 +313,25 @@ def _read_upstream(source: str, data_dir: Path):
     """
     tracker = _Tracker("upstream files", planned=2)
     data: Dict[str, List[Dict[str, Any]]] = {}
-    for name, key in (("trades_congress.json", "trades"), ("ark_holdings.json", "holdings")):
+    for name, key in (
+        ("trades_congress.json", "trades"),
+        ("ark_holdings.json", "holdings"),
+    ):
         path = data_dir / name
         if not path.exists():
             tracker.fail(name, "missing_file")
             continue
         parsed, problem = read_json_bounded(path)
         if problem:
-            tracker.fail(name, "file_too_large" if problem == "input_too_large" else "unreadable_file")
+            tracker.fail(
+                name,
+                "file_too_large" if problem == "input_too_large" else "unreadable_file",
+            )
             continue
         rows = parsed.get(key) if isinstance(parsed, dict) else None
-        if not isinstance(rows, list) or not all(_upstream_row_ok(key, r) for r in rows):
+        if not isinstance(rows, list) or not all(
+            _upstream_row_ok(key, r) for r in rows
+        ):
             tracker.fail(name, "malformed_file")
             continue
         data[key] = rows
@@ -304,33 +344,55 @@ def _read_upstream(source: str, data_dir: Path):
 
 
 def _upstream_row_ok(key: str, row: Any) -> bool:
-    if not isinstance(row, dict) or not isinstance(row.get("ticker"), str) or not row["ticker"].strip():
+    if (
+        not isinstance(row, dict)
+        or not isinstance(row.get("ticker"), str)
+        or not row["ticker"].strip()
+    ):
         return False
     if key == "trades":
-        return isinstance(row.get("trade_type"), str) and bool(row["trade_type"].strip())
+        return isinstance(row.get("trade_type"), str) and bool(
+            row["trade_type"].strip()
+        )
     fund_count = row.get("fund_count")
-    return isinstance(fund_count, int) and not isinstance(fund_count, bool) and fund_count >= 1
+    return (
+        isinstance(fund_count, int)
+        and not isinstance(fund_count, bool)
+        and fund_count >= 1
+    )
 
 
-def _insider_plan(insider, upstream) -> List[Tuple[str, str]]:
+def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]:
     """Same selection as insider.load_congress_tickers / load_ark_tickers / run()."""
-    purchases = [t["ticker"] for t in upstream["trades"] if "purchase" in t.get("trade_type", "").lower()]
-    congress = [t for t, _ in Counter(purchases).most_common(insider.MAX_CONGRESS_TICKERS)]
+    purchases = [
+        t["ticker"]
+        for t in upstream["trades"]
+        if "purchase" in t.get("trade_type", "").lower()
+    ]
+    congress = [
+        t for t, _ in Counter(purchases).most_common(insider.MAX_CONGRESS_TICKERS)
+    ]
     holdings = upstream["holdings"]
     ark = [h["ticker"] for h in holdings if h["fund_count"] > 1] + [
-        h["ticker"] for h in holdings if h["fund_count"] == 1]
+        h["ticker"] for h in holdings if h["fund_count"] == 1
+    ]
     congress_set = set(congress)
     return [(t, "popular_stable") for t in congress] + [
-        (t, "affordable_growing") for t in ark if t not in congress_set]
+        (t, "affordable_growing") for t in ark if t not in congress_set
+    ]
 
 
-def _short_interest_plan(si, upstream) -> List[str]:
+def _short_interest_plan(si: Any, upstream: UpstreamRows) -> List[str]:
     """Same universe as short_interest.get_candidate_tickers()."""
-    tickers = {si.normalize_ticker(r["ticker"]) for r in upstream["trades"] + upstream["holdings"]}
+    tickers = {
+        si.normalize_ticker(r["ticker"])
+        for r in upstream["trades"] + upstream["holdings"]
+    }
     return sorted(t for t in tickers if t)
 
 
 # ── ARK ──────────────────────────────────────────────────
+
 
 def _ark_fund_ok(holdings: Any) -> Optional[str]:
     """None if usable, else a failure code. Rows without a ticker (cash etc.) are skipped upstream."""
@@ -356,21 +418,29 @@ def _ark_fund_ok(holdings: Any) -> Optional[str]:
     return None if tickered else "empty_or_malformed_holdings"
 
 
-def collect_ark(session: Optional[requests.Session] = None, sleep=time.sleep) -> CollectionOutcome:
+def collect_ark(
+    session: Optional[requests.Session] = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> CollectionOutcome:
     ark = _fetcher("ark")
     session = session or requests.Session()
     tracker = _Tracker("ARK funds", planned=len(ark.ARK_FUNDS))
     all_raw: Dict[str, List[Dict[str, Any]]] = {}
     for symbol in ark.ARK_FUNDS:
-        resp = _get_json(session, ark.ARK_API_URL, params={"symbol": symbol}, sleep=sleep)
+        resp = _get_json(
+            session, ark.ARK_API_URL, params={"symbol": symbol}, sleep=sleep
+        )
         if not resp.ok:
             tracker.fail(symbol, resp.code)
         else:
-            holdings = resp.data.get("holdings") if isinstance(resp.data, dict) else None
+            holdings = (
+                resp.data.get("holdings") if isinstance(resp.data, dict) else None
+            )
             problem = _ark_fund_ok(holdings)
             if problem:
                 tracker.fail(symbol, problem)
             else:
+                assert isinstance(holdings, list)
                 all_raw[symbol] = holdings
                 tracker.ok()
         if tracker.failure_count:
@@ -382,7 +452,9 @@ def collect_ark(session: Optional[requests.Session] = None, sleep=time.sleep) ->
         holdings = ark.parse_holdings(all_raw)
     except (TypeError, ValueError, AttributeError):
         return tracker.parse_failure("ark_holdings")
-    dates = [h.get("date") for rows in all_raw.values() for h in rows if h.get("ticker")]
+    dates = [
+        h.get("date") for rows in all_raw.values() for h in rows if h.get("ticker")
+    ]
     envelope = {
         "source": "ARK Invest ETF Holdings (arkfunds.io)",
         "funds_tracked": list(ark.ARK_FUNDS),
@@ -392,29 +464,56 @@ def collect_ark(session: Optional[requests.Session] = None, sleep=time.sleep) ->
         "single_fund_tickers": sum(1 for h in holdings if h["fund_count"] == 1),
     }
     return tracker.outcome(
-        "ark_holdings", holdings, envelope=envelope, source_as_of=_single_iso_date(dates)
+        "ark_holdings",
+        holdings,
+        envelope=envelope,
+        source_as_of=_single_iso_date(dates),
     )
 
 
 # ── Congress (FMP + Senate Stock Watcher) ────────────────
 
+
 def _string_fields_ok(item: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
     return all(item.get(k) is None or isinstance(item.get(k), str) for k in keys)
 
 
-_FMP_KEYS = ("symbol", "transactionDate", "disclosureDate", "firstName", "lastName",
-             "assetDescription", "assetType", "type", "amount", "district", "link")
-_WATCHER_KEYS = ("ticker", "transaction_date", "senator", "asset_description", "asset_type",
-                 "type", "amount", "ptr_link")
+_FMP_KEYS = (
+    "symbol",
+    "transactionDate",
+    "disclosureDate",
+    "firstName",
+    "lastName",
+    "assetDescription",
+    "assetType",
+    "type",
+    "amount",
+    "district",
+    "link",
+)
+_WATCHER_KEYS = (
+    "ticker",
+    "transaction_date",
+    "senator",
+    "asset_description",
+    "asset_type",
+    "type",
+    "amount",
+    "ptr_link",
+)
 
 
 def collect_congress(
-    session: Optional[requests.Session] = None, api_key: Optional[str] = None, sleep=time.sleep
+    session: Optional[requests.Session] = None,
+    api_key: Optional[str] = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> CollectionOutcome:
     fmp = _fetcher("fmp")
     key = api_key if api_key is not None else fmp.FMP_API_KEY
     if not key or key == "YOUR_FMP_KEY_HERE":
-        return CollectionOutcome.failure("congress_trades", "live", "missing_credential")
+        return CollectionOutcome.failure(
+            "congress_trades", "live", "missing_credential"
+        )
     session = session or requests.Session()
     # Initially one request per chamber plus Watcher. Full pages discover
     # further required units; terminated pagination is not unattempted work.
@@ -424,8 +523,10 @@ def collect_congress(
         for page in range(fmp.MAX_PAGES):
             unit = f"{chamber} page {page}"
             resp = _get_json(
-                session, f"{fmp.BASE_URL}/{chamber}-latest",
-                params={"page": page, "limit": 20, "apikey": key}, sleep=sleep,
+                session,
+                f"{fmp.BASE_URL}/{chamber}-latest",
+                params={"page": page, "limit": 20, "apikey": key},
+                sleep=sleep,
             )
             if not resp.ok:
                 tracker.fail(unit, resp.code)
@@ -448,7 +549,8 @@ def collect_congress(
             raw_fmp.extend(items)
             if len(items) < 20:
                 break
-            tracker.planned += 1
+            if tracker.planned is not None:
+                tracker.planned += 1
     resp = _get_json(session, fmp.SENATE_WATCHER_URL, timeout=30, sleep=sleep)
     watcher: List[Dict[str, Any]] = []
     if not resp.ok:
@@ -478,11 +580,16 @@ def collect_congress(
         "fetched_at": _now_iso(),
         "total_trades": len(trades),
     }
-    return tracker.outcome("congress_trades", trades, envelope=envelope,
-                           coverage={"complete": True, "scope": "recent_window"})
+    return tracker.outcome(
+        "congress_trades",
+        trades,
+        envelope=envelope,
+        coverage={"complete": True, "scope": "recent_window"},
+    )
 
 
 # ── Insider (SecuritiesDB) ───────────────────────────────
+
 
 def _insider_payload_ok(raw: Any) -> bool:
     """Every field parse_insider_buys touches on a Purchase must be well-formed."""
@@ -509,11 +616,14 @@ def _insider_payload_ok(raw: Any) -> bool:
     return True
 
 
-def _resolve_upstream(source, data_dir, upstream):
+def _resolve_upstream(
+    source: str, data_dir: Path, upstream: Any
+) -> Tuple[Optional[UpstreamRows], Optional[CollectionOutcome]]:
     if upstream is None:
         return _read_upstream(source, data_dir)
     if not isinstance(upstream, dict) or not all(
-        isinstance(upstream.get(key), list) and all(_upstream_row_ok(key, row) for row in upstream[key])
+        isinstance(upstream.get(key), list)
+        and all(_upstream_row_ok(key, row) for row in upstream[key])
         for key in ("trades", "holdings")
     ):
         return None, CollectionOutcome.failure(source, "live", "missing_upstream")
@@ -521,13 +631,19 @@ def _resolve_upstream(source, data_dir, upstream):
 
 
 def collect_insider(
-    session: Optional[requests.Session] = None, sleep=time.sleep, *, upstream=None,
+    session: Optional[requests.Session] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    *,
+    upstream: Any = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; None retains the legacy file fallback."""
     insider = _fetcher("insider")
-    upstream, failure = _resolve_upstream("insider_trades", insider.LOCAL_DATA_DIR, upstream)
+    upstream, failure = _resolve_upstream(
+        "insider_trades", insider.LOCAL_DATA_DIR, upstream
+    )
     if failure:
         return failure
+    assert upstream is not None
     plan = _insider_plan(insider, upstream)
     if not plan:
         return CollectionOutcome.failure("insider_trades", "live", "no_input_tickers")
@@ -539,8 +655,10 @@ def collect_insider(
     buys: List[Dict[str, Any]] = []
     for ticker, bucket in plan:
         resp = _get_json(
-            session, f"{insider.SECURITIES_URL}/{ticker}/insider-activity",
-            allowed_status=(404,), sleep=sleep,
+            session,
+            f"{insider.SECURITIES_URL}/{ticker}/insider-activity",
+            allowed_status=(404,),
+            sleep=sleep,
         )
         if not resp.ok:
             tracker.fail(ticker, resp.code)
@@ -551,7 +669,16 @@ def collect_insider(
             tracker.fail(ticker, "malformed_response")
             break
         else:
-            buys.extend(insider.parse_insider_buys(ticker, resp.data, bucket))
+            # insider.py returns (buys, error_code, error_detail). Its detail
+            # can contain provider data; only the fixed code crosses this
+            # boundary. A parser failure leaves the ticker unknown.
+            parsed_buys, parse_code, _parse_detail = insider.parse_insider_buys(
+                ticker, resp.data, bucket
+            )
+            if parse_code is not None or not isinstance(parsed_buys, list):
+                tracker.fail(ticker, "parse_error")
+                break
+            buys.extend(parsed_buys)
             tracker.ok()
         sleep(insider.REQUEST_DELAY)
     envelope = {
@@ -562,11 +689,16 @@ def collect_insider(
         "total_buys": len(buys),
         "tickers_with_buys": len({b["ticker"] for b in buys}),
     }
-    return tracker.outcome("insider_trades", buys, envelope=envelope,
-                           coverage={"complete": True, "scope": "selected_universe"})
+    return tracker.outcome(
+        "insider_trades",
+        buys,
+        envelope=envelope,
+        coverage={"complete": True, "scope": "selected_universe"},
+    )
 
 
 # ── Short interest (Nasdaq) ──────────────────────────────
+
 
 def _short_interest_kind(raw: Any) -> Optional[str]:
     """'none' = explicit no record, 'rows' = data to parse, None = malformed."""
@@ -588,8 +720,10 @@ def _short_interest_kind(raw: Any) -> Optional[str]:
     for row in rows:
         if not isinstance(row, dict):
             return None
-        if not all(isinstance(row.get(k), (str, int, float, type(None)))
-                   for k in ("interest", "avgDailyShareVolume", "daysToCover")):
+        if not all(
+            isinstance(row.get(k), (str, int, float, type(None)))
+            for k in ("interest", "avgDailyShareVolume", "daysToCover")
+        ):
             return None
         if not isinstance(row.get("settlementDate", ""), str):
             return None
@@ -597,13 +731,17 @@ def _short_interest_kind(raw: Any) -> Optional[str]:
 
 
 def collect_short_interest(
-    session: Optional[requests.Session] = None, sleep=time.sleep, *, upstream=None,
+    session: Optional[requests.Session] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    *,
+    upstream: Any = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; supplied data never reads files."""
     si = _fetcher("short_interest")
     upstream, failure = _resolve_upstream("short_interest", si.LOCAL_DATA_DIR, upstream)
     if failure:
         return failure
+    assert upstream is not None
     tickers = _short_interest_plan(si, upstream)
     if not tickers:
         return CollectionOutcome.failure("short_interest", "live", "no_input_tickers")
@@ -614,8 +752,11 @@ def collect_short_interest(
     records: List[Dict[str, Any]] = []
     for ticker in tickers:
         resp = _get_json(
-            session, si.NASDAQ_URL.format(symbol=ticker), headers=si.HEADERS,
-            timeout=si.REQUEST_TIMEOUT, sleep=sleep,
+            session,
+            si.NASDAQ_URL.format(symbol=ticker),
+            headers=si.HEADERS,
+            timeout=si.REQUEST_TIMEOUT,
+            sleep=sleep,
         )
         kind = _short_interest_kind(resp.data) if resp.ok else None
         if not resp.ok:
@@ -642,11 +783,15 @@ def collect_short_interest(
         "fetched_at": _now_iso(),
         "total_records": len(records),
     }
-    return tracker.outcome("short_interest", records, envelope=envelope,
-                           coverage={"complete": True, "scope": "selected_universe"})
+    return tracker.outcome(
+        "short_interest",
+        records,
+        envelope=envelope,
+        coverage={"complete": True, "scope": "selected_universe"},
+    )
 
 
-COLLECTORS = {
+COLLECTORS: Dict[str, Callable[..., CollectionOutcome]] = {
     "congress_trades": collect_congress,
     "ark_holdings": collect_ark,
     "insider_trades": collect_insider,
