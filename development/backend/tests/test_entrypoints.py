@@ -86,7 +86,6 @@ def test_scheduler_and_consensus_still_work_from_json(tmp_path, monkeypatch, fix
     import cron
 
     assert callable(cron.run_full_pipeline) and callable(cron.main)
-    monkeypatch.setattr(consensus, "FMP_API_KEY", "")  # no network lookups
     monkeypatch.setattr(consensus, "resolve_data_dirs", lambda: [tmp_path])  # never touch local_data/
     caps = {"ZZAA": 2e11, "ZZB.B": 5e11, "ZZCC": 1e9, "ZZDD": 1e9, "ZZEE": 3e9}
     result = consensus.run(

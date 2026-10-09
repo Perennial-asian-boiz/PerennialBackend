@@ -9,6 +9,7 @@ experimentation remains available via consensus.py, outside this production path
 
 import logging
 import sys
+from functools import partial
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -16,6 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 from src.db.session import make_engine
 from src.ingestion.redaction import describe_exception
 from src.pipeline.runner import run_pipeline
+from src.settings import Settings, load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +29,15 @@ class PipelineRunFailed(RuntimeError):
         super().__init__("database pipeline run failed")
 
 
-def run_full_pipeline() -> int | None:
+def run_full_pipeline(settings: Settings | None = None) -> int | None:
     # Always refresh the selected universe, even when settlement observations
     # themselves have not changed. An old short-interest plan can miss new tickers.
     engine, failed = None, False
     try:
-        engine = make_engine()
+        settings = load_settings() if settings is None else settings
+        settings.require_provider_keys("fmp")
+        settings.require_provider_keys("finnhub")
+        engine = make_engine(settings.database_url.get_secret_value())
         return run_pipeline(engine)
     except Exception as exc:
         logger.error("pipeline failed: %s", describe_exception(exc))
@@ -53,9 +58,11 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
+    settings = load_settings()
+    job = partial(run_full_pipeline, settings)
     scheduler = BlockingScheduler(timezone="America/Los_Angeles")
     scheduler.add_job(
-        run_full_pipeline,
+        job,
         CronTrigger(hour=9, minute=0, timezone="America/Los_Angeles"),
         id="daily_pipeline",
         replace_existing=True,
@@ -66,7 +73,7 @@ def main() -> None:
     # Perform one recovery/catch-up run whenever a supervisor starts this worker.
     # PostgreSQL locks prevent overlapping source work across worker processes.
     try:
-        run_full_pipeline()
+        job()
     except Exception:
         pass  # Logged above; remain supervised and retry at the next schedule.
     try:

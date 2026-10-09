@@ -5,6 +5,20 @@ from zoneinfo import ZoneInfo
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def synthetic_settings(monkeypatch):
+    from src.pipeline import scheduler
+    from src.settings import Settings
+
+    settings = Settings(
+        _env_file=None,
+        database_url="postgresql+psycopg://user:synthetic@localhost/test",
+        fmp_api_key="synthetic-fmp",
+        finnhub_api_key="synthetic-finnhub",
+    )
+    monkeypatch.setattr(scheduler, "load_settings", lambda: settings)
+
+
 def test_legacy_schedule_preserves_daily_and_settlement_jobs(monkeypatch):
     from src.services.consensus_watchlist.scheduler import cron
     jobs = {}
@@ -38,7 +52,7 @@ def test_database_schedule_runs_all_stages_at_startup_and_daily(monkeypatch):
         def start(self):
             called.append('started')
     monkeypatch.setattr(scheduler, 'BlockingScheduler', Scheduler)
-    monkeypatch.setattr(scheduler, 'run_full_pipeline', lambda: called.append('run'))
+    monkeypatch.setattr(scheduler, 'run_full_pipeline', lambda _settings: called.append('run'))
     scheduler.main()
     assert called == ['run', 'started']
     assert set(jobs) == {'daily_pipeline'}
@@ -55,7 +69,7 @@ def test_database_scheduler_propagates_failure_and_disposes(monkeypatch):
         def dispose(self):
             self.disposed = True
     engine = Engine()
-    monkeypatch.setattr(scheduler, 'make_engine', lambda: engine)
+    monkeypatch.setattr(scheduler, 'make_engine', lambda _url: engine)
     def broken(_):
         raise RuntimeError('synthetic failure')
     monkeypatch.setattr(scheduler, 'run_pipeline', broken)
@@ -87,7 +101,7 @@ def test_real_scheduler_executor_keeps_failure_logs_and_events_safe(monkeypatch,
             raise ValueError(url)
         except ValueError as cause:
             raise OperationalError('SELECT 1', {}, Exception(url)) from cause
-    monkeypatch.setattr(scheduler, 'make_engine', broken if failure_stage == 'engine' else lambda: engine)
+    monkeypatch.setattr(scheduler, 'make_engine', broken if failure_stage == 'engine' else lambda _url: engine)
     monkeypatch.setattr(scheduler, 'run_pipeline', broken)
     job = SimpleNamespace(misfire_grace_time=None, func=scheduler.run_full_pipeline,
                           args=(), kwargs={}, id='synthetic_safe_failure')
@@ -109,7 +123,7 @@ def test_scheduler_sanitizes_disposal_errors(monkeypatch, caplog):
     class Engine:
         def dispose(self):
             raise RuntimeError('SYNTHETIC_DISPOSAL_SECRET')
-    monkeypatch.setattr(scheduler, 'make_engine', Engine)
+    monkeypatch.setattr(scheduler, 'make_engine', lambda _url: Engine())
     monkeypatch.setattr(scheduler, 'run_pipeline', lambda engine: 42)
     assert scheduler.run_full_pipeline() == 42
     assert 'SYNTHETIC_DISPOSAL_SECRET' not in caplog.text

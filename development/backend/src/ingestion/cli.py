@@ -18,11 +18,11 @@ import sys
 from dataclasses import asdict
 from typing import Any, List, Optional
 
-from src.db.config import DatabaseConfigError
 from src.db.models import SOURCES
 from src.db.queries import batch_rows, latest_successful_run
 from src.db.session import make_engine
 from src.ingestion.redaction import describe_exception
+from src.settings import SettingsError, load_settings
 
 
 def _print(obj: Any) -> None:
@@ -80,8 +80,17 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        engine = make_engine()
-    except DatabaseConfigError as exc:
+        settings = load_settings()
+        if args.command == "run-pipeline":
+            settings.require_provider_keys("fmp")
+            settings.require_provider_keys("finnhub")
+        elif args.command == "fetch":
+            if args.source == "congress_trades":
+                settings.require_provider_keys("fmp")
+            elif args.source == "insider_trades":
+                settings.require_provider_keys("finnhub")
+        engine = make_engine(settings.database_url.get_secret_value())
+    except SettingsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:
