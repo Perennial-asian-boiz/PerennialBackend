@@ -22,12 +22,12 @@ import math
 import re
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from typing_extensions import Annotated
 from pydantic.functional_validators import BeforeValidator
+from typing_extensions import Annotated
 
 PLACEHOLDER_TICKERS = frozenset({"N/A", "NONE", "NULL", "--", "NAN"})
 BIGINT_MAX = 2**63 - 1
@@ -44,8 +44,12 @@ _SENSITIVE_QUERY_KEYS = re.compile(
 # Bloomberg-style US composite exchange suffixes seen in ARK holdings
 # ("RKLB UQ"). Only these are recognized; any other suffix fails validation.
 US_EXCHANGE_SUFFIXES = {
-    "UQ": "NASDAQ", "UW": "NASDAQ", "UR": "NASDAQ",
-    "UN": "NYSE", "UA": "NYSEAMERICAN", "UP": "NYSEARCA",
+    "UQ": "NASDAQ",
+    "UW": "NASDAQ",
+    "UR": "NASDAQ",
+    "UN": "NYSE",
+    "UA": "NYSEAMERICAN",
+    "UP": "NYSEARCA",
 }
 _SUFFIXED = re.compile(r"^([A-Z0-9][A-Z0-9./-]{0,19}) +([A-Z]{2})$")
 
@@ -125,7 +129,9 @@ def _optional_decimal(value: Any) -> Optional[Decimal]:
         raise ValueError("number must be finite")
     # Bound magnitude both ways so canonical text stays small (1e100000 would
     # otherwise expand to a 100 KB string) and quantize() cannot overflow.
-    if result != 0 and not (-MAX_DECIMAL_EXPONENT <= result.adjusted() <= MAX_DECIMAL_EXPONENT):
+    if result != 0 and not (
+        -MAX_DECIMAL_EXPONENT <= result.adjusted() <= MAX_DECIMAL_EXPONENT
+    ):
         raise ValueError("number is out of range")
     return result
 
@@ -141,7 +147,9 @@ def _optional_int(value: Any) -> Optional[int]:
     return int(dec)
 
 
-def _decimal(places: int, digits: int, *, zero_is_unknown: bool = False):
+def _decimal_validator(
+    places: int, digits: int, *, zero_is_unknown: bool = False
+) -> Callable[[Any], Optional[Decimal]]:
     """
     Decimal matching a NUMERIC(digits, places) column: rounded half-even to the
     column scale here, so the hashed/payload value equals the stored value.
@@ -166,7 +174,7 @@ def _decimal(places: int, digits: int, *, zero_is_unknown: bool = False):
             raise ValueError("number is out of range")
         return dec
 
-    return Annotated[Optional[Decimal], BeforeValidator(validate)]
+    return validate
 
 
 def _optional_text(value: Any) -> Optional[str]:
@@ -208,10 +216,14 @@ RequiredDate = Annotated[date, BeforeValidator(_required_date)]
 OptionalDate = Annotated[Optional[date], BeforeValidator(_optional_date)]
 OptionalDecimal = Annotated[Optional[Decimal], BeforeValidator(_optional_decimal)]
 OptionalInt = Annotated[Optional[int], BeforeValidator(_optional_int)]
-def _bounded(validator, max_length: int):
+
+
+def _bounded(
+    validator: Callable[[Any], Optional[str]], max_length: int
+) -> Callable[[Any], Optional[str]]:
     # Length is checked inside the validator: a Field(max_length) on an
     # Optional would also be applied to the None produced from "".
-    def validate(value: Any):
+    def validate(value: Any) -> Optional[str]:
         result = validator(value)
         if result is not None and len(result) > max_length:
             raise ValueError(f"text is longer than {max_length} characters")
@@ -223,10 +235,11 @@ def _bounded(validator, max_length: int):
 OptionalLink = Annotated[Optional[str], BeforeValidator(_bounded(_optional_link, 2048))]
 
 
-def _text(max_length: int, required: bool = False):
+def _text_validator(
+    max_length: int, required: bool = False
+) -> Callable[[Any], Optional[str]]:
     validator = _required_text if required else _optional_text
-    kind = str if required else Optional[str]
-    return Annotated[kind, BeforeValidator(_bounded(validator, max_length))]
+    return _bounded(validator, max_length)
 
 
 def _json_value(value: Any) -> Any:
@@ -253,7 +266,7 @@ class SourceRecord(BaseModel):
     DB_COLUMNS: ClassVar[Tuple[str, ...]] = ()
 
     ticker: Ticker
-    exchange: _text(20) = None
+    exchange: Annotated[Optional[str], BeforeValidator(_text_validator(20))] = None
     currency: Optional[str] = None
 
     @model_validator(mode="before")
@@ -265,7 +278,11 @@ class SourceRecord(BaseModel):
         if exchange is None:
             return data
         given = data.get("exchange")
-        if isinstance(given, str) and given.strip() and given.strip().upper() != exchange:
+        if (
+            isinstance(given, str)
+            and given.strip()
+            and given.strip().upper() != exchange
+        ):
             raise ValueError("ticker exchange suffix conflicts with exchange")
         return dict(data, ticker=base, exchange=exchange)
 
@@ -287,7 +304,9 @@ class SourceRecord(BaseModel):
 
     def canonical(self) -> Dict[str, Any]:
         """JSON-safe, deterministic representation used for hashing and the batch payload."""
-        return {name: _json_value(getattr(self, name)) for name in type(self).model_fields}
+        return {
+            name: _json_value(getattr(self, name)) for name in type(self).model_fields
+        }
 
     def db_values(self) -> Dict[str, Any]:
         return {name: getattr(self, name) for name in self.DB_COLUMNS}
@@ -295,38 +314,60 @@ class SourceRecord(BaseModel):
 
 class CongressTrade(SourceRecord):
     DB_COLUMNS = (
-        "politician_name", "chamber", "trade_type", "transaction_date", "disclosure_date",
-        "amount_label", "asset_description", "asset_type", "district", "source_link", "data_source",
+        "politician_name",
+        "chamber",
+        "trade_type",
+        "transaction_date",
+        "disclosure_date",
+        "amount_label",
+        "asset_description",
+        "asset_type",
+        "district",
+        "source_link",
+        "data_source",
     )
 
-    politician_name: _text(200, required=True)
-    chamber: _text(16) = None
-    trade_type: _text(100, required=True)
+    politician_name: Annotated[
+        str, BeforeValidator(_text_validator(200, required=True))
+    ]
+    chamber: Annotated[Optional[str], BeforeValidator(_text_validator(16))] = None
+    trade_type: Annotated[str, BeforeValidator(_text_validator(100, required=True))]
     transaction_date: RequiredDate
     disclosure_date: OptionalDate = None
-    amount_label: _text(100) = Field(default=None, alias="amount_range")
-    asset_description: _text(500) = None
-    asset_type: _text(100) = None
-    district: _text(20) = None
+    amount_label: Annotated[Optional[str], BeforeValidator(_text_validator(100))] = (
+        Field(default=None, alias="amount_range")
+    )
+    asset_description: Annotated[
+        Optional[str], BeforeValidator(_text_validator(500))
+    ] = None
+    asset_type: Annotated[Optional[str], BeforeValidator(_text_validator(100))] = None
+    district: Annotated[Optional[str], BeforeValidator(_text_validator(20))] = None
     source_link: OptionalLink = None
-    data_source: _text(32) = None
+    data_source: Annotated[Optional[str], BeforeValidator(_text_validator(32))] = None
     # Provider transaction identity is retained in the archived batch payload;
     # it is not a filing identity and does not require a source-table column.
-    provider_record_id: _text(200) = None
+    provider_record_id: Annotated[
+        Optional[str], BeforeValidator(_text_validator(200))
+    ] = None
 
 
 class ArkHolding(SourceRecord):
     DB_COLUMNS = ("company", "funds", "fund_count", "total_weight", "share_price")
 
-    company: _text(300) = None
+    company: Annotated[Optional[str], BeforeValidator(_text_validator(300))] = None
     funds: List[str] = Field(min_length=1, max_length=20)
     fund_count: int = Field(ge=1, strict=True)
     # Sum of weights across funds; not a 0-100 allocation, so no upper bound.
-    total_weight: _decimal(8, 20)
+    total_weight: Annotated[
+        Optional[Decimal], BeforeValidator(_decimal_validator(8, 20))
+    ]
     # ark.parse_holdings defaults a missing price to 0.0, so 0 means unknown.
-    share_price: _decimal(6, 20, zero_is_unknown=True) = None
-    bucket: _text(32) = None
-    data_source: _text(32) = None
+    share_price: Annotated[
+        Optional[Decimal],
+        BeforeValidator(_decimal_validator(6, 20, zero_is_unknown=True)),
+    ] = None
+    bucket: Annotated[Optional[str], BeforeValidator(_text_validator(32))] = None
+    data_source: Annotated[Optional[str], BeforeValidator(_text_validator(32))] = None
 
     @field_validator("funds", mode="before")
     @classmethod
@@ -353,17 +394,28 @@ class ArkHolding(SourceRecord):
 
 class InsiderTrade(SourceRecord):
     DB_COLUMNS = (
-        "insider_name", "transaction_type", "transaction_date", "shares", "value",
-        "bucket", "data_source",
+        "insider_name",
+        "transaction_type",
+        "transaction_date",
+        "shares",
+        "value",
+        "bucket",
+        "data_source",
     )
 
-    insider_name: _text(200, required=True)
-    transaction_type: _text(50, required=True)
+    insider_name: Annotated[str, BeforeValidator(_text_validator(200, required=True))]
+    transaction_type: Annotated[
+        str, BeforeValidator(_text_validator(50, required=True))
+    ]
     transaction_date: RequiredDate
-    shares: _decimal(6, 24) = None
-    value: _decimal(2, 20) = None
-    bucket: _text(32) = None
-    data_source: _text(32) = None
+    shares: Annotated[Optional[Decimal], BeforeValidator(_decimal_validator(6, 24))] = (
+        None
+    )
+    value: Annotated[Optional[Decimal], BeforeValidator(_decimal_validator(2, 20))] = (
+        None
+    )
+    bucket: Annotated[Optional[str], BeforeValidator(_text_validator(32))] = None
+    data_source: Annotated[Optional[str], BeforeValidator(_text_validator(32))] = None
 
 
 class ShortInterestHistory(BaseModel):
@@ -374,36 +426,45 @@ class ShortInterestHistory(BaseModel):
     settlement_date: OptionalDate = None
     short_interest_shares: OptionalInt = Field(default=None, alias="short_interest")
     average_daily_volume: OptionalInt = Field(default=None, alias="avg_daily_volume")
-    days_to_cover: _decimal(4, 12) = None
+    days_to_cover: Annotated[
+        Optional[Decimal], BeforeValidator(_decimal_validator(4, 12))
+    ] = None
 
     @field_validator("short_interest_shares", "average_daily_volume")
     @classmethod
-    def _non_negative(cls, v):
+    def _non_negative(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and v < 0:
             raise ValueError("value must not be negative")
         return v
 
 
 class ShortInterestRecord(SourceRecord):
-    DB_COLUMNS = ("settlement_date", "short_interest_shares", "average_daily_volume", "days_to_cover")
+    DB_COLUMNS = (
+        "settlement_date",
+        "short_interest_shares",
+        "average_daily_volume",
+        "days_to_cover",
+    )
 
     settlement_date: RequiredDate
     # Explicit rename at the database boundary (fetcher key -> column).
     short_interest_shares: OptionalInt = Field(default=None, alias="short_interest")
     average_daily_volume: OptionalInt = Field(default=None, alias="avg_daily_volume")
-    days_to_cover: _decimal(4, 12) = None
+    days_to_cover: Annotated[
+        Optional[Decimal], BeforeValidator(_decimal_validator(4, 12))
+    ] = None
     history: List[ShortInterestHistory] = Field(default_factory=list, max_length=120)
-    data_source: _text(32) = None
+    data_source: Annotated[Optional[str], BeforeValidator(_text_validator(32))] = None
 
     @field_validator("short_interest_shares", "average_daily_volume")
     @classmethod
-    def _non_negative(cls, v):
+    def _non_negative(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and v < 0:
             raise ValueError("value must not be negative")
         return v
 
 
-RECORD_MODELS = {
+RECORD_MODELS: Dict[str, type[SourceRecord]] = {
     "congress_trades": CongressTrade,
     "ark_holdings": ArkHolding,
     "insider_trades": InsiderTrade,

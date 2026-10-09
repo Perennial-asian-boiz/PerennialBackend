@@ -23,6 +23,7 @@ string (<= 20 chars of A-Z0-9./-) taken from the collection plan.
 import json
 import re
 import typing
+from collections.abc import Container
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -56,30 +57,62 @@ ERROR_SUMMARIES = {
     "internal_error": "unexpected error; nothing was written",
 }
 
-UNIT_KINDS = frozenset({
-    "ARK funds", "Congress requests", "insider tickers", "short-interest tickers", "upstream files",
-})
-_COUNT_KEYS = ("input_count", "error_count", "planned", "attempted", "completed", "failed", "not_attempted")
+UNIT_KINDS = frozenset(
+    {
+        "ARK funds",
+        "Congress requests",
+        "insider tickers",
+        "short-interest tickers",
+        "upstream files",
+    }
+)
+_COUNT_KEYS = (
+    "input_count",
+    "error_count",
+    "planned",
+    "attempted",
+    "completed",
+    "failed",
+    "not_attempted",
+)
 
 _OWN_ERROR_TYPES = {"not_an_object", "duplicate_security", "conflicting_exchange"}
-VALIDATION_ERROR_TYPES = frozenset(typing.get_args(core_schema.ErrorType)) | _OWN_ERROR_TYPES
+VALIDATION_ERROR_TYPES = (
+    frozenset(typing.get_args(core_schema.ErrorType)) | _OWN_ERROR_TYPES
+)
 
-FAILURE_CODES = frozenset({
-    "timeout", "invalid_json", "response_too_large", "empty_or_malformed_holdings",
-    "malformed_holding", "malformed_response", "exchange_conflict", "currency_conflict",
-    "parse_error", "missing_file", "unreadable_file", "malformed_file", "file_too_large",
-    "pagination_exhausted", "deadline_exceeded",
-})
+FAILURE_CODES = frozenset(
+    {
+        "timeout",
+        "invalid_json",
+        "response_too_large",
+        "empty_or_malformed_holdings",
+        "malformed_holding",
+        "malformed_response",
+        "exchange_conflict",
+        "currency_conflict",
+        "parse_error",
+        "missing_file",
+        "unreadable_file",
+        "malformed_file",
+        "file_too_large",
+        "pagination_exhausted",
+        "deadline_exceeded",
+    }
+)
 _REQUEST_ERRORS = frozenset(
-    name for name, obj in vars(requests.exceptions).items()
+    name
+    for name, obj in vars(requests.exceptions).items()
     if isinstance(obj, type) and issubclass(obj, Exception)
 )
 _HTTP_CODE = re.compile(r"^http_[1-5][0-9]{2}$")
-_UNIT = re.compile(r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|senate watcher|trades_congress\.json|ark_holdings\.json)$")
+_UNIT = re.compile(
+    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|senate watcher|trades_congress\.json|ark_holdings\.json)$"
+)
 MAX_COUNT = 10**9
 
 
-def _exception_classes() -> frozenset:
+def _exception_classes() -> frozenset[str]:
     """Class names that may be stored: builtins, SQLAlchemy, psycopg, requests. Others -> 'Exception'."""
     import builtins
 
@@ -87,9 +120,19 @@ def _exception_classes() -> frozenset:
     import sqlalchemy.exc
 
     names = set()
-    for module in (builtins, sqlalchemy.exc, psycopg, psycopg.errors, requests.exceptions):
+    for module in (
+        builtins,
+        sqlalchemy.exc,
+        psycopg,
+        psycopg.errors,
+        requests.exceptions,
+    ):
         for name, obj in vars(module).items():
-            if isinstance(obj, type) and issubclass(obj, BaseException) and not name.startswith("_"):
+            if (
+                isinstance(obj, type)
+                and issubclass(obj, BaseException)
+                and not name.startswith("_")
+            ):
                 names.add(name)
     return frozenset(names)
 
@@ -98,7 +141,7 @@ EXCEPTION_CLASSES = _exception_classes()
 _SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
 
 
-def _field_names() -> frozenset:
+def _field_names() -> frozenset[str]:
     names = set()
     for model in list(RECORD_MODELS.values()) + [ShortInterestHistory]:
         for name, info in model.model_fields.items():
@@ -111,7 +154,7 @@ def _field_names() -> frozenset:
 FIELD_NAMES = _field_names()
 
 
-def _member(value: Any, allowed) -> bool:
+def _member(value: Any, allowed: Container[str]) -> bool:
     return isinstance(value, str) and value in allowed
 
 
@@ -142,7 +185,11 @@ def _field_path(value: Any) -> str:
 
 
 def _count(value: Any) -> Optional[int]:
-    ok = isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAX_COUNT
+    ok = (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= MAX_COUNT
+    )
     return value if ok else None
 
 
@@ -164,23 +211,33 @@ def safe_diagnostics(diag: Any) -> Optional[Dict[str, Any]]:
             {
                 "record": _count(e.get("record")),
                 "field": _field_path(e.get("field")),
-                "type": e["type"] if _member(e.get("type"), VALIDATION_ERROR_TYPES) else "invalid",
+                "type": e["type"]
+                if _member(e.get("type"), VALIDATION_ERROR_TYPES)
+                else "invalid",
             }
-            for e in errors[:MAX_ENTRIES] if isinstance(e, dict)
+            for e in errors[:MAX_ENTRIES]
+            if isinstance(e, dict)
         ]
     failures = diag.get("failures")
     if isinstance(failures, list):
         truncated |= len(failures) > MAX_ENTRIES
         out["failures"] = [
             {
-                "unit": f["unit"] if isinstance(f.get("unit"), str) and _UNIT.match(f["unit"]) else "?",
+                "unit": f["unit"]
+                if isinstance(f.get("unit"), str) and _UNIT.match(f["unit"])
+                else "?",
                 "code": failure_code(f.get("code")),
             }
-            for f in failures[:MAX_ENTRIES] if isinstance(f, dict)
+            for f in failures[:MAX_ENTRIES]
+            if isinstance(f, dict)
         ]
     exc = diag.get("exception")
     if isinstance(exc, dict) and "name" in exc:
-        out["exception"] = {"name": exc["name"] if _member(exc["name"], EXCEPTION_CLASSES) else "Exception"}
+        out["exception"] = {
+            "name": exc["name"]
+            if _member(exc["name"], EXCEPTION_CLASSES)
+            else "Exception"
+        }
         if isinstance(exc.get("sqlstate"), str) and _SQLSTATE.match(exc["sqlstate"]):
             out["exception"]["sqlstate"] = exc["sqlstate"]
     if truncated:
@@ -192,10 +249,13 @@ def safe_diagnostics(diag: Any) -> Optional[Dict[str, Any]]:
 
 def exception_diagnostics(exc: BaseException) -> Dict[str, Any]:
     orig = getattr(exc, "orig", None)
-    return {"exception": {
-        "name": type(exc).__name__,
-        "sqlstate": getattr(orig, "sqlstate", None) or getattr(exc, "sqlstate", None),
-    }}
+    return {
+        "exception": {
+            "name": type(exc).__name__,
+            "sqlstate": getattr(orig, "sqlstate", None)
+            or getattr(exc, "sqlstate", None),
+        }
+    }
 
 
 def render_summary(code: str, diag: Optional[Dict[str, Any]]) -> str:
@@ -221,5 +281,8 @@ def render_summary(code: str, diag: Optional[Dict[str, Any]]) -> str:
             parts.append(shown)
     exc = diag.get("exception")
     if exc:
-        parts.append(exc["name"] + (f" (SQLSTATE {exc['sqlstate']})" if "sqlstate" in exc else ""))
+        parts.append(
+            exc["name"]
+            + (f" (SQLSTATE {exc['sqlstate']})" if "sqlstate" in exc else "")
+        )
     return "; ".join(parts)

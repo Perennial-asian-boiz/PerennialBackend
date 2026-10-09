@@ -1,6 +1,6 @@
 """Engine factory shared by the importer, CLI, and migrations."""
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL, Engine
@@ -8,7 +8,7 @@ from sqlalchemy.engine import URL, Engine
 from src.db.config import get_database_url, parse_database_url
 
 
-def make_engine(url: Optional[Union[str, URL]] = None, **kwargs) -> Engine:
+def make_engine(url: Optional[Union[str, URL]] = None, **kwargs: Any) -> Engine:
     """
     Create an engine. hide_parameters keeps bound values (row contents) out of
     SQLAlchemy exception messages, so a failed insert cannot echo payload data.

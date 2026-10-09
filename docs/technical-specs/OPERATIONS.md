@@ -174,3 +174,76 @@ WAL, recovery to a timestamp, service failover, cloud permissions, production da
 loss, or production RTO. Only the managed-service exercise above establishes PITR
 evidence. Synthetic archives may be deleted after their evidence is recorded;
 production backup retention is separately owned by the deployment.
+
+## Phase 0 quality gates
+
+The baseline is Python **3.12** (`.python-version` pins 3.12.13) and PostgreSQL
+**17** for local development and CI. The production version decision (roadmap
+D2) remains part of Bryan's Gate 0 review; no deployed runtime has been changed.
+Use a 3.12 interpreter to create `.venv`, then install `requirements-dev.txt`.
+Runtime and tool top-level requirements are exact-pinned; a complete transitive
+lock with hashes remains Phase 2 work.
+
+From the repository root:
+
+```sh
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m ruff check
+.venv/bin/python -m ruff format --check
+.venv/bin/python -m mypy
+REQUIRE_DATABASE_TESTS=1 .venv/bin/python -m pytest development/backend/tests -q
+.venv/bin/python development/database/ops/quality_gate.py
+.venv/bin/python -m pip_audit -r requirements-dev.txt --progress-spinner off
+```
+
+Export `TEST_DATABASE_URL` pointing to a disposable PostgreSQL 17 server on
+loopback with `test` in its database name before the last three checks. Never
+use `DATABASE_URL` or provider credentials. Tests and the migration gate create
+and drop their own randomly named databases; the URL's named database is not
+migrated or cleared by the gate. The test role needs database-creation rights on
+this isolated server. Put the PostgreSQL 17 `pg_dump` and `pg_restore` clients
+on PATH for restore-drill tests. The workflow installs them from the
+[official PostgreSQL Ubuntu repository](https://www.postgresql.org/download/linux/ubuntu/).
+
+Ruff and strict mypy cover the complete `src/db`, `src/ingestion`, and
+`src/pipeline` trees. Ruff also covers the migration-gate script. Legacy services
+are outside this initial static-check scope; existing tests still exercise
+legacy compatibility. The database rig retains `test_pipeline_contract.py`.
+No new blanket mypy suppressions are applied to the core packages. APScheduler
+has a narrow missing-stubs exemption; legacy service imports are skipped.
+
+On macOS, uv's standalone Python may fail when pip-audit creates a **copied**
+temporary venv (`libpython3.12.dylib` cannot be found). In an environment freshly
+installed from `requirements-dev.txt`, `python -m pip check` followed by
+`python -m pip_audit --progress-spinner off` audits the installed dependency set
+without that temporary venv. This does not suppress vulnerability findings.
+Linux CI keeps the requirements-based audit.
+
+### Review and protection activation
+
+The workflow's required check name is exactly **Backend quality**. The proposed
+GitHub protection payload is `.github/branch-protection.json`: up-to-date branch,
+one approval, stale-review dismissal, code-owner approval, last-push approval,
+resolved conversations, no force pushes/deletions, and enforcement for admins.
+It is staged for Gate 0 review, not automatically applied by CI. Once the
+follow-up branch is authorized for publication and its workflow is green, Bryan
+can apply the reviewed payload:
+
+```sh
+gh api --method PUT repos/Perennial-asian-boiz/PerennialBackend/branches/main/protection \
+  --input .github/branch-protection.json
+```
+
+Verify the live response and repository rulesets after applying. GitHub usernames
+in CODEOWNERS are human accounts, not rig seats. The database coordinator routes
+checker review (plus the Astra security auditor for dependency/network changes)
+and records the verdict against the actual PR head commit. Request
+`haohnguyen94-droid` on the insider integration follow-up, even when the changed
+file is the collector rather than `insider.py`. The author must not self-approve.
+Bryan owns final merge and production decisions. Until publication and review,
+local test results do not mean GitHub CI or Gate 0 has passed.
+
+Historical review packets and findings are archived under `docs/reviews/`, with
+per-file hashes and original authorship. Phase 0 work is tracked in GitHub and
+linked from its Gate 0 handoff; `/private/tmp` remains only a local seat handoff
+and scratch-evidence location.

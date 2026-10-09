@@ -1,4 +1,4 @@
-name: Backend tests
+name: Backend quality gates
 on:
   push:
   pull_request:
@@ -6,10 +6,12 @@ permissions:
   contents: read
 jobs:
   postgres-tests:
+    name: Backend quality
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_USER: perennial_test
           POSTGRES_PASSWORD: synthetic_ci_only
@@ -28,9 +30,31 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version-file: .python-version
           cache: pip
-      - run: python -m pip install -r requirements.txt
-      - run: sudo apt-get update && sudo apt-get install -y postgresql-client-16
-      - run: python -m pytest -q
-        working-directory: development/backend
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Install pinned requirements
+        run: python -m pip install -r requirements-dev.txt
+      - name: Install PostgreSQL 17 client tools
+        # Official PGDG repository instructions: https://www.postgresql.org/download/linux/ubuntu/
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail --silent --show-error -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+      - name: Lint
+        run: python -m ruff check
+      - name: Formatting
+        run: python -m ruff format --check
+      - name: Strict core types
+        run: python -m mypy
+      - name: Synthetic unit and PostgreSQL tests
+        run: python -m pytest development/backend/tests -q
+      - name: Migration round-trip and drift
+        run: python development/database/ops/quality_gate.py
+      - name: Dependency audit
+        run: python -m pip_audit -r requirements-dev.txt --progress-spinner off

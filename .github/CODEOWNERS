@@ -1,0 +1,11 @@
+# Human GitHub accounts; OpenRig seat names are not GitHub reviewers.
+# The database coordinator routes independent checker/security review evidence.
+* @bryan-tieu
+/development/database/ @bryan-tieu
+/development/backend/src/db/ @bryan-tieu
+/development/backend/src/ingestion/ @bryan-tieu
+/development/backend/src/pipeline/ @bryan-tieu
+/development/backend/src/services/consensus_watchlist/fetchers/ @bryan-tieu
+/development/backend/src/services/consensus_watchlist/fetchers/insider.py @haohnguyen94-droid @bryan-tieu
+/.github/ @bryan-tieu
+/development/database/ops/ @bryan-tieu

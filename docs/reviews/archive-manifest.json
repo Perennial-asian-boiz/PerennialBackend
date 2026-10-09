@@ -1,0 +1,38 @@
+{
+  "f9c73aaa/review-ready.md": {
+    "source": "/private/tmp/perennial-pipeline-rig/review-ready-f9c73aaa.md",
+    "sha256": "95154e2c35b604d20b9eb6aabdd64a429ae209a4f8b9dc32b8c7ae1c80ad16a0"
+  },
+  "f9c73aaa/candidate-manifest.json": {
+    "source": "/private/tmp/perennial-pipeline-rig/candidate-manifest-f9c73aaa.json",
+    "sha256": "da1145cf28c7dc34ea203caad4b029e806a1d4494b62cd860e96b5154fdb1490"
+  },
+  "f9c73aaa/findings.md": {
+    "source": "/private/tmp/perennial-pipeline-rig/database-rig-findings-f9c73aaa.md",
+    "sha256": "9bd7b3e81bacb3a6a59b46a86f6906f00077d307241d2d2231a1e8297526bef4"
+  },
+  "b3ef39d8/review-ready.md": {
+    "source": "/private/tmp/perennial-pipeline-rig/review-ready.md",
+    "sha256": "ba906780201a28d81d1375f2784b80f509924dc7f1acc0155a35548ab979045a"
+  },
+  "b3ef39d8/candidate-manifest.json": {
+    "source": "/private/tmp/perennial-pipeline-rig/candidate-manifest.json",
+    "sha256": "a949e7e001904dedb24e9688a301d0dd85a354470841f85efebcdaf3df6fa077"
+  },
+  "b3ef39d8/findings.md": {
+    "source": "/private/tmp/perennial-pipeline-rig/database-rig-findings-b3ef39d8.md",
+    "sha256": "b0abccf39ff310e6b3fd73920956c760314e1e695f43b0b279ff8c0ae30ecaee"
+  },
+  "checker-report.md": {
+    "source": ".local-tools/rigs/database/checker-report.md",
+    "sha256": "8487970ad37ec3676adef7a6824c3aaac48a289e2234719ccf2b7d0b7a5c64d7"
+  },
+  "security-report.md": {
+    "source": ".local-tools/rigs/database/security-report.md",
+    "sha256": "7a65d3d44b719674d7ec960c0c23f497212c96f0c28d5a26ac6541ac4305a77b"
+  },
+  "fingerprint_candidate.py": {
+    "source": "/private/tmp/perennial-pipeline-rig/fingerprint_candidate.py",
+    "sha256": "e663055d5b49dbde32d3818ed3e8cdc352be2ea607bab18899bc4eab99bb4894"
+  }
+}

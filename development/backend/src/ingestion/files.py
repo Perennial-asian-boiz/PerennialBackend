@@ -38,14 +38,20 @@ MAX_FILE_BYTES = 25 * 1024 * 1024
 FILE_MODES = ("file", "fixture")
 
 
-def read_json_bounded(path: Union[str, Path], max_bytes: int = MAX_FILE_BYTES) -> Tuple[Any, Optional[str]]:
+def read_json_bounded(
+    path: Union[str, Path], max_bytes: int = MAX_FILE_BYTES
+) -> Tuple[Any, Optional[str]]:
     """
     Parse a regular JSON file of at most max_bytes. Returns (data, None) or
     (None, code) with code in file_unreadable / input_too_large / malformed_json.
     The size limit is enforced on the bytes actually read, not only on stat().
     """
+    fd: Optional[int]
     try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(
+            str(path),
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
     except OSError:
         return None, "file_unreadable"
     try:
@@ -63,18 +69,24 @@ def read_json_bounded(path: Union[str, Path], max_bytes: int = MAX_FILE_BYTES) -
         return None, "input_too_large"
     try:
         return json.loads(raw.decode("utf-8")), None
-    except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+    except (
+        ValueError,
+        RecursionError,
+    ):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
         return None, "malformed_json"
 
 
 def read_fetcher_file(
-    source: str, path: Union[str, Path], mode: str = "file", attest_complete: bool = False
+    source: str,
+    path: Union[str, Path],
+    mode: str = "file",
+    attest_complete: bool = False,
 ) -> CollectionOutcome:
     if mode not in FILE_MODES:
         raise ValueError(f"file imports use mode 'file' or 'fixture', not {mode!r}")
     path = Path(path)
 
-    def fail(code: str, **diag) -> CollectionOutcome:
+    def fail(code: str, **diag: Any) -> CollectionOutcome:
         return CollectionOutcome.failure(source, mode, code, diagnostics=diag or None)
 
     data, problem = read_json_bounded(path)

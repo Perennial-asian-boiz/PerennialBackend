@@ -34,7 +34,7 @@ Failed-input diagnostics and retention policy:
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from pydantic import ValidationError
 from sqlalchemy import insert, select, text, update
@@ -60,11 +60,15 @@ from src.ingestion.diagnostics import (
     safe_diagnostics,
 )
 from src.ingestion.schemas import ONE_ROW_PER_SECURITY, RECORD_MODELS, SourceRecord
+from src.pipeline.lifecycle import (
+    RunIdentityError,
+    RunInactive,
+    begin_run,
+    require_active,
+)
 
-from src.pipeline.lifecycle import begin_run, require_active, RunInactive, RunIdentityError
 
-
-def safe_coverage(value):
+def safe_coverage(value: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(value, dict):
         return None
     scope = value.get("scope")
@@ -80,7 +84,7 @@ RETRYABLE_SQLSTATES = frozenset({"40001", "40P01"})
 MAX_ATTEMPTS = 3
 
 # Fault-injection seam for rollback tests; None in normal operation.
-_after_batch_write_hook = None
+_after_batch_write_hook: Optional[Callable[[Connection], None]] = None
 
 
 @dataclass
@@ -99,16 +103,24 @@ class CollectionOutcome:
     error_code: Optional[str] = None
     diagnostics: Optional[Dict[str, Any]] = None
     source_as_of: Optional[date] = None
-    envelope: Optional[Dict[str, Any]] = None  # fetcher top-level metadata; sanitized before storage
+    envelope: Optional[Dict[str, Any]] = (
+        None  # fetcher top-level metadata; sanitized before storage
+    )
     coverage: Optional[Dict[str, Any]] = None
 
     @classmethod
-    def success(cls, source: str, mode: str, records: List[Any], **kw) -> "CollectionOutcome":
+    def success(
+        cls, source: str, mode: str, records: List[Any], **kw: Any
+    ) -> "CollectionOutcome":
         return cls(source=source, mode=mode, succeeded=True, records=records, **kw)
 
     @classmethod
-    def failure(cls, source: str, mode: str, error_code: str, **kw) -> "CollectionOutcome":
-        return cls(source=source, mode=mode, succeeded=False, error_code=error_code, **kw)
+    def failure(
+        cls, source: str, mode: str, error_code: str, **kw: Any
+    ) -> "CollectionOutcome":
+        return cls(
+            source=source, mode=mode, succeeded=False, error_code=error_code, **kw
+        )
 
 
 @dataclass
@@ -163,7 +175,7 @@ def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
     found = _Errors()
     parsed: List[SourceRecord] = []
     exchanges: Dict[str, str] = {}
-    seen: set = set()
+    seen: set[str] = set()
     for index, raw in enumerate(raw_records):
         if not isinstance(raw, dict):
             found.add(index, "", "not_an_object")
@@ -171,7 +183,9 @@ def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
         try:
             record = model.model_validate(raw)
         except ValidationError as exc:
-            for err in exc.errors(include_url=False, include_input=False, include_context=False):
+            for err in exc.errors(
+                include_url=False, include_input=False, include_context=False
+            ):
                 loc = ".".join(str(part) for part in err.get("loc", ()))
                 found.add(index, loc, err.get("type", "invalid"))
             continue
@@ -187,17 +201,27 @@ def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
                 continue
         parsed.append(record)
     if found.count:
-        raise ImportFailure("validation_failed", {
-            "input_count": len(raw_records), "error_count": found.count, "errors": found.errors,
-        })
+        raise ImportFailure(
+            "validation_failed",
+            {
+                "input_count": len(raw_records),
+                "error_count": found.count,
+                "errors": found.errors,
+            },
+        )
     return parsed
 
 
 def _conflict(symbol: str, column: str) -> ImportFailure:
-    return ImportFailure("security_conflict", {"failures": [{"unit": symbol, "code": f"{column}_conflict"}]})
+    return ImportFailure(
+        "security_conflict",
+        {"failures": [{"unit": symbol, "code": f"{column}_conflict"}]},
+    )
 
 
-def _resolve_securities(conn: Connection, records: Sequence[SourceRecord]) -> Dict[str, int]:
+def _resolve_securities(
+    conn: Connection, records: Sequence[SourceRecord]
+) -> Dict[str, int]:
     wanted: Dict[str, Dict[str, Optional[str]]] = {}
     for r in records:
         entry = wanted.setdefault(r.ticker, {"exchange": None, "currency": None})
@@ -215,7 +239,12 @@ def _resolve_securities(conn: Connection, records: Sequence[SourceRecord]) -> Di
         .on_conflict_do_nothing(index_elements=["symbol"])
     )
     rows = conn.execute(
-        select(securities.c.id, securities.c.symbol, securities.c.exchange, securities.c.currency)
+        select(
+            securities.c.id,
+            securities.c.symbol,
+            securities.c.exchange,
+            securities.c.currency,
+        )
         .where(securities.c.symbol.in_(symbols))
         .order_by(securities.c.symbol)
         .with_for_update()
@@ -231,14 +260,18 @@ def _resolve_securities(conn: Connection, records: Sequence[SourceRecord]) -> Di
             if new and not existing:
                 changes[column] = new
         if changes:
-            conn.execute(update(securities).where(securities.c.id == row.id).values(**changes))
+            conn.execute(
+                update(securities).where(securities.c.id == row.id).values(**changes)
+            )
         ids[row.symbol] = row.id
     if set(symbols) - set(ids):
         raise RuntimeError("securities could not be resolved")
     return ids
 
 
-def _write_batch(conn: Connection, batch: CanonicalBatch, source_as_of: Optional[date]):
+def _write_batch(
+    conn: Connection, batch: CanonicalBatch, source_as_of: Optional[date]
+) -> tuple[int, bool]:
     batch_id = conn.execute(
         pg_insert(source_batches)
         .values(
@@ -277,11 +310,16 @@ def _write_batch(conn: Connection, batch: CanonicalBatch, source_as_of: Optional
     return batch_id, False
 
 
-def _inactive_result(outcome, run_id):
+def _inactive_result(outcome: CollectionOutcome, run_id: int) -> ImportResult:
     """Leave a finalized run untouched when its collection loses the lease."""
-    return ImportResult(source=outcome.source, status="failed", run_id=run_id,
-                        accepted_count=0, error_code="worker_abandoned",
-                        error_summary="Worker heartbeat expired.")
+    return ImportResult(
+        source=outcome.source,
+        status="failed",
+        run_id=run_id,
+        accepted_count=0,
+        error_code="worker_abandoned",
+        error_summary="Worker heartbeat expired.",
+    )
 
 
 def _record_failed_run(
@@ -302,7 +340,8 @@ def _record_failed_run(
         except RunInactive:
             return _inactive_result(outcome, run_id)
         conn.execute(
-            update(ingestion_runs).where(ingestion_runs.c.id == run_id)
+            update(ingestion_runs)
+            .where(ingestion_runs.c.id == run_id)
             .values(
                 source=outcome.source,
                 status="failed",
@@ -326,8 +365,13 @@ def _record_failed_run(
     except SQLAlchemyError:
         pass
     return ImportResult(
-        source=outcome.source, status="failed", run_id=run_id, input_count=input_count,
-        accepted_count=0, error_code=code, error_summary=summary,
+        source=outcome.source,
+        status="failed",
+        run_id=run_id,
+        input_count=input_count,
+        accepted_count=0,
+        error_code=code,
+        error_summary=summary,
     )
 
 
@@ -349,12 +393,18 @@ def prune_failed_diagnostics(
                     ORDER BY finished_at DESC, id DESC LIMIT :keep))
             """
         ),
-        {"source": source, "cutoff": _now() - timedelta(days=max_age_days), "keep": keep},
+        {
+            "source": source,
+            "cutoff": _now() - timedelta(days=max_age_days),
+            "keep": keep,
+        },
     )
     return result.rowcount
 
 
-def import_collection(engine: Engine, outcome: CollectionOutcome, *, run_id: Optional[int] = None) -> ImportResult:
+def import_collection(
+    engine: Engine, outcome: CollectionOutcome, *, run_id: Optional[int] = None
+) -> ImportResult:
     """Import one collection outcome. Returns the recorded run; never raises for bad input."""
     if outcome.source not in SOURCES:
         raise ValueError("unknown source")
@@ -372,21 +422,41 @@ def import_collection(engine: Engine, outcome: CollectionOutcome, *, run_id: Opt
 
     if not outcome.succeeded:
         return _record_failed_run(
-            engine, outcome, started_at, outcome.error_code, outcome.diagnostics, None, run_id
+            engine,
+            outcome,
+            started_at,
+            outcome.error_code,
+            outcome.diagnostics,
+            None,
+            run_id,
         )
 
     raw = outcome.records
     input_count = len(raw) if isinstance(raw, list) else None
     try:
         records = validate_records(outcome.source, raw)
-        batch = canonicalize(outcome.source, records, outcome.source_as_of, outcome.envelope)
+        batch = canonicalize(
+            outcome.source, records, outcome.source_as_of, outcome.envelope
+        )
     except ImportFailure as failure:
         return _record_failed_run(
-            engine, outcome, started_at, failure.code, failure.diagnostics, input_count, run_id
+            engine,
+            outcome,
+            started_at,
+            failure.code,
+            failure.diagnostics,
+            input_count,
+            run_id,
         )
     except Exception as exc:  # unexpected input shape must still leave a failed run
         return _record_failed_run(
-            engine, outcome, started_at, "validation_error", exception_diagnostics(exc), input_count, run_id
+            engine,
+            outcome,
+            started_at,
+            "validation_error",
+            exception_diagnostics(exc),
+            input_count,
+            run_id,
         )
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -397,7 +467,8 @@ def import_collection(engine: Engine, outcome: CollectionOutcome, *, run_id: Opt
                 if _after_batch_write_hook is not None:
                     _after_batch_write_hook(conn)
                 conn.execute(
-                    update(ingestion_runs).where(ingestion_runs.c.id == run_id)
+                    update(ingestion_runs)
+                    .where(ingestion_runs.c.id == run_id)
                     .values(
                         source=outcome.source,
                         status="succeeded",
@@ -416,8 +487,13 @@ def import_collection(engine: Engine, outcome: CollectionOutcome, *, run_id: Opt
                     )
                 )
             return ImportResult(
-                source=outcome.source, status="succeeded", run_id=run_id, batch_id=batch_id,
-                reused_batch=reused, content_hash=batch.content_hash, input_count=input_count,
+                source=outcome.source,
+                status="succeeded",
+                run_id=run_id,
+                batch_id=batch_id,
+                reused_batch=reused,
+                content_hash=batch.content_hash,
+                input_count=input_count,
                 accepted_count=len(batch.records),
             )
         except RunInactive:
@@ -434,7 +510,11 @@ def import_collection(engine: Engine, outcome: CollectionOutcome, *, run_id: Opt
             code, diag = "database_error", exception_diagnostics(exc)
         except SQLAlchemyError as exc:
             code, diag = "database_error", exception_diagnostics(exc)
-        except Exception as exc:  # anything else still rolls back and leaves a failed run
+        except (
+            Exception
+        ) as exc:  # anything else still rolls back and leaves a failed run
             code, diag = "internal_error", exception_diagnostics(exc)
         break
-    return _record_failed_run(engine, outcome, started_at, code, diag, input_count, run_id)
+    return _record_failed_run(
+        engine, outcome, started_at, code, diag, input_count, run_id
+    )

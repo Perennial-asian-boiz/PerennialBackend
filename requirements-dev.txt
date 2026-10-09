@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Phase 0 quality gates. Keep new tooling exact-pinned.
+ruff==0.16.10
+mypy==2.4.0
+types-requests==2.33.0.20261006
+pip-audit==2.10.1

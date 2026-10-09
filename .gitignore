@@ -49,3 +49,5 @@ data/
 /CLAUDE.md
 /.agents/skills/
 /.codex/plugins/
+# Also ignore a project-local venv selected through a symlink.
+.venv

@@ -3,14 +3,14 @@
 
 # HTTP for every fetcher (FMP, arkfunds.io, SecuritiesDB, Nasdaq)
 requests==2.34.2
-urllib3==2.7.0
+urllib3==2.8.0
 certifi==2026.6.17
 
 # Reads development/backend/.env
 python-dotenv==1.2.2
 
 # Pipeline scheduling — scheduler/cron.py
-apscheduler>=3.10,<4
+apscheduler==3.11.3
 
 # Database — development/database (migrations) and development/backend/src/db, src/ingestion
 SQLAlchemy==2.0.54
@@ -19,4 +19,4 @@ alembic==1.20.0
 pydantic==2.13.5
 
 # Tests — development/backend/tests
-pytest==8.4.2
+pytest==9.0.3
