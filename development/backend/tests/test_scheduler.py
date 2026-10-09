@@ -69,7 +69,7 @@ def test_database_scheduler_propagates_failure_and_disposes(monkeypatch):
         def dispose(self):
             self.disposed = True
     engine = Engine()
-    monkeypatch.setattr(scheduler, 'make_engine', lambda _url: engine)
+    monkeypatch.setattr(scheduler, 'make_engine', lambda _url, **kwargs: engine)
     def broken(_, **kwargs):
         raise RuntimeError('synthetic failure')
     monkeypatch.setattr(scheduler, 'run_pipeline', broken)
@@ -101,7 +101,7 @@ def test_real_scheduler_executor_keeps_failure_logs_and_events_safe(monkeypatch,
             raise ValueError(url)
         except ValueError as cause:
             raise OperationalError('SELECT 1', {}, Exception(url)) from cause
-    monkeypatch.setattr(scheduler, 'make_engine', broken if failure_stage == 'engine' else lambda _url: engine)
+    monkeypatch.setattr(scheduler, 'make_engine', broken if failure_stage == 'engine' else lambda _url, **kwargs: engine)
     monkeypatch.setattr(scheduler, 'run_pipeline', broken)
     job = SimpleNamespace(misfire_grace_time=None, func=scheduler.run_full_pipeline,
                           args=(), kwargs={}, id='synthetic_safe_failure')
@@ -123,7 +123,7 @@ def test_scheduler_sanitizes_disposal_errors(monkeypatch, caplog):
     class Engine:
         def dispose(self):
             raise RuntimeError('SYNTHETIC_DISPOSAL_SECRET')
-    monkeypatch.setattr(scheduler, 'make_engine', lambda _url: Engine())
+    monkeypatch.setattr(scheduler, 'make_engine', lambda _url, **kwargs: Engine())
     monkeypatch.setattr(scheduler, 'run_pipeline', lambda engine, **kwargs: 42)
     assert scheduler.run_full_pipeline() == 42
     assert 'SYNTHETIC_DISPOSAL_SECRET' not in caplog.text

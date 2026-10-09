@@ -99,7 +99,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 settings.require_provider_keys("fmp")
             elif args.source == "insider_trades":
                 settings.require_provider_keys("finnhub")
-        engine = make_engine(settings.database_url.get_secret_value())
+        engine = make_engine(
+            settings.database_url.get_secret_value(),
+            workload="pipeline" if args.command == "run-pipeline" else "cli",
+        )
     except SettingsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
