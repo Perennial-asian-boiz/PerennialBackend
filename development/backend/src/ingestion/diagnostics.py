@@ -67,6 +67,8 @@ UNIT_KINDS = frozenset(
     }
 )
 _COUNT_KEYS = (
+    "senate_pages_fetched",
+    "house_pages_fetched",
     "input_count",
     "error_count",
     "planned",
