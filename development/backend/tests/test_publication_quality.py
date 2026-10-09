@@ -12,6 +12,13 @@ from src.settings import QualityThreshold
 from test_pipeline import caps, inputs
 
 
+def test_publication_failure_code_is_in_safe_diagnostic_vocabulary():
+    from src.ingestion.diagnostics import render_summary, safe_code
+
+    assert safe_code("publication_quality_failed") == "publication_quality_failed"
+    assert render_summary("publication_quality_failed", None) == "publication quality checks failed"
+
+
 def test_cli_exposes_manual_publish_override():
     from src.ingestion.cli import _parser
 
