@@ -63,6 +63,7 @@ import requests
 from src.ingestion.files import read_json_bounded
 from src.ingestion.importer import CollectionOutcome
 from src.services.consensus_watchlist.paths import PACKAGE_DIR
+from src.settings import Settings
 
 FETCHERS_DIR = PACKAGE_DIR / "fetchers"
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024
@@ -507,20 +508,28 @@ def collect_congress(
     session: Optional[requests.Session] = None,
     api_key: Optional[str] = None,
     sleep: Callable[[float], None] = time.sleep,
+    *,
+    settings: Optional[Settings] = None,
 ) -> CollectionOutcome:
     fmp = _fetcher("fmp")
-    key = api_key if api_key is not None else fmp.FMP_API_KEY
-    if not key or key == "YOUR_FMP_KEY_HERE":
+    if api_key is not None:
+        key = api_key
+    elif settings is not None and settings.fmp_api_key is not None:
+        key = settings.fmp_api_key.get_secret_value()
+    else:
+        key = fmp.FMP_API_KEY
+    if not key or key.lower().startswith("your_"):
         return CollectionOutcome.failure(
             "congress_trades", "live", "missing_credential"
         )
+    page_limit = settings.fmp_max_pages if settings is not None else fmp.MAX_PAGES
     session = session or requests.Session()
     # Initially one request per chamber plus Watcher. Full pages discover
     # further required units; terminated pagination is not unattempted work.
     tracker = _Tracker("Congress requests", planned=3)
     raw_fmp: List[Dict[str, Any]] = []
     for chamber in ("senate", "house"):
-        for page in range(fmp.MAX_PAGES):
+        for page in range(page_limit):
             unit = f"{chamber} page {page}"
             resp = _get_json(
                 session,
@@ -540,7 +549,7 @@ def collect_congress(
             if len(items) > 20:
                 tracker.fail(unit, "malformed_response")
                 return tracker.outcome("congress_trades", [])
-            if len(items) == 20 and page == fmp.MAX_PAGES - 1:
+            if len(items) == 20 and page == page_limit - 1:
                 tracker.fail(unit, "pagination_exhausted")
                 return tracker.outcome("congress_trades", [])
             tracker.ok()
