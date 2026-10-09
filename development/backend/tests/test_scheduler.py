@@ -70,7 +70,7 @@ def test_database_scheduler_propagates_failure_and_disposes(monkeypatch):
             self.disposed = True
     engine = Engine()
     monkeypatch.setattr(scheduler, 'make_engine', lambda _url: engine)
-    def broken(_):
+    def broken(_, **kwargs):
         raise RuntimeError('synthetic failure')
     monkeypatch.setattr(scheduler, 'run_pipeline', broken)
     with pytest.raises(scheduler.PipelineRunFailed, match='^database pipeline run failed$'):
@@ -96,7 +96,7 @@ def test_real_scheduler_executor_keeps_failure_logs_and_events_safe(monkeypatch,
             if failure_stage == 'pipeline_and_dispose':
                 raise RuntimeError(url)
     engine = Engine()
-    def broken(*args):
+    def broken(*args, **kwargs):
         try:
             raise ValueError(url)
         except ValueError as cause:
@@ -124,7 +124,7 @@ def test_scheduler_sanitizes_disposal_errors(monkeypatch, caplog):
         def dispose(self):
             raise RuntimeError('SYNTHETIC_DISPOSAL_SECRET')
     monkeypatch.setattr(scheduler, 'make_engine', lambda _url: Engine())
-    monkeypatch.setattr(scheduler, 'run_pipeline', lambda engine: 42)
+    monkeypatch.setattr(scheduler, 'run_pipeline', lambda engine, **kwargs: 42)
     assert scheduler.run_full_pipeline() == 42
     assert 'SYNTHETIC_DISPOSAL_SECRET' not in caplog.text
     assert 'engine dispose failed: RuntimeError' in caplog.text

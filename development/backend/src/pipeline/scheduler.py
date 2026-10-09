@@ -38,7 +38,7 @@ def run_full_pipeline(settings: Settings | None = None) -> int | None:
         settings.require_provider_keys("fmp")
         settings.require_provider_keys("finnhub")
         engine = make_engine(settings.database_url.get_secret_value())
-        return run_pipeline(engine)
+        return run_pipeline(engine, quality_thresholds=settings.quality_thresholds)
     except Exception as exc:
         logger.error("pipeline failed: %s", describe_exception(exc))
         failed = True
