@@ -33,7 +33,7 @@ load_dotenv(dotenv_path=ENV_PATH)
 
 FMP_API_KEY = os.getenv("FMP_API_KEY", "YOUR_FMP_KEY_HERE")
 BASE_URL = "https://financialmodelingprep.com/stable"
-MAX_PAGES = 3  # 20 trades per page = ~60 trades per chamber
+MAX_PAGES = 50  # Safety cap per chamber; full final page is not a complete result.
 
 # Senate Stock Watcher — free, no key, 8,350+ records back to 2019
 SENATE_WATCHER_URL = (
@@ -74,18 +74,21 @@ def fetch_chamber_trades(chamber: str):
             resp.raise_for_status()
             data = resp.json()
 
-            if not data:
-                break
-
             for item in data:
                 item["_chamber"] = chamber.capitalize()
 
             all_trades.extend(data)
-            print(f"[fmp] {chamber.capitalize()} page {page + 1} — {len(data)} trades")
+            if data:
+                print(f"[fmp] {chamber.capitalize()} page {page + 1} — {len(data)} trades")
 
         except Exception as e:
             print(f"[fmp] ❌ {chamber} page {page} error: {e}")
             break
+
+        if len(data) < 20:
+            break
+        if page == MAX_PAGES - 1:
+            raise RuntimeError("FMP pagination exhausted")
 
     return all_trades
 
