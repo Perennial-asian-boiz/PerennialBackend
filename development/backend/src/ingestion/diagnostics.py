@@ -35,6 +35,7 @@ MAX_ENTRIES = 20
 MAX_BYTES = 8192  # half the column CHECK; jsonb::text renders larger than json.dumps
 
 ERROR_SUMMARIES = {
+    "publication_quality_failed": "publication quality checks failed",
     "worker_abandoned": "Worker heartbeat expired.",
     "collection_failed": "collection did not complete",
     "partial_collection": "collection was incomplete; some units failed",
