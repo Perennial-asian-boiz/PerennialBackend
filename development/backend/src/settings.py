@@ -20,14 +20,18 @@ class QualityThreshold(BaseModel):
     max_count_ratio: float = Field(default=4.0, ge=1)
     null_share_margin: float = Field(default=0.05, ge=0, le=1)
     allow_equal_as_of: bool = False
+    null_fields: tuple[str, ...] = ()
 
 
 def _quality_defaults() -> dict[str, QualityThreshold]:
     return {
-        "congress_trades": QualityThreshold(),
-        "ark_holdings": QualityThreshold(),
-        "insider_trades": QualityThreshold(),
-        "short_interest": QualityThreshold(allow_equal_as_of=True),
+        "congress_trades": QualityThreshold(null_fields=("disclosure_date",)),
+        "ark_holdings": QualityThreshold(null_fields=("share_price",)),
+        "insider_trades": QualityThreshold(null_fields=("shares", "value")),
+        "short_interest": QualityThreshold(
+            allow_equal_as_of=True,
+            null_fields=("short_interest_shares", "average_daily_volume"),
+        ),
     }
 
 
