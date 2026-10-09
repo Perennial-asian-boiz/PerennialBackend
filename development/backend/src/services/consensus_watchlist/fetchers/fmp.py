@@ -35,7 +35,7 @@ from pathlib import Path
 # Importing the fetcher never reads a key or a dotenv file.
 FMP_API_KEY: str | None = None
 BASE_URL = "https://financialmodelingprep.com/stable"
-MAX_PAGES = 3  # 20 trades per page = ~60 trades per chamber
+MAX_PAGES = 50  # Safety cap per chamber; full final page is not a complete result.
 
 # Senate Stock Watcher — its newest trade is 2020-12-02, so the 2-year filter
 # drops every record. run() no longer downloads it. The URL and
@@ -86,18 +86,21 @@ def fetch_chamber_trades(
             resp.raise_for_status()
             data = resp.json()
 
-            if not data:
-                break
-
             for item in data:
                 item["_chamber"] = chamber.capitalize()
 
             all_trades.extend(data)
-            print(f"[fmp] {chamber.capitalize()} page {page + 1} — {len(data)} trades")
+            if data:
+                print(f"[fmp] {chamber.capitalize()} page {page + 1} — {len(data)} trades")
 
         except Exception as e:
             print(f"[fmp] ❌ {chamber} page {page} error: {e}")
             break
+
+        if len(data) < 20:
+            break
+        if page == MAX_PAGES - 1:
+            raise RuntimeError("FMP pagination exhausted")
 
     return all_trades
 
