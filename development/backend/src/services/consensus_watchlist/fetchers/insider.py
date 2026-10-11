@@ -23,9 +23,13 @@ PURPOSE:
         from an absence.
 
 SOURCE:
-    SecuritiesDB — Free, no key needed
-    https://securitiesdb.com/api/v1/stocks/{ticker}/insider-activity
-    Returns SEC Form 4 filings from EDGAR, refreshed daily
+    Finnhub — free tier, needs FINNHUB_API_KEY in development/backend/.env
+    https://finnhub.io/api/v1/stock/insider-transactions?symbol={ticker}
+    Returns SEC Form 4 transactions. Free tier allows 60 calls/minute.
+
+    Replaced SecuritiesDB, which went down in October 2026. Its URL and
+    parser are kept at the bottom of the PARSE section only because the
+    database collector (src/ingestion/collectors.py) still imports them.
 
 SCHEDULE:
     Runs daily at 9:05am (after fmp.py and ark.py)
@@ -70,16 +74,21 @@ from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
 
 load_dotenv(dotenv_path=ENV_PATH)
 
-SECURITIES_URL      = "https://securitiesdb.com/api/v1/stocks"
+FINNHUB_API_KEY     = os.getenv("FINNHUB_API_KEY", "")
+FINNHUB_URL         = "https://finnhub.io/api/v1/stock/insider-transactions"
+SOURCE_NAME         = "Finnhub (SEC Form 4)"
 LOOKBACK_DAYS       = 180    # 6 months
 MIN_BUY_VALUE       = 10_000 # $10K minimum conviction filter
 MAX_CONGRESS_TICKERS = 50
-REQUEST_DELAY       = 0.5    # seconds between API calls
+REQUEST_DELAY       = 1.1    # seconds between API calls — free tier is 60/minute
+RATE_LIMIT_WAIT     = 10     # seconds to wait before the one retry after a 429
+
+# Retired provider. Only src/ingestion/collectors.py uses this now.
+SECURITIES_URL      = "https://securitiesdb.com/api/v1/stocks"
 
 # Collection outcomes. These travel in the output file, not just the console,
 # so consensus.py can tell "checked, no buys" from "never found out".
 STATUS_SUCCESS   = "success"    # provider answered, transactions parsed (may be empty)
-STATUS_NOT_FOUND = "not_found"  # provider has no record of this ticker
 STATUS_FAILED    = "failed"     # request or parse did not complete — result unknown
 STATUS_PARTIAL   = "partial"    # run level only: some tickers failed
 
@@ -96,6 +105,7 @@ ERR_CONNECTION       = "connection_error"  # DNS / refused / network down
 ERR_HTTP             = "http_error"        # other non-200
 ERR_BAD_RESPONSE     = "bad_response"      # answered 200, shape unusable
 ERR_REQUEST          = "request_error"     # anything unclassified
+ERR_CREDENTIAL       = "credential_error"  # FINNHUB_API_KEY missing or rejected (401)
 ERR_INPUT_MISSING    = "input_missing"     # upstream fetcher never ran
 ERR_INPUT_UNREADABLE = "input_unreadable"  # upstream output corrupt
 
@@ -103,6 +113,7 @@ ERR_INPUT_UNREADABLE = "input_unreadable"  # upstream output corrupt
 #   transient — provider or network problem; retrying later should work
 #   provider  — provider rejected or errored on us; check status / API changes
 #   contract  — provider answered but the shape broke our parser; FIX CODE
+#   config    — our own setup is incomplete; fix development/backend/.env
 #   pipeline  — an earlier stage of our own pipeline produced no input
 ERROR_CATEGORY = {
     ERR_RATE_LIMITED:     "transient",
@@ -111,10 +122,21 @@ ERROR_CATEGORY = {
     ERR_HTTP:             "provider",
     ERR_BAD_RESPONSE:     "contract",
     ERR_REQUEST:          "unknown",
+    ERR_CREDENTIAL:       "config",
     ERR_INPUT_MISSING:    "pipeline",
     ERR_INPUT_UNREADABLE: "pipeline",
 }
 REQUEST_TIMEOUT = 15  # seconds
+
+
+def has_api_key():
+    """True when .env holds a real key, not empty or the .env.example placeholder."""
+    return bool(FINNHUB_API_KEY) and not FINNHUB_API_KEY.lower().startswith("your_")
+
+
+def lookback_cutoff():
+    """Oldest transaction date that still counts."""
+    return (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).date()
 
 
 # ─────────────────────────────────────────────────────────
@@ -198,29 +220,47 @@ def load_ark_tickers():
 
 def fetch_insider_activity(ticker: str):
     """
-    Fetches insider transaction data from SecuritiesDB.
+    Fetches insider transactions for one ticker from Finnhub.
     Returns {"status": ..., "data": ..., "error_code": ..., "error_detail": ...}.
 
-    A 404 is an answer (the provider has no record), so it is reported
-    separately from a failure, where we learned nothing.
+    Finnhub answers a ticker it does not know with 200 and an empty list,
+    so there is no separate "not on provider" outcome — that case reads as
+    a ticker with no transactions.
     """
     def failure(code, detail):
         return {"status": STATUS_FAILED, "data": None,
                 "error_code": code, "error_detail": detail}
 
-    try:
-        resp = requests.get(
-            f"{SECURITIES_URL}/{ticker}/insider-activity",
+    if not has_api_key():
+        return failure(ERR_CREDENTIAL, "FINNHUB_API_KEY is not set in .env")
+
+    def request():
+        # The key travels in a header, never the URL, so it cannot leak into
+        # an exception message that ends up in error_detail.
+        return requests.get(
+            FINNHUB_URL,
+            params={
+                "symbol": ticker,
+                "from":   lookback_cutoff().isoformat(),
+                "to":     datetime.now(timezone.utc).date().isoformat(),
+            },
+            headers={"X-Finnhub-Token": FINNHUB_API_KEY},
             timeout=REQUEST_TIMEOUT
         )
 
-        if resp.status_code == 404:
-            return {"status": STATUS_NOT_FOUND, "data": None,
-                    "error_code": None, "error_detail": None}
+    try:
+        resp = request()
+
         if resp.status_code == 429:
-            print(f"[insider] ⚠️  {ticker} rate limited — waiting 5s")
-            time.sleep(5)
-            return failure(ERR_RATE_LIMITED, "HTTP 429 from provider")
+            print(f"[insider] ⚠️  {ticker} rate limited — "
+                  f"waiting {RATE_LIMIT_WAIT}s, then one retry")
+            time.sleep(RATE_LIMIT_WAIT)
+            resp = request()
+
+        if resp.status_code == 429:
+            return failure(ERR_RATE_LIMITED, "HTTP 429 from provider, after one retry")
+        if resp.status_code == 401:
+            return failure(ERR_CREDENTIAL, "HTTP 401 — FINNHUB_API_KEY rejected")
         if resp.status_code != 200:
             return failure(ERR_HTTP, f"HTTP {resp.status_code} from provider")
 
@@ -247,9 +287,78 @@ def fetch_insider_activity(ticker: str):
 # PARSE — Extract meaningful insider buys
 # ─────────────────────────────────────────────────────────
 
-def parse_insider_buys(ticker: str, raw: dict, bucket: str):
+def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
     """
     Extracts open market PURCHASE transactions only.
+
+    Finnhub passes through the SEC Form 4 transaction code:
+        "P" → open market or private purchase    ✅ KEEP
+        "S" → sale                                ❌ SKIP
+        "A" → grant or award                      ❌ SKIP
+        "M" → option exercise                     ❌ SKIP
+        others (gift, tax withholding, ...)       ❌ SKIP
+
+    Additional filters:
+        isDerivative false      → shares, not options or warrants
+        value >= MIN_BUY_VALUE  → conviction buy only
+        date >= cutoff          → within lookback window
+
+    Finnhub has no value field, so value = change × transactionPrice.
+
+    Returns (buys, error_code, error_detail). An unparseable response is a
+    failure, not an empty result — we cannot claim this ticker had no
+    insider buying. That covers a response with no `data` list and a
+    purchase row whose date or numbers do not parse. It is reported as
+    `bad_response` (category "contract") because the provider answered and
+    our parser is what broke.
+    """
+    if not isinstance(raw, dict) or not isinstance(raw.get("data"), list):
+        return [], ERR_BAD_RESPONSE, "response has no `data` list"
+
+    buys   = []
+    cutoff = lookback_cutoff()
+
+    try:
+        for txn in raw["data"]:
+            # Only purchases of actual shares
+            if txn.get("transactionCode") != "P" or txn.get("isDerivative"):
+                continue
+
+            # Date within lookback window
+            date_str = txn.get("transactionDate") or ""
+            txn_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if txn_date < cutoff:
+                continue
+
+            # Must be real money — a missing price makes the value 0
+            shares = txn.get("change") or 0
+            value  = round(shares * (txn.get("transactionPrice") or 0), 2)
+            if value < MIN_BUY_VALUE:
+                continue
+
+            buys.append({
+                "ticker":           ticker,
+                "insider_name":     (txn.get("name") or "").strip(),
+                "transaction_type": "Purchase",
+                "value":            value,
+                "shares":           shares,
+                "transaction_date": date_str,
+                "bucket":           bucket,
+                "data_source":      "finnhub",
+                "fetched_at":       datetime.now(timezone.utc).isoformat(),
+            })
+
+    except Exception as e:
+        return [], ERR_BAD_RESPONSE, f"{type(e).__name__}: {e}"[:200]
+
+    return buys, None, None
+
+
+def parse_insider_buys(ticker: str, raw: dict, bucket: str):
+    """
+    RETIRED — parses the SecuritiesDB response shape. insider.py no longer
+    calls this. It stays because src/ingestion/collectors.py imports it;
+    delete it, with SECURITIES_URL, once that collector moves to Finnhub.
 
     SecuritiesDB transaction types:
         "Purchase" → open market buy with real money ✅ KEEP
@@ -329,22 +438,24 @@ def scan_tickers(tickers: list, bucket: str, label: str):
     outcomes  = []
     found     = 0
     no_buys   = 0
-    missing   = 0
     failed    = 0
+    credential_failure = None  # set once the key turns out missing or rejected
 
     print(f"\n[insider] {label}")
     print(f"[insider] Checking {len(tickers)} tickers...")
     print(f"[insider] Est. time: ~{len(tickers) * REQUEST_DELAY:.0f}s\n")
 
     for i, ticker in enumerate(tickers, 1):
-        result = fetch_insider_activity(ticker)
+        # A missing or rejected key fails every request the same way, so
+        # stop calling the provider and mark the remaining tickers unknown.
+        result = credential_failure or fetch_insider_activity(ticker)
         status = result["status"]
         code   = result["error_code"]
         detail = result["error_detail"]
         buys   = []
 
         if status == STATUS_SUCCESS:
-            buys, parse_code, parse_detail = parse_insider_buys(
+            buys, parse_code, parse_detail = parse_finnhub_buys(
                 ticker, result["data"], bucket
             )
             if parse_code:
@@ -352,11 +463,13 @@ def scan_tickers(tickers: list, bucket: str, label: str):
 
         if status == STATUS_FAILED:
             failed += 1
-            print(f"  ⚠️  {ticker:<8} UNKNOWN — {code} "
-                  f"[{ERROR_CATEGORY.get(code, 'unknown')}]: {detail} "
-                  f"[{i}/{len(tickers)}]")
-        elif status == STATUS_NOT_FOUND:
-            missing += 1
+            # One line is enough for a credential problem — the rest are identical.
+            if not credential_failure:
+                print(f"  ⚠️  {ticker:<8} UNKNOWN — {code} "
+                      f"[{ERROR_CATEGORY.get(code, 'unknown')}]: {detail} "
+                      f"[{i}/{len(tickers)}]")
+            if code == ERR_CREDENTIAL:
+                credential_failure = result
         elif buys:
             all_buys.extend(buys)
             found += 1
@@ -376,10 +489,11 @@ def scan_tickers(tickers: list, bucket: str, label: str):
             "checked_at":   datetime.now(timezone.utc).isoformat(),
         })
 
-        time.sleep(REQUEST_DELAY)
+        if not credential_failure:
+            time.sleep(REQUEST_DELAY)
 
     print(f"\n[insider] Done — {found} with buys, {no_buys} checked with none, "
-          f"{missing} not on provider, {failed} unknown (failed)")
+          f"{failed} unknown (failed)")
     return all_buys, outcomes
 
 
@@ -437,13 +551,11 @@ def build_coverage(outcomes: list, inputs: dict):
     """
     checked    = len(outcomes)
     failed     = sum(1 for o in outcomes if o["status"] == STATUS_FAILED)
-    not_found  = sum(1 for o in outcomes if o["status"] == STATUS_NOT_FOUND)
     succeeded  = sum(1 for o in outcomes if o["status"] == STATUS_SUCCESS)
     with_buys  = sum(1 for o in outcomes if o["buy_count"] > 0)
     bad_inputs = [name for name, i in inputs.items() if i.get("error_code")]
 
-    answered = succeeded + not_found
-    success_rate = (answered / checked) if checked else 0.0
+    success_rate = (succeeded / checked) if checked else 0.0
     errors = summarize_errors(outcomes)
 
     if checked == 0 or success_rate < MIN_USABLE_SUCCESS_RATE:
@@ -460,7 +572,6 @@ def build_coverage(outcomes: list, inputs: dict):
         "succeeded":            succeeded,
         "with_buys":            with_buys,
         "confirmed_no_buys":    succeeded - with_buys,
-        "not_found":            not_found,
         "failed":               failed,
         # consensus.py evaluates every Congress purchase ticker, but we only
         # scan the top MAX_CONGRESS_TICKERS. Without this list it cannot tell
@@ -566,7 +677,7 @@ def retain_previous_data(filename, attempt: dict):
         # sees an explicit failure rather than a missing file.
         attempt["retained_previous_data"] = False
         _write_json(filename, {
-            "source":        "SecuritiesDB (SEC Form 4)",
+            "source":        SOURCE_NAME,
             "data_as_of":    None,
             "coverage":      {"run_status": STATUS_FAILED, "tickers_checked": 0},
             "last_attempt":  attempt,
@@ -609,7 +720,7 @@ def save_to_json(all_buys: list, summary: list, outcomes: list,
     now = datetime.now(timezone.utc).isoformat()
 
     output = {
-        "source":            "SecuritiesDB (SEC Form 4)",
+        "source":            SOURCE_NAME,
         # When the data IN this file was collected. Survives a later failed
         # run, unlike last_attempt.attempted_at.
         "data_as_of":        now,
@@ -662,7 +773,6 @@ def print_summary(summary: list, all_buys: list, coverage: dict):
     print(f"  Run status             : {coverage['run_status'].upper()}")
     print(f"  Tickers checked        : {coverage['tickers_checked']}")
     print(f"  Confirmed no buys      : {coverage['confirmed_no_buys']}")
-    print(f"  Not on provider        : {coverage['not_found']}")
     print(f"  Unknown (failed)       : {coverage['failed']}")
     print(f"  Total insider buys     : {len(all_buys)}")
     print(f"  Popular & Stable hits  : {len(popular)}")
@@ -682,7 +792,7 @@ def print_summary(summary: list, all_buys: list, coverage: dict):
             print(f"  {code:<18} {g['count']:>3}x  [{g['category']}]")
             print(f"     e.g. {g['tickers'][0]}: {g['sample_detail']}")
         if any(g["category"] == "contract" for g in by_code.values()):
-            print("\n     ⚠️  'contract' means SecuritiesDB answered but the")
+            print("\n     ⚠️  'contract' means Finnhub answered but the")
             print("        response shape broke our parser — needs a code fix,")
             print("        not a retry.")
 
@@ -726,7 +836,10 @@ def print_summary(summary: list, all_buys: list, coverage: dict):
 def run():
     print("[insider] Starting insider trades fetch...")
     print("[insider] Reads from: trades_congress.json + ark_holdings.json")
-    print("[insider] Checks via: SecuritiesDB (SEC Form 4)\n")
+    print(f"[insider] Checks via: {SOURCE_NAME}\n")
+    if not has_api_key():
+        print("[insider] ❌ FINNHUB_API_KEY is not set in development/backend/.env "
+              "— no ticker can be checked\n")
 
     all_buys = []
     outcomes = []
