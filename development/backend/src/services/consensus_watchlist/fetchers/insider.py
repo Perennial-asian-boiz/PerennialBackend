@@ -833,7 +833,20 @@ def print_summary(summary: list, all_buys: list, coverage: dict):
 # MAIN
 # ─────────────────────────────────────────────────────────
 
+def use_utf8_console():
+    """
+    The progress output uses emoji. When output is captured rather than
+    shown in a real terminal (VS Code "Run Code", a log file, a scheduler),
+    Windows falls back to cp1252, which cannot encode them — the first
+    emoji then crashes the run mid-scan.
+    """
+    for stream in (_sys.stdout, _sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def run():
+    use_utf8_console()
     print("[insider] Starting insider trades fetch...")
     print("[insider] Reads from: trades_congress.json + ark_holdings.json")
     print(f"[insider] Checks via: {SOURCE_NAME}\n")
