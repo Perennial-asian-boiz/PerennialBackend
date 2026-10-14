@@ -17,6 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 from src.db.session import make_engine
 from src.ingestion.redaction import describe_exception
 from src.pipeline.runner import run_pipeline
+from src.services.gdelt.job import run_scheduled as run_gdelt_job
 from src.settings import Settings, load_settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,15 @@ def main() -> None:
         job,
         CronTrigger(hour=9, minute=0, timezone="America/Los_Angeles"),
         id="daily_pipeline",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        run_gdelt_job,
+        CronTrigger(hour=9, minute=30, timezone="America/Los_Angeles"),
+        id="gdelt_daily",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

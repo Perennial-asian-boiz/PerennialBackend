@@ -103,6 +103,25 @@ def test_explicit_batch_reads_validate_source_and_page(engine, fixture_path):
             batch_rows(conn, "ark_holdings", batches["congress_trades"])
 
 
+def test_publication_stores_profile_classification(engine, fixture_path):
+    runs, batches = inputs(engine, fixture_path)
+    observations = caps(engine, batches)
+    symbol = sorted(observations)[0]
+    observations[symbol].update(sector="Technology", industry="Semiconductors")
+    publish(engine, runs, observations)
+    with engine.connect() as conn:
+        stored = dict(conn.execute(
+            select(models.securities.c.symbol, models.market_cap_observations.c.sector)
+            .join(models.market_cap_observations,
+                  models.market_cap_observations.c.security_id == models.securities.c.id)
+        ).tuples().all())
+    assert stored[symbol] == "Technology"
+    assert all(v is None for s, v in stored.items() if s != symbol)
+    observations[symbol]["sector"] = "x" * 65
+    with pytest.raises(PublicationError, match="classification"):
+        publish(engine, runs, observations)
+
+
 def test_missing_market_cap_and_lineage_are_rejected(engine, fixture_path):
     runs, batches = inputs(engine, fixture_path)
     with pytest.raises(PublicationError, match="market.cap"):
