@@ -474,7 +474,7 @@ def collect_ark(
     )
 
 
-# ── Congress (FMP + Senate Stock Watcher) ────────────────
+# ── Congress (FMP) ───────────────────────────────────────
 
 
 def _string_fields_ok(item: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
@@ -493,16 +493,6 @@ _FMP_KEYS = (
     "amount",
     "district",
     "link",
-)
-_WATCHER_KEYS = (
-    "ticker",
-    "transaction_date",
-    "senator",
-    "asset_description",
-    "asset_type",
-    "type",
-    "amount",
-    "ptr_link",
 )
 
 
@@ -526,10 +516,10 @@ def collect_congress(
         )
     page_limit = settings.fmp_max_pages if settings is not None else fmp.MAX_PAGES
     session = session or requests.Session()
-    # Initially one request per chamber plus Watcher. Full pages discover
-    # further required units; terminated pagination is not unattempted work.
+    # Initially one request per chamber. Full pages discover further required
+    # units; terminated pagination is not unattempted work.
     page_counts = {"senate_pages_fetched": 0, "house_pages_fetched": 0}
-    tracker = _Tracker("Congress requests", planned=3, extra_counts=page_counts)
+    tracker = _Tracker("Congress requests", planned=2, extra_counts=page_counts)
     raw_fmp: List[Dict[str, Any]] = []
     for chamber in ("senate", "house"):
         for page in range(page_limit):
@@ -564,22 +554,8 @@ def collect_congress(
                 break
             if tracker.planned is not None:
                 tracker.planned += 1
-    resp = _get_json(session, fmp.SENATE_WATCHER_URL, timeout=30, sleep=sleep)
-    watcher: List[Dict[str, Any]] = []
-    if not resp.ok:
-        tracker.fail("senate watcher", resp.code)
-    elif not isinstance(resp.data, list) or not all(
-        isinstance(i, dict) and _string_fields_ok(i, _WATCHER_KEYS) for i in resp.data
-    ):
-        tracker.fail("senate watcher", "malformed_response")
-    else:
-        watcher = resp.data
-        tracker.ok()
-    if tracker.failure_count:
-        return tracker.outcome("congress_trades", [])
     try:
         trades = fmp.parse_trades(raw_fmp)
-        trades += [t for t in (fmp.parse_watcher_trade(i) for i in watcher) if t]
         # filter_recent silently drops rows whose date does not parse, so a
         # malformed required date must fail the collection before it runs.
         if not all(_is_iso_date(t.get("transaction_date")) for t in trades):
