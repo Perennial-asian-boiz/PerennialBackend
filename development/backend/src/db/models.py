@@ -339,6 +339,9 @@ market_cap_observations = Table(
     Column("provider", String(32), nullable=False),
     Column("observed_at", DateTime(timezone=True)),
     Column("retrieved_at", DateTime(timezone=True), nullable=False),
+    # Classification from the same profile response, so publications replay it too.
+    Column("sector", String(64)),
+    Column("industry", String(128)),
     CheckConstraint("value IS NULL OR value > 0", name="positive_value"),
     CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency"),
     UniqueConstraint("id", "security_id"),

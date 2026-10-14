@@ -142,12 +142,18 @@ def _caps(
                     raise InvalidOperation
         except (InvalidOperation, ValueError, TypeError):
             raise PublicationError("market-cap value is invalid") from None
+        sector, industry = obs.get("sector"), obs.get("industry")
+        for label, limit in ((sector, 64), (industry, 128)):
+            if label is not None and (not isinstance(label, str) or not 0 < len(label) <= limit):
+                raise PublicationError("profile classification is invalid")
         normalized[symbol] = dict(
             value=value,
             currency="USD",
             provider="fmp",
             observed_at=observed,
             retrieved_at=obs["retrieved_at"],
+            sector=sector,
+            industry=industry,
         )
     if symbols and all(o["value"] is None for o in normalized.values()):
         raise PublicationError("all market-cap values are unavailable")
