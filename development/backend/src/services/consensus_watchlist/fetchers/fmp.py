@@ -99,7 +99,7 @@ def fetch_chamber_trades(
 
         if len(data) < 20:
             break
-        if page == MAX_PAGES - 1:
+        if page == page_limit - 1:
             raise RuntimeError("FMP pagination exhausted")
 
     return all_trades

@@ -109,8 +109,40 @@ def test_legacy_fmp_fetches_all_pages_without_changing_small_outputs(
         return Response(records[page * 20 : (page + 1) * 20])
 
     monkeypatch.setattr(fmp.requests, "get", get)
-    actual = fmp.fetch_chamber_trades("senate")
+    actual = fmp.fetch_chamber_trades("senate", api_key="synthetic")
     expected = [dict(record, _chamber="Senate") for record in records]
     assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
     expected_pages = count // 20 + 1 if count % 20 == 0 else ceil(count / 20)
     assert pages == list(range(expected_pages))
+
+
+@pytest.mark.parametrize("max_pages", [1, 2, 3])
+def test_legacy_fmp_configured_page_cap_fails_instead_of_truncating(
+    max_pages, monkeypatch
+):
+    """A configured cap below MAX_PAGES must still fail, never return a partial set."""
+    fmp = collectors._fetcher("fmp")
+    records = _trades(20 * (max_pages + 1))
+    pages = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, body):
+            self.body = body
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self.body
+
+    def get(url, *, params, timeout):
+        pages.append(params["page"])
+        page = params["page"]
+        return Response(records[page * 20 : (page + 1) * 20])
+
+    monkeypatch.setattr(fmp.requests, "get", get)
+    with pytest.raises(RuntimeError, match="pagination exhausted"):
+        fmp.fetch_chamber_trades("senate", api_key="synthetic", max_pages=max_pages)
+    assert pages == list(range(max_pages))
