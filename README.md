@@ -48,6 +48,29 @@ then run `python -m src.ingestion.cli run-pipeline` from `development/backend`.
 It publishes a verified watchlist without source JSON files. Read the
 [operations runbook](docs/technical-specs/OPERATIONS.md) before deployment.
 
+### Sprint 1 account API
+
+The `feature/backend-auth-api` branch adds the first user-facing API layer on
+top of the existing PostgreSQL database. It includes account creation, local
+OTP verification, login sessions, onboarding preferences, and a personal
+watchlist. The API is started from `development/backend` after applying the
+migrations:
+
+```bash
+cd development/database && alembic upgrade head
+cd ../backend
+uvicorn src.api.app:app --reload --port 8000
+```
+
+During local development, signup and resend responses include a
+`development_code` so the frontend flow can be tested before an email provider
+is selected. Set `APP_ENV=production` before deployment; production hides that
+field and requires a real email-delivery adapter to be connected.
+
+The frontend can use `http://127.0.0.1:8000` as `VITE_API_URL`. The initial
+endpoint contract is documented by the OpenAPI page at
+`http://127.0.0.1:8000/docs` once the server is running.
+
 ## Conventions for the branches still to land
 
 - **One `.gitignore`, one `requirements.txt`, one `.env.example`** — at the

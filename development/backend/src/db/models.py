@@ -382,6 +382,138 @@ current_publication = Table(
     Column("promoted_at", DateTime(timezone=True), nullable=False),
 )
 
+# User-facing account data. These tables are separate from the immutable
+# ingestion snapshots above, but live in the same PostgreSQL schema/database.
+users = Table(
+    "users",
+    metadata,
+    _id(),
+    Column("email", String(320), nullable=False),
+    Column("normalized_email", String(320), nullable=False),
+    Column("full_name", String(200), nullable=False),
+    Column("password_hash", Text, nullable=False),
+    Column("is_verified", Boolean, nullable=False, server_default=text("false")),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    UniqueConstraint("normalized_email"),
+    CheckConstraint("position('@' in normalized_email) > 1", name="email_format"),
+)
+
+email_verification_codes = Table(
+    "email_verification_codes",
+    metadata,
+    _id(),
+    Column(
+        "user_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("code_hash", Text, nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("attempts", Integer, nullable=False, server_default=text("0")),
+    Column("used_at", DateTime(timezone=True)),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint("attempts >= 0", name="attempts"),
+)
+Index(
+    "ix_email_verification_codes_user_active",
+    email_verification_codes.c.user_id,
+    email_verification_codes.c.expires_at,
+)
+
+user_preferences = Table(
+    "user_preferences",
+    metadata,
+    Column(
+        "user_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.users.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "sectors",
+        ARRAY(String(64)),
+        nullable=False,
+        server_default=text("'{}'::text[]"),
+    ),
+    Column("risk_level", String(32)),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint(
+        "risk_level IS NULL OR risk_level IN ('Conservative', 'Moderate', 'High')",
+        name="risk_level",
+    ),
+)
+
+user_watchlist = Table(
+    "user_watchlist",
+    metadata,
+    Column(
+        "user_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.users.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "security_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.securities.id"),
+        primary_key=True,
+    ),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+)
+Index("ix_user_watchlist_security_id", user_watchlist.c.security_id)
+
+auth_sessions = Table(
+    "auth_sessions",
+    metadata,
+    _id(),
+    Column(
+        "user_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.users.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("token_hash", String(64), nullable=False),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("revoked_at", DateTime(timezone=True)),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    UniqueConstraint("token_hash"),
+)
+Index(
+    "ix_auth_sessions_user_active", auth_sessions.c.user_id, auth_sessions.c.expires_at
+)
+
 # Supporting indexes for referencing FKs and per-source health lookups.
 Index(
     "ix_publication_sources_run_batch_source",

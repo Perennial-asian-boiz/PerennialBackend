@@ -16,8 +16,17 @@ IMMUTABLE = (
     "run_dependencies", "publications", "publication_sources", "market_cap_observations",
     "publication_market_caps",
 )
-MUTABLE = ("ingestion_runs", "current_publication")
+MUTABLE = (
+    "ingestion_runs",
+    "current_publication",
+    "users",
+    "email_verification_codes",
+    "user_preferences",
+    "user_watchlist",
+    "auth_sessions",
+)
 TABLES = (*IMMUTABLE, *MUTABLE, "securities")
+USER_TABLES = set(MUTABLE[2:])
 
 
 def provision(conn, roles, *, phase):
@@ -83,6 +92,8 @@ def provision(conn, roles, *, phase):
         conn.execute(sql.SQL("GRANT SELECT ON TABLE {} TO {}").format(ident, sql.Identifier(reader)))
         if table in MUTABLE:
             conn.execute(sql.SQL("GRANT UPDATE ON TABLE {} TO {}").format(ident, sql.Identifier(importer)))
+        if table in USER_TABLES:
+            conn.execute(sql.SQL("GRANT DELETE ON TABLE {} TO {}").format(ident, sql.Identifier(importer)))
         elif table == "securities":
             conn.execute(sql.SQL("GRANT UPDATE (exchange, currency) ON TABLE {} TO {}")
                          .format(ident, sql.Identifier(importer)))
