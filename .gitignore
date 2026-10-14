@@ -43,3 +43,6 @@ data/
 # cursor file for blue sky
 cursor.txt
 tickers.json
+
+#mastodon data files
+mastodon_posts.json
