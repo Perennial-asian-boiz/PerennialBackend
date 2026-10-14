@@ -690,9 +690,6 @@ def test_legacy_fmp_run_matches_fab7188_golden_and_buy_count(
     monkeypatch.setattr(
         fmp, "fetch_chamber_trades", lambda c: copy.deepcopy(inputs["fmp_" + c])
     )
-    monkeypatch.setattr(
-        fmp, "fetch_senate_watcher", lambda: copy.deepcopy(inputs["senate_watcher"])
-    )
     fmp.run()
     path = tmp_path / "trades_congress.json"
     actual = json.loads(path.read_text())
