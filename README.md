@@ -71,6 +71,43 @@ The frontend can use `http://127.0.0.1:8000` as `VITE_API_URL`. The initial
 endpoint contract is documented by the OpenAPI page at
 `http://127.0.0.1:8000/docs` once the server is running.
 
+#### Dashboard data API
+
+`GET /api/watchlist` exposes the current production publication in the format
+used by the frontend dashboard:
+
+```json
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-10-14T00:00:00+00:00",
+  "affordable_growing": [
+    {
+      "name": "PLTR",
+      "ticker": "PLTR",
+      "sector": "Unclassified",
+      "price": null,
+      "change_percent": null,
+      "confidence_score": null,
+      "sentiment": "Positive",
+      "reason": "Published growth signals: Ark."
+    }
+  ],
+  "popular_stable": []
+}
+```
+
+The adapter already accepts `name`, `sector`, `price`, `change_percent`, and
+`confidence_score` when the publication pipeline provides them. The current
+ranking publication only contains tickers, market caps, and raw signals, so
+missing display fields remain explicit fallbacks until company metadata is
+added to the ingestion pipeline. This keeps the API stable while that work is
+completed.
+
+For the temporary frontend-to-backend demo, the API defaults to the copied
+fixture data during development. Set `DASHBOARD_DATA_MODE=publication` to use
+the real current publication instead. Keep `DASHBOARD_DATA_MODE=publication`
+in production.
+
 ## Conventions for the branches still to land
 
 - **One `.gitignore`, one `requirements.txt`, one `.env.example`** — at the
