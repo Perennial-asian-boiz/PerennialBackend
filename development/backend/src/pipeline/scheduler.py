@@ -64,7 +64,15 @@ def main() -> None:
         coalesce=True,
         misfire_grace_time=3600,
     )
-    scheduler.add_job(run_gdelt_job, CronTrigger(hour=9, minute=30, timezone="America/Los_Angeles"), id="gdelt_daily", replace_existing=True, max_instances=1, coalesce=True, misfire_grace_time=3600)
+    scheduler.add_job(
+        run_gdelt_job,
+        CronTrigger(hour=9, minute=30, timezone="America/Los_Angeles"),
+        id="gdelt_daily",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=3600,
+    )
     # Perform one recovery/catch-up run whenever a supervisor starts this worker.
     # PostgreSQL locks prevent overlapping source work across worker processes.
     try:
