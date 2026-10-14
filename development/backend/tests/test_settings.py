@@ -1,0 +1,130 @@
+"""Startup configuration is validated without exposing provider credentials."""
+
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+from pydantic import SecretStr
+
+
+def test_settings_hide_secrets_and_supply_source_quality_defaults(monkeypatch):
+    from src.settings import Settings
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://user:synthetic-db-secret@localhost/test"
+    )
+    monkeypatch.setenv("FMP_API_KEY", "synthetic-provider-secret")
+    settings = Settings(_env_file=None)
+
+    assert isinstance(settings.database_url, SecretStr)
+    assert isinstance(settings.fmp_api_key, SecretStr)
+    assert "synthetic-db-secret" not in repr(settings)
+    assert "synthetic-provider-secret" not in repr(settings)
+    assert settings.fmp_max_pages == 50
+    assert settings.quality_thresholds["short_interest"].allow_equal_as_of
+    assert not settings.quality_thresholds["congress_trades"].allow_equal_as_of
+
+
+def test_missing_database_setting_names_field_without_value(monkeypatch):
+    from src.settings import SettingsError, load_settings
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    with pytest.raises(SettingsError, match="DATABASE_URL") as caught:
+        load_settings(local_dev=False)
+    assert "synthetic" not in str(caught.value)
+
+
+def test_live_settings_require_provider_keys(monkeypatch):
+    from src.settings import SettingsError, load_settings
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://user:synthetic@localhost/test"
+    )
+    monkeypatch.delenv("FMP_API_KEY", raising=False)
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    settings = load_settings(local_dev=False)
+    with pytest.raises(SettingsError, match="FMP_API_KEY"):
+        settings.require_provider_keys("fmp")
+
+
+def test_cli_validates_live_provider_key_before_database_access(monkeypatch, capsys):
+    from src.ingestion import cli
+
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://user:synthetic@localhost/test"
+    )
+    monkeypatch.delenv("FMP_API_KEY", raising=False)
+    monkeypatch.setattr(
+        cli, "make_engine", lambda *args, **kwargs: pytest.fail("engine opened")
+    )
+
+    assert cli.main(["run-pipeline"]) == 2
+    assert "FMP_API_KEY" in capsys.readouterr().err
+
+
+def test_scheduler_validates_settings_before_database_access(monkeypatch):
+    from src.pipeline import scheduler
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        scheduler, "make_engine", lambda *args, **kwargs: pytest.fail("engine opened")
+    )
+    with pytest.raises(scheduler.PipelineRunFailed):
+        scheduler.run_full_pipeline()
+
+
+def test_database_env_file_is_local_opt_in(monkeypatch, tmp_path):
+    from src.db import config
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "DATABASE_URL=postgresql+psycopg://user:synthetic@localhost/test\n"
+    )
+    monkeypatch.setattr(config, "ENV_PATH", env_file)
+    with pytest.raises(config.DatabaseConfigError):
+        config.get_database_url(environ={})
+    assert (
+        config.get_database_url(environ={"PERENNIAL_ENV": "local"}).database == "test"
+    )
+
+
+def test_partial_quality_override_keeps_other_source_defaults(monkeypatch):
+    from src.settings import load_settings
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://user:synthetic@localhost/test")
+    monkeypatch.setenv(
+        "QUALITY_THRESHOLDS", '{"short_interest":{"max_count_ratio":5}}'
+    )
+    settings = load_settings(local_dev=False)
+    assert settings.quality_thresholds["short_interest"].max_count_ratio == 5
+    assert settings.quality_thresholds["short_interest"].allow_equal_as_of
+    assert settings.quality_thresholds["ark_holdings"].max_count_ratio == 4
+
+
+def test_consensus_import_does_not_load_env_file():
+    backend = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import dotenv; dotenv.load_dotenv = lambda *a, **k: 1 / 0; "
+            "import src.services.consensus_watchlist.consensus",
+        ],
+        cwd=backend,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_consensus_market_cap_receives_provider_key_explicitly():
+    from src.services.consensus_watchlist import consensus
+
+    class Session:
+        def get(self, url, *, params, timeout):
+            assert params == {"symbol": "ZZAA", "apikey": "synthetic"}
+            assert timeout == 10
+            return type("Response", (), {"status_code": 200, "json": lambda self: [{"marketCap": 42}]})()
+
+    assert consensus.fetch_market_cap("ZZAA", {}, session=Session(), api_key="synthetic") == 42

@@ -11,17 +11,19 @@ SCHEDULE:
 
 import requests
 import json
-import os
 from datetime import datetime, timezone
 from collections import Counter
-from dotenv import load_dotenv
+from typing import TYPE_CHECKING
 # ── shared path resolution (see paths.py) ──
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(next(
     p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
 )))
-from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+from paths import LOCAL_DATA_DIR, local_data_dir
+
+if TYPE_CHECKING:
+    from src.settings import ProviderSettings
 
 from pathlib import Path
 
@@ -29,9 +31,9 @@ from pathlib import Path
 # CONFIG
 # ─────────────────────────────────────────────────────────
 
-load_dotenv(dotenv_path=ENV_PATH)
-
-FMP_API_KEY = os.getenv("FMP_API_KEY", "YOUR_FMP_KEY_HERE")
+# Historical JSON callers and synthetic contract tests may set this explicitly.
+# Importing the fetcher never reads a key or a dotenv file.
+FMP_API_KEY: str | None = None
 BASE_URL = "https://financialmodelingprep.com/stable"
 MAX_PAGES = 3  # 20 trades per page = ~60 trades per chamber
 
@@ -47,19 +49,27 @@ SENATE_WATCHER_URL = (
 # FETCH
 # ─────────────────────────────────────────────────────────
 
-def fetch_chamber_trades(chamber: str):
+def fetch_chamber_trades(
+    chamber: str, *, api_key: str | None = None, max_pages: int | None = None
+):
     """
     Fetches trades for one chamber.
     chamber = "senate" or "house"
     """
     endpoint = f"{BASE_URL}/{chamber}-latest"
+    key = api_key if api_key is not None else FMP_API_KEY
+    if not key:
+        raise ValueError("FMP_API_KEY is required")
+    page_limit = MAX_PAGES if max_pages is None else max_pages
+    if page_limit < 1:
+        raise ValueError("FMP page limit must be positive")
     all_trades = []
 
-    for page in range(MAX_PAGES):
+    for page in range(page_limit):
         try:
             resp = requests.get(
                 endpoint,
-                params={"page": page, "limit": 20, "apikey": FMP_API_KEY},
+                params={"page": page, "limit": 20, "apikey": key},
                 timeout=15
             )
 
@@ -355,16 +365,29 @@ def print_summary(trades: list, analysis: dict):
 # MAIN
 # ─────────────────────────────────────────────────────────
 
-def run():
-    if FMP_API_KEY == "YOUR_FMP_KEY_HERE":
-        print("[fmp] ⚠️  No FMP_API_KEY set in .env")
-        return
+def run(provider_settings: "ProviderSettings | None" = None):
+    # The compatibility branch is only for existing JSON callers that set the
+    # module symbol themselves. Normal runs resolve settings at invocation.
+    legacy_key = provider_settings is None and FMP_API_KEY is not None
+    if legacy_key:
+        key = FMP_API_KEY
+    else:
+        if provider_settings is None:
+            from src.settings import load_provider_settings
+            provider_settings = load_provider_settings()
+        provider_settings.require_provider_keys("fmp")
+        key = provider_settings.fmp_api_key.get_secret_value()
+    page_limit = getattr(provider_settings, "fmp_max_pages", MAX_PAGES)
 
     print("[fmp] Starting Congress trades fetch...")
 
     # Fetch both chambers
-    fmp_senate = fetch_chamber_trades("senate")
-    fmp_house  = fetch_chamber_trades("house")
+    if legacy_key:
+        fmp_senate = fetch_chamber_trades("senate")
+        fmp_house  = fetch_chamber_trades("house")
+    else:
+        fmp_senate = fetch_chamber_trades("senate", api_key=key, max_pages=page_limit)
+        fmp_house  = fetch_chamber_trades("house", api_key=key, max_pages=page_limit)
 
     all_raw = fmp_senate + fmp_house
     print(f"\n[fmp] Total raw records: {len(all_raw)}")
