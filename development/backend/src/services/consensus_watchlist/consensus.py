@@ -25,7 +25,6 @@ PURPOSE:
 
 import json
 import logging
-import os
 import sys
 import tempfile
 import time
@@ -33,14 +32,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 import requests
-from dotenv import load_dotenv
 # ── shared path resolution (see paths.py) ──
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(next(
     p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
 )))
-from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+_sys.path.insert(0, str(next(
+    p for p in _Path(__file__).resolve().parents if p.name == "backend"
+)))
+from paths import LOCAL_DATA_DIR, local_data_dir
+from src.settings import ProviderSettings, load_provider_settings
 
 
 # ─────────────────────────────────────────────────────────
@@ -54,9 +56,6 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-load_dotenv(dotenv_path=ENV_PATH)
-
-FMP_API_KEY = os.getenv("FMP_API_KEY", "")
 FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
 
 MARKET_CAP_THRESHOLD = 10_000_000_000  # $10 Billion
@@ -374,7 +373,8 @@ def load_short_interest_signals(file_path: Optional[Path] = None) -> Dict[str, D
 def fetch_market_cap(
     ticker: str,
     cache: Dict[str, Optional[float]],
-    session: Optional[requests.Session] = None
+    session: Optional[requests.Session] = None,
+    api_key: Optional[str] = None,
 ) -> Optional[float]:
     """
     Looks up market capitalization using cached values or FMP stable profile endpoint.
@@ -383,7 +383,7 @@ def fetch_market_cap(
     if ticker in cache:
         return cache[ticker]
 
-    if not FMP_API_KEY or FMP_API_KEY == "YOUR_FMP_KEY_HERE":
+    if not api_key or api_key.lower().startswith("your_"):
         cache[ticker] = None
         return None
 
@@ -392,7 +392,7 @@ def fetch_market_cap(
     try:
         resp = req_session.get(
             FMP_PROFILE_URL,
-            params={"symbol": ticker, "apikey": FMP_API_KEY},
+            params={"symbol": ticker, "apikey": api_key},
             timeout=10
         )
         if resp.status_code == 200:
@@ -525,13 +525,19 @@ def run(
     ark_file: Optional[Path] = None,
     insider_file: Optional[Path] = None,
     short_interest_file: Optional[Path] = None,
-    profile_cache: Optional[Dict[str, Optional[float]]] = None
+    profile_cache: Optional[Dict[str, Optional[float]]] = None,
+    provider_settings: Optional[ProviderSettings] = None,
 ) -> Dict[str, Any]:
     """
     Main consensus watchlist aggregation pipeline.
     Reads all signal sources, computes market caps, groups candidates,
     applies V1 deterministic ranking, and writes output atomically.
     """
+    provider_settings = provider_settings or load_provider_settings()
+    api_key = (
+        provider_settings.fmp_api_key.get_secret_value()
+        if provider_settings.fmp_api_key is not None else None
+    )
     logger.info("Starting Consensus Watchlist Aggregation...")
 
     congress_signals = load_congress_signals(congress_file)
@@ -552,7 +558,7 @@ def run(
     errors: List[str] = []
 
     for ticker in candidate_tickers:
-        mcap = fetch_market_cap(ticker, market_cap_cache, session=session)
+        mcap = fetch_market_cap(ticker, market_cap_cache, session=session, api_key=api_key)
 
         warnings: List[str] = []
 
