@@ -35,7 +35,9 @@ FMP_API_KEY = os.getenv("FMP_API_KEY", "YOUR_FMP_KEY_HERE")
 BASE_URL = "https://financialmodelingprep.com/stable"
 MAX_PAGES = 3  # 20 trades per page = ~60 trades per chamber
 
-# Senate Stock Watcher — free, no key, 8,350+ records back to 2019
+# Senate Stock Watcher — its newest trade is 2020-12-02, so the 2-year filter
+# drops every record. run() no longer downloads it. The URL and
+# parse_watcher_trade stay because src/ingestion/collectors.py still uses them.
 SENATE_WATCHER_URL = (
     "https://raw.githubusercontent.com/timothycarambat/"
     "senate-stock-watcher-data/master/aggregate/all_transactions.json")
@@ -88,29 +90,6 @@ def fetch_chamber_trades(chamber: str):
             break
 
     return all_trades
-
-def fetch_senate_watcher():
-    """
-    Fetches full Senate trade history from Senate Stock Watcher.
-    Free, no key needed. 8,350+ records going back to 2019.
-    """
-    try:
-        print(f"[fmp] Fetching Senate Stock Watcher (full history)...")
-        resp = requests.get(SENATE_WATCHER_URL, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        for item in data:
-            item["_chamber"] = "Senate"
-            item["_source"]  = "senate_watcher"
-
-        print(f"[fmp] Senate Stock Watcher — {len(data)} records")
-        return data
-
-    except Exception as e:
-        print(f"[fmp] ❌ Senate Stock Watcher failed: {e}")
-        return []
-
 
 # ─────────────────────────────────────────────────────────
 # PARSE
@@ -220,7 +199,7 @@ def parse_watcher_trade(item: dict, *, preserve_provenance: bool = True):
 
 def deduplicate(trades: list):
     """
-    Removes duplicate trades that appear in both FMP and Senate Watcher.
+    Removes repeated trades from the legacy JSON output.
     Key: politician + ticker + transaction_date + trade_type
     """
     seen   = {}
@@ -383,33 +362,18 @@ def run():
 
     print("[fmp] Starting Congress trades fetch...")
 
-    # Fetch all sources
+    # Fetch both chambers
     fmp_senate = fetch_chamber_trades("senate")
     fmp_house  = fetch_chamber_trades("house")
-    sw_senate  = fetch_senate_watcher()
 
-    all_raw = fmp_senate + fmp_house + sw_senate
+    all_raw = fmp_senate + fmp_house
     print(f"\n[fmp] Total raw records: {len(all_raw)}")
 
-    # Parse — FMP records already parsed by existing parse_trades()
     # Legacy file output keeps fab7188 fields; database collection keeps the
     # provider transaction identity and provenance via the default parsers.
-    fmp_trades = parse_trades(fmp_senate + fmp_house, preserve_provenance=False)
+    fmp_trades = parse_trades(all_raw, preserve_provenance=False)
 
-    # Parse Senate Watcher records separately
-    sw_trades = []
-    skipped = 0
-    for item in sw_senate:
-        parsed = parse_watcher_trade(item, preserve_provenance=False)
-        if parsed:
-            sw_trades.append(parsed)
-        else:
-            skipped += 1
-    print(f"[fmp] Senate Watcher: {len(sw_trades)} valid, {skipped} skipped (no ticker)")
-
-    # Combine and deduplicate
-    all_trades = fmp_trades + sw_trades
-    trades = deduplicate(all_trades)
+    trades = deduplicate(fmp_trades)
 
     # Filter to recent 2 years only
     trades = filter_recent(trades, years=2)
