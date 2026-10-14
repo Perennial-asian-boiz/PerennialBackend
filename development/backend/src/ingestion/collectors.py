@@ -247,6 +247,7 @@ class _Tracker:
     completed: int = 0
     failures: List[Dict[str, str]] = field(default_factory=list)
     failure_count: int = 0
+    extra_counts: Dict[str, int] = field(default_factory=dict)
 
     def ok(self) -> None:
         self.attempted += 1
@@ -271,6 +272,7 @@ class _Tracker:
                 planned=self.planned,
                 not_attempted=max(0, self.planned - self.attempted),
             )
+        counts.update(self.extra_counts)
         return counts
 
     def outcome(
@@ -526,7 +528,8 @@ def collect_congress(
     session = session or requests.Session()
     # Initially one request per chamber plus Watcher. Full pages discover
     # further required units; terminated pagination is not unattempted work.
-    tracker = _Tracker("Congress requests", planned=3)
+    page_counts = {"senate_pages_fetched": 0, "house_pages_fetched": 0}
+    tracker = _Tracker("Congress requests", planned=3, extra_counts=page_counts)
     raw_fmp: List[Dict[str, Any]] = []
     for chamber in ("senate", "house"):
         for page in range(page_limit):
@@ -549,6 +552,7 @@ def collect_congress(
             if len(items) > 20:
                 tracker.fail(unit, "malformed_response")
                 return tracker.outcome("congress_trades", [])
+            page_counts[f"{chamber}_pages_fetched"] += 1
             if len(items) == 20 and page == page_limit - 1:
                 tracker.fail(unit, "pagination_exhausted")
                 return tracker.outcome("congress_trades", [])
