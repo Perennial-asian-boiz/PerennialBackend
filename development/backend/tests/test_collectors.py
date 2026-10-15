@@ -312,6 +312,28 @@ def test_insider_missing_key_fails_without_requests(upstream, monkeypatch, key):
     assert outcome.error_code == "missing_credential" and session.calls == []
 
 
+def test_insider_key_comes_from_settings_before_module_default(upstream):
+    from pydantic import SecretStr
+
+    from src.settings import ProviderSettings
+
+    seen = []
+
+    class HeaderSession(FakeSession):
+        def get(self, url, params=None, headers=None, timeout=None, stream=False):
+            seen.append(dict(headers or {}))
+            return super().get(url, params, headers, timeout, stream)
+
+    settings = ProviderSettings(finnhub_api_key=SecretStr("settings-finnhub-key"))
+    outcome = collectors.collect_insider(
+        HeaderSession(lambda u, p: FakeResponse(body={"data": []})),
+        sleep=NO_SLEEP,
+        settings=settings,  # type: ignore[arg-type]
+    )
+    assert outcome.succeeded
+    assert {h["X-Finnhub-Token"] for h in seen} == {"settings-finnhub-key"}
+
+
 def test_insider_asks_provider_symbol_but_keeps_planned_ticker():
     upstream = {
         "trades": [],

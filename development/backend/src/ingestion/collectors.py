@@ -666,6 +666,7 @@ def collect_insider(
     *,
     upstream: Any = None,
     api_key: Optional[str] = None,
+    settings: Optional[Settings] = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; None retains the legacy file fallback."""
     insider = _fetcher("insider")
@@ -680,7 +681,12 @@ def collect_insider(
         return CollectionOutcome.failure("insider_trades", "live", "no_input_tickers")
     if len(plan) > MAX_PLANNED_REQUESTS:
         return CollectionOutcome.failure("insider_trades", "live", "plan_too_large")
-    key = api_key if api_key is not None else insider.FINNHUB_API_KEY
+    if api_key is not None:
+        key = api_key
+    elif settings is not None and settings.finnhub_api_key is not None:
+        key = settings.finnhub_api_key.get_secret_value()
+    else:
+        key = insider.FINNHUB_API_KEY
     if not key or key.lower().startswith("your_"):
         return CollectionOutcome.failure("insider_trades", "live", "missing_credential")
 
