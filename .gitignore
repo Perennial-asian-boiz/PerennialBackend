@@ -46,3 +46,5 @@ tickers.json
 
 #mastodon data files
 mastodon_posts.json
+mastodon_servers.json
+mastodon_ticker_posts.json
