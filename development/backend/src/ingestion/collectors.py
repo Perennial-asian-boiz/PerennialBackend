@@ -27,7 +27,8 @@ page, ticker) as completed or failed. Policy:
     non-SSL connection errors and selected 5xx retry at most twice within a
     per-unit 60-second deadline, with bounded exponential backoff and jitter.
     Retry-After is never shortened: a delay beyond the remaining budget fails
-    the unit without another request. Request timeouts
+    the unit without another request. Without Retry-After, X-Ratelimit-Reset
+    (Finnhub: epoch seconds when the window resets) is honored the same way. Request timeouts
     and stream-chunk deadline checks bound normal provider behavior; requests'
     socket timeout measures inactivity, so a blocked read is not preempted by
     the monotonic deadline. Auth, parse and size failures never retry.
@@ -135,10 +136,29 @@ def _read_capped(
     return bytes(body)
 
 
+def _ratelimit_reset(
+    headers: Optional[Mapping[str, str]], wall_time: Callable[[], float]
+) -> float:
+    """Seconds until X-Ratelimit-Reset: an epoch timestamp, or a delta if small."""
+    value = (headers or {}).get("X-Ratelimit-Reset")
+    if not isinstance(value, str) or len(value) > 20:
+        return 0.0
+    try:
+        reset = float(value)
+    except ValueError:
+        return 0.0
+    if not math.isfinite(reset):
+        return 0.0
+    delay = reset - wall_time() if reset > 1_000_000_000 else reset
+    return max(0.0, delay)
+
+
 def _retry_after(
     headers: Optional[Mapping[str, str]], wall_time: Callable[[], float]
 ) -> float:
     value = (headers or {}).get("Retry-After")
+    if value is None:
+        return _ratelimit_reset(headers, wall_time)
     if not isinstance(value, str) or len(value) > 100:
         return 0.0
     try:
@@ -597,30 +617,31 @@ def collect_congress(
     )
 
 
-# ── Insider (SecuritiesDB) ───────────────────────────────
+# ── Insider (Finnhub) ────────────────────────────────────
 
 
-def _insider_payload_ok(raw: Any) -> bool:
-    """Every field parse_insider_buys touches on a Purchase must be well-formed."""
-    if not isinstance(raw, dict) or not isinstance(raw.get("data"), dict):
+def _finnhub_payload_ok(raw: Any) -> bool:
+    """Every field parse_finnhub_buys touches on a share purchase must be well-formed."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("data"), list):
         return False
-    txns = raw["data"].get("insider_transactions")
-    if not isinstance(txns, dict) or not isinstance(txns.get("recent"), list):
-        return False
-    for txn in txns["recent"]:
-        if not isinstance(txn, dict) or not isinstance(txn.get("type"), str):
+    for txn in raw["data"]:
+        if not isinstance(txn, dict):
             return False
-        if txn["type"] != "Purchase":
+        code = txn.get("transactionCode")
+        if not isinstance(code, str):
+            return False
+        derivative = txn.get("isDerivative")
+        if derivative is not None and not isinstance(derivative, bool):
+            return False
+        if code != "P" or derivative:
             continue
-        if not _is_iso_date(txn.get("date")):
+        if not _is_iso_date(txn.get("transactionDate")):
             return False
-        value = txn.get("value")
-        if value is not None and not _is_number(value):
-            return False
-        shares = txn.get("shares")
-        if shares is not None and not _is_number(shares):
-            return False
-        if not isinstance(txn.get("insider"), str):
+        for key in ("change", "transactionPrice"):
+            value = txn.get(key)
+            if value is not None and not _is_number(value):
+                return False
+        if not isinstance(txn.get("name"), str):
             return False
     return True
 
@@ -644,6 +665,8 @@ def collect_insider(
     sleep: Callable[[float], None] = time.sleep,
     *,
     upstream: Any = None,
+    api_key: Optional[str] = None,
+    settings: Optional[Settings] = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; None retains the legacy file fallback."""
     insider = _fetcher("insider")
@@ -658,30 +681,48 @@ def collect_insider(
         return CollectionOutcome.failure("insider_trades", "live", "no_input_tickers")
     if len(plan) > MAX_PLANNED_REQUESTS:
         return CollectionOutcome.failure("insider_trades", "live", "plan_too_large")
+    if api_key is not None:
+        key = api_key
+    elif settings is not None and settings.finnhub_api_key is not None:
+        key = settings.finnhub_api_key.get_secret_value()
+    else:
+        key = insider.FINNHUB_API_KEY
+    if not key or key.lower().startswith("your_"):
+        return CollectionOutcome.failure("insider_trades", "live", "missing_credential")
 
     session = session or requests.Session()
     tracker = _Tracker("insider tickers", planned=len(plan))
     buys: List[Dict[str, Any]] = []
+    unsupported: List[str] = []
+    cutoff = insider.lookback_cutoff().isoformat()
+    today = datetime.now(timezone.utc).date().isoformat()
     for ticker, bucket in plan:
+        symbol = insider.provider_symbol(ticker)
+        if symbol is None:
+            # No SEC Form 4 listing (e.g. a Canadian "/U" unit): nothing to ask.
+            unsupported.append(ticker)
+            tracker.ok()
+            continue
+        # The key travels in a header, never the query string.
         resp = _get_json(
             session,
-            f"{insider.SECURITIES_URL}/{ticker}/insider-activity",
-            allowed_status=(404,),
+            insider.FINNHUB_URL,
+            params={"symbol": symbol, "from": cutoff, "to": today},
+            headers={"X-Finnhub-Token": key},
             sleep=sleep,
         )
         if not resp.ok:
             tracker.fail(ticker, resp.code)
             break
-        elif resp.status == 404:
-            tracker.ok()  # provider has no Form 4 record for this ticker
-        elif not _insider_payload_ok(resp.data):
+        elif not _finnhub_payload_ok(resp.data):
             tracker.fail(ticker, "malformed_response")
             break
         else:
             # insider.py returns (buys, error_code, error_detail). Its detail
             # can contain provider data; only the fixed code crosses this
-            # boundary. A parser failure leaves the ticker unknown.
-            parsed_buys, parse_code, _parse_detail = insider.parse_insider_buys(
+            # boundary. A parser failure leaves the ticker unknown. Records
+            # keep the planned ticker, not the provider symbol.
+            parsed_buys, parse_code, _parse_detail = insider.parse_finnhub_buys(
                 ticker, resp.data, bucket
             )
             if parse_code is not None or not isinstance(parsed_buys, list):
@@ -691,12 +732,13 @@ def collect_insider(
             tracker.ok()
         sleep(insider.REQUEST_DELAY)
     envelope = {
-        "source": "SecuritiesDB (SEC Form 4)",
+        "source": insider.SOURCE_NAME,
         "fetched_at": _now_iso(),
         "lookback_days": insider.LOOKBACK_DAYS,
         "min_buy_value": insider.MIN_BUY_VALUE,
         "total_buys": len(buys),
         "tickers_with_buys": len({b["ticker"] for b in buys}),
+        "unsupported_tickers": unsupported,
     }
     return tracker.outcome(
         "insider_trades",

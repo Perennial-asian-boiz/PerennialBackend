@@ -95,6 +95,10 @@ so neither an empty list nor an empty `errors[]` proves success.
   transaction date is not ISO fail the collection instead of being dropped
   by the fetcher's two-year filter. Database insider and short-interest ticker plans
   come from pinned Congress/ARK batches, recorded in `run_dependencies`.
+  Insider tickers are requested from Finnhub under their provider symbol
+  ("RKLB UQ" as RKLB, BRK.B as BRK-B, GOOG as GOOGL); listings with no SEC
+  Form 4 filings (e.g. "ETHQ/U") are not requested and are listed in the
+  batch envelope's `unsupported_tickers`.
   Supplied database rows never fall back to files. Standalone collector usage
   may read legacy upstream files with bounded, validated input. A missing or
   malformed upstream plan fails with `missing_upstream`. A plan

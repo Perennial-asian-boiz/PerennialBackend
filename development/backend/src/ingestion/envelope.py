@@ -36,6 +36,7 @@ ENVELOPE_KEYS = {
         "min_buy_value",
         "total_buys",
         "tickers_with_buys",
+        "unsupported_tickers",
     ),
     "short_interest": ("schema_version", "source", "fetched_at", "total_records"),
 }
