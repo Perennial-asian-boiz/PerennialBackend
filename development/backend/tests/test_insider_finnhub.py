@@ -34,9 +34,10 @@ def txn(**overrides):
 
 
 class FakeResponse:
-    def __init__(self, status=200, body=None):
+    def __init__(self, status=200, body=None, headers=None):
         self.status_code = status
         self._body = body
+        self.headers = headers or {}
 
     def json(self):
         if isinstance(self._body, Exception):
@@ -122,13 +123,32 @@ def test_fetch_http_failures_are_classified(insider, monkeypatch, status, code):
     assert result["status"] == insider.STATUS_FAILED and result["error_code"] == code
 
 
-def test_fetch_retries_once_after_rate_limit(insider, monkeypatch):
-    responses = [FakeResponse(429), FakeResponse(body={"data": []})]
+def test_fetch_retries_after_rate_limit(insider, monkeypatch):
+    responses = [FakeResponse(429), FakeResponse(429), FakeResponse(body={"data": []})]
     monkeypatch.setattr(insider.requests, "get", lambda *a, **kw: responses.pop(0))
     assert insider.fetch_insider_activity("ZZAA")["status"] == insider.STATUS_SUCCESS
 
-    monkeypatch.setattr(insider.requests, "get", lambda *a, **kw: FakeResponse(429))
+    calls = []
+
+    def always_limited(*a, **kw):
+        calls.append(1)
+        return FakeResponse(429)
+
+    monkeypatch.setattr(insider.requests, "get", always_limited)
     assert insider.fetch_insider_activity("ZZAA")["error_code"] == "rate_limited"
+    assert len(calls) == 1 + insider.RATE_LIMIT_RETRIES
+
+
+def test_rate_limit_waits_until_window_reset(insider, monkeypatch):
+    monkeypatch.setattr(insider.time, "time", lambda: 1_000_000.0)
+    reset = lambda seconds: FakeResponse(  # noqa: E731
+        429, headers={"X-Ratelimit-Reset": str(1_000_000 + seconds)}
+    )
+    assert insider.rate_limit_wait(reset(30)) == 31  # one second of slack
+    # Missing, garbage, past or implausibly far resets fall back to the default.
+    for resp in (FakeResponse(429), FakeResponse(429, headers={"X-Ratelimit-Reset": "x"}),
+                 reset(-5), reset(3600)):
+        assert insider.rate_limit_wait(resp) == insider.RATE_LIMIT_WAIT
 
 
 def test_fetch_non_json_body_is_bad_response(insider, monkeypatch):
@@ -186,3 +206,83 @@ def test_scan_separates_buys_no_buys_and_unknown(insider, monkeypatch):
     assert coverage["with_buys"] == 1 and coverage["confirmed_no_buys"] == 1
     assert coverage["failed_tickers"] == ["ZZCC"]
     assert "not_found" not in coverage
+
+
+@pytest.mark.parametrize(
+    "ticker,symbol",
+    [
+        ("ZZAA", "ZZAA"),
+        (" rklb uq ", "RKLB"),
+        ("DKNG UW", "DKNG"),
+        ("BRK.B", "BRK-B"),
+        ("GOOG", "GOOGL"),
+        ("ETHQ/U", None),
+        ("ZZAA LN", None),  # non-US exchange suffix
+        ("", None),
+    ],
+)
+def test_provider_symbol(insider, ticker, symbol):
+    assert insider.provider_symbol(ticker) == symbol
+
+
+def test_exchange_suffixes_match_database_schema(insider):
+    from src.ingestion.schemas import US_EXCHANGE_SUFFIXES
+
+    assert insider.US_EXCHANGE_SUFFIXES == set(US_EXCHANGE_SUFFIXES)
+
+
+def test_fetch_asks_for_provider_symbol(insider, monkeypatch):
+    seen = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        seen.append(params["symbol"])
+        return FakeResponse(body={"data": [txn()]})
+
+    monkeypatch.setattr(insider.requests, "get", fake_get)
+    buys, outcomes = insider.scan_tickers(["RKLB UQ"], "b", "label")
+    assert seen == ["RKLB"]
+    assert [b["ticker"] for b in buys] == ["RKLB UQ"]  # planned ticker kept
+    assert outcomes[0]["ticker"] == "RKLB UQ"
+
+
+def test_unsupported_listing_is_skipped_and_not_counted_as_no_buys(insider, monkeypatch):
+    seen = []
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        seen.append(params["symbol"])
+        return FakeResponse(body={"data": []})
+
+    monkeypatch.setattr(insider.requests, "get", fake_get)
+    _buys, outcomes = insider.scan_tickers(["ETHQ/U", "ZZAA"], "b", "label")
+    assert seen == ["ZZAA"]
+    coverage = insider.build_coverage(outcomes, {})
+    assert coverage["run_status"] == insider.STATUS_SUCCESS
+    assert coverage["tickers_checked"] == 1 and coverage["confirmed_no_buys"] == 1
+    assert coverage["scanned_tickers"] == ["ZZAA"]
+    assert coverage["unsupported_tickers"] == ["ETHQ/U"]
+
+
+def test_consensus_reports_unsupported_listing_as_not_evaluated(tmp_path):
+    import json
+
+    from src.services.consensus_watchlist import consensus
+
+    path = tmp_path / "trades_insider.json"
+    path.write_text(json.dumps({
+        "data_as_of": "2026-10-14T00:00:00+00:00",
+        "coverage": {
+            "run_status": "success",
+            "scanned_tickers": ["ZZAA"],
+            "failed_tickers": [],
+            "unsupported_tickers": ["ETHQ/U"],
+        },
+        "transactions": [],
+    }))
+    signals, meta = consensus.load_insider_signals(path)
+    signal, warning = consensus.resolve_insider_signal("ETHQ/U", None, meta)
+    assert signal["status"] == "not_evaluated"
+    assert signal["reason"] == "no_sec_form4_listing"
+    assert warning == "insider_data_unavailable"
+    assert consensus.resolve_insider_signal("ZZAA", None, meta)[0]["status"] == (
+        "no_qualifying_buys"
+    )

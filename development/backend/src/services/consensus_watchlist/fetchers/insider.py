@@ -27,9 +27,18 @@ SOURCE:
     https://finnhub.io/api/v1/stock/insider-transactions?symbol={ticker}
     Returns SEC Form 4 transactions. Free tier allows 60 calls/minute.
 
-    Replaced SecuritiesDB, which went down in October 2026. Its URL and
-    parser are kept at the bottom of the PARSE section only because the
-    database collector (src/ingestion/collectors.py) still imports them.
+    Replaced SecuritiesDB, which went down in October 2026. The database
+    collector (src/ingestion/collectors.py) reuses this module's Finnhub
+    constants, provider_symbol and parse_finnhub_buys.
+
+TICKERS:
+    ARK and Congress tickers are not always the symbol Finnhub files Form 4s
+    under. provider_symbol() maps them before each request ("RKLB UQ" ->
+    RKLB, BRK.B -> BRK-B, GOOG -> GOOGL); records keep the original ticker
+    so consensus.py still matches them. Listings with no SEC Form 4 filings
+    (e.g. Canadian "ETHQ/U") are not requested and are recorded in
+    coverage.unsupported_tickers, so they read as "not evaluated" rather
+    than "no insider buying".
 
 SCHEDULE:
     Runs daily at 9:05am (after fmp.py and ark.py)
@@ -81,16 +90,24 @@ LOOKBACK_DAYS       = 180    # 6 months
 MIN_BUY_VALUE       = 10_000 # $10K minimum conviction filter
 MAX_CONGRESS_TICKERS = 50
 REQUEST_DELAY       = 1.1    # seconds between API calls — free tier is 60/minute
-RATE_LIMIT_WAIT     = 10     # seconds to wait before the one retry after a 429
+RATE_LIMIT_WAIT     = 10     # fallback wait after a 429 with no usable reset header
+MAX_RATE_LIMIT_WAIT = 65     # never wait longer than one 60-call window (+ slack)
+RATE_LIMIT_RETRIES  = 2      # retries after a 429 before the ticker is unknown
 
-# Retired provider. Only src/ingestion/collectors.py uses this now.
-SECURITIES_URL      = "https://securitiesdb.com/api/v1/stocks"
+# Bloomberg-style US composite exchange suffixes ARK uses ("RKLB UQ").
+# Mirrors src/ingestion/schemas.US_EXCHANGE_SUFFIXES; a test keeps them equal.
+US_EXCHANGE_SUFFIXES = {"UQ", "UW", "UR", "UN", "UA", "UP"}
+
+# Tickers whose Form 4s Finnhub files under a different symbol. Alphabet's
+# two share classes are one issuer; Finnhub has every filing under GOOGL.
+PROVIDER_ALIASES = {"GOOG": "GOOGL"}
 
 # Collection outcomes. These travel in the output file, not just the console,
 # so consensus.py can tell "checked, no buys" from "never found out".
 STATUS_SUCCESS   = "success"    # provider answered, transactions parsed (may be empty)
 STATUS_FAILED    = "failed"     # request or parse did not complete — result unknown
 STATUS_PARTIAL   = "partial"    # run level only: some tickers failed
+STATUS_UNSUPPORTED = "unsupported"  # no SEC Form 4 listing to ask about — not requested
 
 # A run that answered less than this fraction of its tickers is treated as
 # failed: too little was established to be worth replacing good data with.
@@ -132,6 +149,44 @@ REQUEST_TIMEOUT = 15  # seconds
 def has_api_key():
     """True when .env holds a real key, not empty or the .env.example placeholder."""
     return bool(FINNHUB_API_KEY) and not FINNHUB_API_KEY.lower().startswith("your_")
+
+
+def provider_symbol(ticker: str):
+    """
+    The symbol to ask Finnhub for, or None when the listing has no SEC
+    Form 4 filings to ask about.
+
+        "RKLB UQ" -> "RKLB"    US exchange suffix dropped
+        "BRK.B"   -> "BRK-B"   Finnhub writes share classes with a dash
+        "GOOG"    -> "GOOGL"   PROVIDER_ALIASES
+        "ETHQ/U"  -> None      non-US listing (a "/" unit or other suffix)
+    """
+    symbol = (ticker or "").strip().upper()
+    base, _, suffix = symbol.partition(" ")
+    if suffix:
+        if suffix.strip() not in US_EXCHANGE_SUFFIXES:
+            return None
+        symbol = base
+    if not symbol or "/" in symbol:
+        return None
+    symbol = symbol.replace(".", "-")
+    return PROVIDER_ALIASES.get(symbol, symbol)
+
+
+def rate_limit_wait(resp):
+    """
+    Seconds until Finnhub's 60-call window resets, from X-Ratelimit-Reset
+    (epoch seconds). Falls back to RATE_LIMIT_WAIT when the header is
+    missing or unusable, and never exceeds MAX_RATE_LIMIT_WAIT.
+    """
+    headers = getattr(resp, "headers", None) or {}
+    try:
+        wait = float(headers.get("X-Ratelimit-Reset")) - time.time() + 1
+    except (TypeError, ValueError):
+        return RATE_LIMIT_WAIT
+    if not 0 < wait <= MAX_RATE_LIMIT_WAIT:
+        return RATE_LIMIT_WAIT
+    return wait
 
 
 def lookback_cutoff():
@@ -220,7 +275,8 @@ def load_ark_tickers():
 
 def fetch_insider_activity(ticker: str):
     """
-    Fetches insider transactions for one ticker from Finnhub.
+    Fetches insider transactions for one ticker from Finnhub, asking for
+    provider_symbol(ticker). Callers skip tickers that map to None.
     Returns {"status": ..., "data": ..., "error_code": ..., "error_detail": ...}.
 
     Finnhub answers a ticker it does not know with 200 and an empty list,
@@ -240,7 +296,7 @@ def fetch_insider_activity(ticker: str):
         return requests.get(
             FINNHUB_URL,
             params={
-                "symbol": ticker,
+                "symbol": provider_symbol(ticker) or ticker,
                 "from":   lookback_cutoff().isoformat(),
                 "to":     datetime.now(timezone.utc).date().isoformat(),
             },
@@ -251,14 +307,18 @@ def fetch_insider_activity(ticker: str):
     try:
         resp = request()
 
-        if resp.status_code == 429:
-            print(f"[insider] ⚠️  {ticker} rate limited — "
-                  f"waiting {RATE_LIMIT_WAIT}s, then one retry")
-            time.sleep(RATE_LIMIT_WAIT)
+        for attempt in range(1, RATE_LIMIT_RETRIES + 1):
+            if resp.status_code != 429:
+                break
+            wait = rate_limit_wait(resp)
+            print(f"[insider] ⚠️  {ticker} rate limited — waiting {wait:.0f}s "
+                  f"(retry {attempt}/{RATE_LIMIT_RETRIES})")
+            time.sleep(wait)
             resp = request()
 
         if resp.status_code == 429:
-            return failure(ERR_RATE_LIMITED, "HTTP 429 from provider, after one retry")
+            return failure(ERR_RATE_LIMITED,
+                           f"HTTP 429 from provider, after {RATE_LIMIT_RETRIES} retries")
         if resp.status_code == 401:
             return failure(ERR_CREDENTIAL, "HTTP 401 — FINNHUB_API_KEY rejected")
         if resp.status_code != 200:
@@ -354,76 +414,6 @@ def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
     return buys, None, None
 
 
-def parse_insider_buys(ticker: str, raw: dict, bucket: str):
-    """
-    RETIRED — parses the SecuritiesDB response shape. insider.py no longer
-    calls this. It stays because src/ingestion/collectors.py imports it;
-    delete it, with SECURITIES_URL, once that collector moves to Finnhub.
-
-    SecuritiesDB transaction types:
-        "Purchase" → open market buy with real money ✅ KEEP
-        "Sale"     → insider selling                 ❌ SKIP
-        "Grant"    → compensation grant, value=0     ❌ SKIP
-        "Other"    → misc, usually value=0           ❌ SKIP
-
-    Additional filters:
-        value >= MIN_BUY_VALUE  → conviction buy only
-        date >= cutoff          → within lookback window
-
-    Returns (buys, error_code, error_detail). An unparseable response is a
-    failure, not an empty result — we cannot claim this ticker had no
-    insider buying. It is reported as `bad_response` (category "contract")
-    because the provider answered and our parser is what broke.
-    """
-    buys = []
-
-    try:
-        insider_data = raw.get("data", {})
-        transactions = insider_data.get(
-            "insider_transactions", {}
-        ).get("recent", [])
-
-        cutoff = (
-            datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
-        ).date()
-
-        for txn in transactions:
-            # Only open market purchases
-            if txn.get("type") != "Purchase":
-                continue
-
-            # Date within lookback window
-            date_str = txn.get("date", "")
-            try:
-                txn_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                if txn_date < cutoff:
-                    continue
-            except ValueError:
-                continue
-
-            # Must be real money — filters grants and option exercises
-            value = txn.get("value", 0) or 0
-            if value < MIN_BUY_VALUE:
-                continue
-
-            buys.append({
-                "ticker":           ticker,
-                "insider_name":     txn.get("insider", "").strip(),
-                "transaction_type": "Purchase",
-                "value":            value,
-                "shares":           txn.get("shares", 0),
-                "transaction_date": date_str,
-                "bucket":           bucket,
-                "data_source":      "securitiesdb",
-                "fetched_at":       datetime.now(timezone.utc).isoformat(),
-            })
-
-    except Exception as e:
-        return [], ERR_BAD_RESPONSE, f"{type(e).__name__}: {e}"[:200]
-
-    return buys, None, None
-
-
 # ─────────────────────────────────────────────────────────
 # SCAN — Check a list of tickers for insider buys
 # ─────────────────────────────────────────────────────────
@@ -439,6 +429,7 @@ def scan_tickers(tickers: list, bucket: str, label: str):
     found     = 0
     no_buys   = 0
     failed    = 0
+    unsupported = 0
     credential_failure = None  # set once the key turns out missing or rejected
 
     print(f"\n[insider] {label}")
@@ -446,6 +437,21 @@ def scan_tickers(tickers: list, bucket: str, label: str):
     print(f"[insider] Est. time: ~{len(tickers) * REQUEST_DELAY:.0f}s\n")
 
     for i, ticker in enumerate(tickers, 1):
+        if provider_symbol(ticker) is None:
+            unsupported += 1
+            print(f"  ➖ {ticker:<8} not a US Form 4 listing — skipped "
+                  f"[{i}/{len(tickers)}]")
+            outcomes.append({
+                "ticker":       ticker,
+                "bucket":       bucket,
+                "status":       STATUS_UNSUPPORTED,
+                "buy_count":    0,
+                "error_code":   None,
+                "error_detail": None,
+                "checked_at":   datetime.now(timezone.utc).isoformat(),
+            })
+            continue
+
         # A missing or rejected key fails every request the same way, so
         # stop calling the provider and mark the remaining tickers unknown.
         result = credential_failure or fetch_insider_activity(ticker)
@@ -493,7 +499,7 @@ def scan_tickers(tickers: list, bucket: str, label: str):
             time.sleep(REQUEST_DELAY)
 
     print(f"\n[insider] Done — {found} with buys, {no_buys} checked with none, "
-          f"{failed} unknown (failed)")
+          f"{failed} unknown (failed), {unsupported} skipped (not US listings)")
     return all_buys, outcomes
 
 
@@ -548,7 +554,13 @@ def build_coverage(outcomes: list, inputs: dict):
         partial  — some tickers failed, so absences are not conclusive
         failed   — too little was established to use: nothing was checked,
                    or fewer than MIN_USABLE_SUCCESS_RATE answered
+
+    Unsupported tickers were never requested, so they count toward none of
+    these and stay out of scanned_tickers — consensus.py then reports them
+    as not evaluated instead of "no qualifying buys".
     """
+    unsupported = [o["ticker"] for o in outcomes if o["status"] == STATUS_UNSUPPORTED]
+    outcomes   = [o for o in outcomes if o["status"] != STATUS_UNSUPPORTED]
     checked    = len(outcomes)
     failed     = sum(1 for o in outcomes if o["status"] == STATUS_FAILED)
     succeeded  = sum(1 for o in outcomes if o["status"] == STATUS_SUCCESS)
@@ -581,6 +593,9 @@ def build_coverage(outcomes: list, inputs: dict):
         # absent from both this list and transactions genuinely had no
         # qualifying purchases.
         "failed_tickers":       errors["failed_tickers"],
+        # Tickers with no SEC Form 4 listing (e.g. Canadian "ETHQ/U"),
+        # skipped without a request. Neither a buy nor a confirmed absence.
+        "unsupported_tickers":  unsupported,
         # Why those failed, grouped by cause, each with the category that
         # says what to do about it. This is the dev-facing diagnostic.
         "errors_by_code":       errors["by_code"],
@@ -774,6 +789,7 @@ def print_summary(summary: list, all_buys: list, coverage: dict):
     print(f"  Tickers checked        : {coverage['tickers_checked']}")
     print(f"  Confirmed no buys      : {coverage['confirmed_no_buys']}")
     print(f"  Unknown (failed)       : {coverage['failed']}")
+    print(f"  Skipped (not US)       : {len(coverage['unsupported_tickers'])}")
     print(f"  Total insider buys     : {len(all_buys)}")
     print(f"  Popular & Stable hits  : {len(popular)}")
     print(f"  Affordable & Growing   : {len(growth)}")

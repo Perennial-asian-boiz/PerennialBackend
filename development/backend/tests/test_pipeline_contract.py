@@ -123,10 +123,11 @@ class Provider:
         return {"symbol": fund, "holdings": rows}
 
     def insider(self, ticker):
-        return {"data": {"insider_transactions": {"recent": [{
-            "type": "Purchase", "insider": f"Synthetic Insider {ticker}",
-            "date": (self.today - timedelta(days=5)).isoformat(), "value": 50000, "shares": 1000,
-        }]}}}
+        return {"symbol": ticker, "data": [{
+            "name": f"Synthetic Insider {ticker}", "transactionCode": "P", "isDerivative": False,
+            "transactionDate": (self.today - timedelta(days=5)).isoformat(),
+            "change": 1000, "transactionPrice": 50.0,
+        }]}
 
     def short_interest(self, ticker):
         settle = (self.today - timedelta(days=10)).strftime("%m/%d/%Y")
@@ -144,8 +145,8 @@ class Provider:
             return StubResponse([])
         if "arkfunds.io" in url:
             return StubResponse(self.ark_holdings(params["symbol"]))
-        if "securitiesdb.com" in url and url.endswith("/insider-activity"):
-            ticker = url.rstrip("/").split("/")[-2]
+        if "finnhub.io" in url and url.endswith("/stock/insider-transactions"):
+            ticker = params["symbol"]
             self.requested["insider_trades"].append(ticker)
             return StubResponse(self.insider(ticker))
         if "api.nasdaq.com" in url and "/short-interest" in url:

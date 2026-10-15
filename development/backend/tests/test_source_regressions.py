@@ -270,6 +270,29 @@ def test_retry_after_dates_and_malformed_headers(header, expected):
 
 
 @pytest.mark.parametrize(
+    "headers,expected",
+    [
+        ({"X-Ratelimit-Reset": "1791331230"}, 30),  # Finnhub: epoch seconds
+        ({"X-Ratelimit-Reset": "20"}, 20),  # small value: a delta
+        ({"X-Ratelimit-Reset": "1791331190"}, 1),  # already past: backoff only
+        ({"X-Ratelimit-Reset": "soon"}, 1),
+        ({"X-Ratelimit-Reset": "1791331230", "Retry-After": "5"}, 5),
+    ],
+)
+def test_ratelimit_reset_header_is_honored_without_retry_after(headers, expected):
+    sleeps = []
+    responses = iter([FakeResponse(status=429, headers=headers), FakeResponse(body=[])])
+    result = collectors._get_json(
+        FakeSession(lambda u, p: next(responses)),
+        "synthetic",
+        jitter=lambda: 0,
+        sleep=sleeps.append,
+        wall_time=lambda: 1791331200.0,
+    )
+    assert result.ok and sleeps == [expected]
+
+
+@pytest.mark.parametrize(
     "error", [requests.ConnectionError, requests.exceptions.ProxyError]
 )
 def test_connection_errors_retry_and_recover(error):
@@ -405,10 +428,10 @@ def test_failed_coverage_and_new_diagnostics_are_safe(capsys):
         assert clean["failures"][0]["code"] == code
 
 
-@pytest.mark.parametrize("status,complete", [(404, True), (503, False)])
+@pytest.mark.parametrize("status,complete", [(200, True), (503, False)])
 def test_insider_empty_or_failed_outcome_coverage(status, complete):
     result = collectors.collect_insider(
-        FakeSession(lambda u, p: FakeResponse(status=status)),
+        FakeSession(lambda u, p: FakeResponse(status=status, body={"data": []})),
         sleep=NO_SLEEP,
         upstream=UPSTREAM,
     )
@@ -458,16 +481,16 @@ def test_fail_fast_stops_after_first_failed_ticker(collect, failed_index, monkey
         ticker = (
             url.split("/quote/")[1].split("/")[0]
             if "/quote/" in url
-            else url.split("/")[-2]
+            else params["symbol"]
         )
         requested.append(ticker)
         if ticker == tickers[failed_index]:
             return FakeResponse(status=500)
-        # Both kinds are explicit no-record successes, including insider 404.
+        # Both kinds are explicit no-record successes.
         return (
             FakeResponse(body={"data": None})
             if collect is collectors.collect_short_interest
-            else FakeResponse(status=404)
+            else FakeResponse(body={"data": []})
         )
 
     for name in ("insider", "short_interest"):
@@ -592,7 +615,7 @@ def test_insider_parser_error_fails_unit_without_partial_buys(monkeypatch, capsy
             secret,
         )
 
-    monkeypatch.setattr(insider, "parse_insider_buys", bad_parse)
+    monkeypatch.setattr(insider, "parse_finnhub_buys", bad_parse)
     upstream = {
         "trades": [],
         "holdings": [
@@ -613,22 +636,19 @@ def test_insider_parser_error_fails_unit_without_partial_buys(monkeypatch, capsy
     assert secret not in json.dumps(result.diagnostics) + capsys.readouterr().out
 
 
-def test_insider_404_and_answered_empty_are_both_complete():
-    """An absent provider ticker and an answered empty ticker are distinct successful responses."""
+def test_insider_unsupported_and_answered_empty_are_both_complete():
+    """A non-US listing (never requested) and an answered empty ticker both complete."""
     upstream = {
         "trades": [],
         "holdings": [
-            {"ticker": "ZZ00", "fund_count": 1},
+            {"ticker": "ZZ00/U", "fund_count": 1},
             {"ticker": "ZZ01", "fund_count": 1},
         ],
     }
-    responses = {
-        "ZZ00": FakeResponse(status=404),
-        "ZZ01": FakeResponse(body={"data": {"insider_transactions": {"recent": []}}}),
-    }
-    session = insider_session(responses)
+    session = insider_session({})
     result = collectors.collect_insider(session, upstream=upstream, sleep=NO_SLEEP)
     assert result.succeeded and result.records == []
+    assert len(session.calls) == 1
     assert result.diagnostics["attempted"] == result.diagnostics["completed"] == 2
     assert result.diagnostics["failed"] == result.diagnostics["not_attempted"] == 0
     assert result.coverage == {"complete": True, "scope": "selected_universe"}
@@ -643,7 +663,7 @@ def test_insider_no_record_does_not_hide_later_transport_failure():
             {"ticker": "ZZ02", "fund_count": 1},
         ],
     }
-    responses = {"ZZ00": FakeResponse(status=404), "ZZ01": FakeResponse(status=403)}
+    responses = {"ZZ01": FakeResponse(status=403)}
     session = insider_session(responses)
     result = collectors.collect_insider(session, upstream=upstream, sleep=NO_SLEEP)
     assert not result.succeeded and result.error_code == "partial_collection"
