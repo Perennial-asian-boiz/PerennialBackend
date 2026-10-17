@@ -105,6 +105,12 @@ class AuthResponse(APIModel):
     user: UserResponse
 
 
+class LoginResponse(APIModel):
+    user: UserResponse
+    verification_required: bool
+    development_code: str | None = None
+
+
 class PreferencesRequest(BaseModel):
     sectors: list[str] = Field(default_factory=list, max_length=11)
     risk_level: RiskLevel | None = None
@@ -430,7 +436,7 @@ def resend_otp(
 ) -> OTPResponse:
     with engine.begin() as connection:
         user = find_user(connection, payload.email)
-        if user is None or user.is_verified:
+        if user is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Unable to resend verification code",
@@ -441,10 +447,10 @@ def resend_otp(
     )
 
 
-@app.post("/auth/login", response_model=AuthResponse)
+@app.post("/auth/login", response_model=LoginResponse)
 def login(
     payload: LoginRequest, engine: Annotated[Engine, Depends(get_engine)]
-) -> AuthResponse:
+) -> LoginResponse:
     with engine.begin() as connection:
         user = find_user(connection, payload.email)
         if user is None or not verify_secret(payload.password, user.password_hash):
@@ -452,21 +458,11 @@ def login(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Email or password is invalid",
             )
-        if not user.is_verified:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Email verification is required",
-            )
-        token = new_session_token()
-        connection.execute(
-            insert(models.auth_sessions).values(
-                user_id=user.id,
-                token_hash=hash_token(token),
-                expires_at=utc_now() + timedelta(days=session_ttl_days()),
-            )
-        )
-    return AuthResponse(
-        access_token=token, token_type="bearer", user=user_response(user)
+        code = issue_verification_code(connection, user.id)
+    return LoginResponse(
+        user=user_response(user),
+        verification_required=True,
+        development_code=development_code_response(code),
     )
 
 
