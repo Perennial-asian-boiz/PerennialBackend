@@ -32,10 +32,8 @@ from src.api.security import (
 from src.db import models
 from src.db.session import make_engine
 
-
 RiskLevel = Literal["Conservative", "Moderate", "High"]
 OTP_TTL_MINUTES = 15
-SESSION_TTL_DAYS = 7
 MAX_OTP_ATTEMPTS = 5
 
 
@@ -123,6 +121,21 @@ class PreferencesResponse(APIModel):
     risk_level: RiskLevel | None
 
 
+class NotificationSettingsRequest(BaseModel):
+    confidence_score_enabled: bool = True
+    earnings_alerts_enabled: bool = True
+
+
+class NotificationSettingsResponse(APIModel):
+    confidence_score_enabled: bool
+    earnings_alerts_enabled: bool
+
+
+class PasswordChangeRequest(BaseModel):
+    old_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+
 class WatchlistItem(APIModel):
     ticker: str
 
@@ -155,6 +168,31 @@ def development_code_response(code: str) -> str | None:
     if os.getenv("APP_ENV", "development").casefold() != "production":
         return code
     return None
+
+
+def session_ttl_days() -> int:
+    raw = os.getenv("SESSION_TTL_DAYS", "7").strip()
+    try:
+        days = int(raw)
+    except ValueError:
+        raise RuntimeError("SESSION_TTL_DAYS must be a positive integer") from None
+    if days < 1:
+        raise RuntimeError("SESSION_TTL_DAYS must be a positive integer")
+    return days
+
+
+def cors_origins() -> list[str]:
+    configured = os.getenv("CORS_ORIGINS", "")
+    if configured.strip():
+        origins = [origin.strip().rstrip("/") for origin in configured.split(",")]
+        origins = [origin for origin in origins if origin]
+    else:
+        if os.getenv("APP_ENV", "development").casefold() == "production":
+            raise RuntimeError("CORS_ORIGINS must be configured in production")
+        origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    if "*" in origins:
+        raise RuntimeError("CORS_ORIGINS cannot use '*' with credentials enabled")
+    return origins
 
 
 def user_response(row: object) -> UserResponse:
@@ -239,7 +277,7 @@ def get_current_user(
 app = FastAPI(title="Perennial API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -373,7 +411,7 @@ def verify_otp(
             insert(models.auth_sessions).values(
                 user_id=user.id,
                 token_hash=hash_token(token),
-                expires_at=utc_now() + timedelta(days=SESSION_TTL_DAYS),
+                expires_at=utc_now() + timedelta(days=session_ttl_days()),
             )
         )
         verified_user = (
@@ -424,12 +462,33 @@ def login(
             insert(models.auth_sessions).values(
                 user_id=user.id,
                 token_hash=hash_token(token),
-                expires_at=utc_now() + timedelta(days=SESSION_TTL_DAYS),
+                expires_at=utc_now() + timedelta(days=session_ttl_days()),
             )
         )
     return AuthResponse(
         access_token=token, token_type="bearer", user=user_response(user)
     )
+
+
+@app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    user: Annotated[object, Depends(get_current_user)],
+    engine: Annotated[Engine, Depends(get_engine)],
+) -> Response:
+    """Revoke every active session for the signed-in user."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            update(models.auth_sessions)
+            .where(
+                and_(
+                    models.auth_sessions.c.user_id == user.id,
+                    models.auth_sessions.c.revoked_at.is_(None),
+                )
+            )
+            .values(revoked_at=utc_now())
+        )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/me", response_model=UserResponse)
@@ -485,6 +544,103 @@ def save_preferences(
                 .values(**values)
             )
     return PreferencesResponse(sectors=payload.sectors, risk_level=payload.risk_level)
+
+
+@app.get("/me/notifications", response_model=NotificationSettingsResponse)
+def get_notification_settings(
+    user: Annotated[object, Depends(get_current_user)],
+    engine: Annotated[Engine, Depends(get_engine)],
+) -> NotificationSettingsResponse:
+    with engine.begin() as connection:
+        row = (
+            connection.execute(
+                select(models.user_notification_settings).where(
+                    models.user_notification_settings.c.user_id == user.id
+                )
+            )
+            .mappings()
+            .first()
+        )
+    if row is None:
+        return NotificationSettingsResponse(
+            confidence_score_enabled=True, earnings_alerts_enabled=True
+        )
+    return NotificationSettingsResponse(
+        confidence_score_enabled=row.confidence_score_enabled,
+        earnings_alerts_enabled=row.earnings_alerts_enabled,
+    )
+
+
+@app.put("/me/notifications", response_model=NotificationSettingsResponse)
+def save_notification_settings(
+    payload: NotificationSettingsRequest,
+    user: Annotated[object, Depends(get_current_user)],
+    engine: Annotated[Engine, Depends(get_engine)],
+) -> NotificationSettingsResponse:
+    values = {
+        "confidence_score_enabled": payload.confidence_score_enabled,
+        "earnings_alerts_enabled": payload.earnings_alerts_enabled,
+        "updated_at": utc_now(),
+    }
+    with engine.begin() as connection:
+        existing = connection.execute(
+            select(models.user_notification_settings.c.user_id).where(
+                models.user_notification_settings.c.user_id == user.id
+            )
+        ).first()
+        if existing is None:
+            connection.execute(
+                insert(models.user_notification_settings).values(
+                    user_id=user.id, **values
+                )
+            )
+        else:
+            connection.execute(
+                update(models.user_notification_settings)
+                .where(models.user_notification_settings.c.user_id == user.id)
+                .values(**values)
+            )
+    return NotificationSettingsResponse(
+        confidence_score_enabled=payload.confidence_score_enabled,
+        earnings_alerts_enabled=payload.earnings_alerts_enabled,
+    )
+
+
+@app.put("/me/password")
+def change_password(
+    payload: PasswordChangeRequest,
+    user: Annotated[object, Depends(get_current_user)],
+    engine: Annotated[Engine, Depends(get_engine)],
+) -> dict[str, str]:
+    if not verify_secret(payload.old_password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is invalid",
+        )
+    if payload.old_password == payload.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from the current password",
+        )
+    with engine.begin() as connection:
+        connection.execute(
+            update(models.users)
+            .where(models.users.c.id == user.id)
+            .values(
+                password_hash=hash_secret(payload.new_password), updated_at=utc_now()
+            )
+        )
+        connection.execute(
+            update(models.auth_sessions)
+            .where(
+                and_(
+                    models.auth_sessions.c.user_id == user.id,
+                    models.auth_sessions.c.revoked_at.is_(None),
+                )
+            )
+            .values(revoked_at=utc_now())
+        )
+    return {"message": "Password changed successfully"}
 
 
 @app.get("/me/watchlist", response_model=list[WatchlistItem])

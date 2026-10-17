@@ -465,6 +465,35 @@ user_preferences = Table(
     ),
 )
 
+user_notification_settings = Table(
+    "user_notification_settings",
+    metadata,
+    Column(
+        "user_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.users.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "confidence_score_enabled",
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    ),
+    Column(
+        "earnings_alerts_enabled",
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    ),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+)
+
 user_watchlist = Table(
     "user_watchlist",
     metadata,
