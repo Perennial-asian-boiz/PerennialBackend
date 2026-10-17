@@ -52,7 +52,8 @@ It publishes a verified watchlist without source JSON files. Read the
 
 The `feature/backend-auth-api` branch adds the first user-facing API layer on
 top of the existing PostgreSQL database. It includes account creation, local
-OTP verification, login sessions, onboarding preferences, and a personal
+OTP verification, login sessions, onboarding preferences, notification
+settings, password changes, logout/session revocation, and a personal
 watchlist. The API is started from `development/backend` after applying the
 migrations:
 
@@ -65,7 +66,42 @@ uvicorn src.api.app:app --reload --port 8000
 During local development, signup and resend responses include a
 `development_code` so the frontend flow can be tested before an email provider
 is selected. Set `APP_ENV=production` before deployment; production hides that
-field and requires a real email-delivery adapter to be connected.
+field and requires a real email-delivery adapter to be connected. The current
+branch does not send email yet, so do not deploy public signup until delivery
+is configured.
+
+#### Account API endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `POST` | `/auth/signup` | Create an account and issue a verification code |
+| `POST` | `/auth/verify-otp` | Verify the account and create a session |
+| `POST` | `/auth/resend-otp` | Issue another development/provider code |
+| `POST` | `/auth/login` | Create a session for a verified account |
+| `POST` | `/auth/logout` | Revoke all active sessions for the account |
+| `GET/PUT` | `/me/preferences` | Read or save sectors and risk level |
+| `GET/PUT` | `/me/notifications` | Read or save notification toggles |
+| `PUT` | `/me/password` | Change the password and revoke sessions |
+| `GET/POST/DELETE` | `/me/watchlist` | Read or update the account watchlist |
+
+#### Planned email delivery
+
+Resend is the recommended first provider because it has a small HTTP API and
+fits verification-code and password emails without adding email credentials to
+the frontend. The provider must be implemented behind a backend mail service;
+the frontend should continue calling the auth endpoints above.
+
+When the provider integration is added, configure these values only in the
+deployment secret store or the untracked `development/backend/.env`:
+
+```dotenv
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=replace_with_secret
+EMAIL_FROM=Perennial <noreply@verified-domain.example>
+```
+
+The sender domain must be verified with Resend. Never commit `RESEND_API_KEY`,
+`.env`, or a real sender credential.
 
 The frontend can use `http://127.0.0.1:8000` as `VITE_API_URL`. The initial
 endpoint contract is documented by the OpenAPI page at
