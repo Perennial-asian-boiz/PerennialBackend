@@ -236,6 +236,15 @@ sanitized duplicate-signup response is also handled rather than displayed as
 new-account success. Explicit 409 errors intentionally reveal that an email
 exists, as requested by the product; production also needs IP/bot rate limits.
 
+Validation responses contain app-owned `detail`, a stable `code`, and optional
+`field_errors` keyed by input name (`email`, `password`, `full_name`, etc.).
+Never forward raw Supabase messages or Pydantic input/ctx: these may contain
+passwords. Known weak-password reasons are translated into actionable hints;
+email delivery restrictions and disabled signup are service errors, not bad
+passwords. Baseline passwords are 8–200 characters; any stronger Supabase
+policy still applies. `email_address_not_authorized` means custom SMTP must
+be configured by the project owner; retrying with another password won't fix it.
+
 Auth identities are saved at signup in `auth.users`. App profiles are synced
 after a verified confirmation link or first verified login, not before email
 ownership is established. Preferences/settings/watchlists remain per-user.

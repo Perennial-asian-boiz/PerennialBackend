@@ -686,6 +686,105 @@ def test_invalid_fields_never_echo_passwords(api):
     )
     assert response.status_code == 422
     assert "secret" not in response.text
+    assert response.json()["field_errors"] == {
+        "email": "Enter a valid email address, such as name@example.com.",
+        "password": "Use at least 8 characters for your password.",
+    }
+
+
+def test_signup_field_errors_are_specific_and_do_not_create_accounts(api):
+    client, provider, _ = api
+    response = client.post(
+        "/auth/signup",
+        json={"email": "invalid", "full_name": "   ", "password": "secret"},
+    )
+    assert response.status_code == 422
+    assert set(response.json()["field_errors"]) == {"email", "full_name", "password"}
+    assert response.json()["code"] == "invalid_fields"
+    assert "secret" not in response.text
+    assert not provider.users
+
+
+def test_provider_field_errors_reach_the_client(api):
+    client, provider, _ = api
+    with patch.object(
+        provider, "signup", side_effect=AuthProviderError(422, "weak_password")
+    ):
+        response = client.post(
+            "/auth/signup",
+            json={
+                "email": "new@example.com",
+                "full_name": "Ád",
+                "password": "password123",
+            },
+        )
+    assert response.status_code == 422
+    assert response.json()["code"] == "weak_password"
+    assert "password" in response.json()["field_errors"]
+    assert "password123" not in response.text
+    assert not provider.users
+
+
+@pytest.mark.parametrize(
+    "code,status,field,expected",
+    [
+        ("weak_password", 422, "password", "longer, unique password"),
+        ("email_address_invalid", 422, "email", "another valid email"),
+        ("email_exists", 409, "email", "already registered"),
+        ("user_already_exists", 409, "email", "already registered"),
+        ("email_address_not_authorized", 503, None, "isn't fully set up"),
+        ("email_provider_disabled", 503, None, "registration is currently unavailable"),
+        ("signup_disabled", 503, None, "registration is currently unavailable"),
+        ("over_email_send_rate_limit", 429, None, "Too many verification emails"),
+        ("validation_failed", 422, None, "couldn't validate"),
+        ("unknown-secret-sentinel", 401, None, "Invalid email, password, or session"),
+        ({"secret": "sentinel"}, 401, None, "Invalid email, password, or session"),
+    ],
+)
+def test_provider_codes_have_safe_actionable_messages(code, status, field, expected):
+    provider = SupabaseAuth("https://example.supabase.co", "secret-sentinel")
+    response = MagicMock(status_code=429 if status == 429 else 422)
+    response.json.return_value = {"error_code": code, "msg": "secret-sentinel"}
+    response.__enter__.return_value = response
+    with (
+        patch("requests.request", return_value=response),
+        pytest.raises(AuthProviderError) as error,
+    ):
+        provider.request("POST", "signup", {"password": "secret-sentinel"})
+    result = error.value
+    assert result.status == status
+    assert expected in result.message
+    assert set(result.field_errors) == ({field} if field else set())
+    assert "secret-sentinel" not in str(result)
+    assert "secret-sentinel" not in result.code
+
+
+@pytest.mark.parametrize(
+    "reasons,expected",
+    [
+        (["length"], "Choose a longer password."),
+        (["characters"], "uppercase and lowercase letters, a number, and a symbol"),
+        (["pwned"], "known to be compromised"),
+        (["length", "secret-sentinel", {"unsafe": True}], "Choose a longer password."),
+        ("secret-sentinel", "longer, unique password"),
+    ],
+)
+def test_weak_password_reasons_are_allowlisted(reasons, expected):
+    provider = SupabaseAuth("https://example.supabase.co", "test")
+    response = MagicMock(status_code=422)
+    response.json.return_value = {
+        "error_code": "weak_password",
+        "msg": "secret-sentinel",
+        "weak_password": {"reasons": reasons},
+    }
+    response.__enter__.return_value = response
+    with (
+        patch("requests.request", return_value=response),
+        pytest.raises(AuthProviderError) as error,
+    ):
+        provider.request("POST", "signup")
+    assert expected in error.value.field_errors["password"]
+    assert "secret-sentinel" not in str(error.value)
 
 
 def test_db_password_placeholder_is_encoded_and_never_logged(tmp_path):

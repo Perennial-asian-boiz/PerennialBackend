@@ -48,14 +48,49 @@ app.include_router(router)
 
 @app.exception_handler(AuthProviderError)
 async def provider_error(_request: Request, error: AuthProviderError):
-    return JSONResponse(status_code=error.status, content={"detail": error.message})
+    return JSONResponse(
+        status_code=error.status,
+        content={
+            "detail": error.message,
+            "code": error.code,
+            "field_errors": error.field_errors,
+        },
+    )
 
 
 @app.exception_handler(RequestValidationError)
-async def invalid_input(_request: Request, _error: RequestValidationError):
+async def invalid_input(_request: Request, error: RequestValidationError):
     # Pydantic's default details include rejected input (including passwords).
+    # Inspect only location/type and return our own messages, never input/msg/ctx.
+    fields = {}
+    for issue in error.errors():
+        location = issue.get("loc", ())
+        if len(location) != 2 or location[0] != "body":
+            continue
+        name, kind = location[1], issue["type"]
+        if name == "email":
+            fields[name] = "Enter a valid email address, such as name@example.com."
+        elif name == "full_name":
+            fields[name] = (
+                "Use no more than 200 characters for your name."
+                if kind == "string_too_long"
+                else "Enter your full name."
+            )
+        elif name in {"password", "new_password", "old_password"}:
+            fields[name] = {
+                "string_too_short": (
+                    "Enter your current password."
+                    if name == "old_password"
+                    else "Use at least 8 characters for your password."
+                ),
+                "string_too_long": "Use no more than 200 characters for your password.",
+            }.get(kind, "Enter your password.")
+        elif name == "code":
+            fields[name] = "Enter the 6-digit verification code from your email."
+    detail = next(iter(fields.values()), "Please check the fields and try again.")
     return JSONResponse(
-        status_code=422, content={"detail": "Please check the fields and try again."}
+        status_code=422,
+        content={"detail": detail, "code": "invalid_fields", "field_errors": fields},
     )
 
 

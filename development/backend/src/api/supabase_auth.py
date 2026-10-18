@@ -18,15 +18,44 @@ import requests
 
 
 class AuthProviderError(Exception):
-    def __init__(self, status=503, code="unavailable"):
+    def __init__(self, status=503, code="unavailable", *, reasons=()):
         self.status = status
         self.code = code
+        self.field_errors = {}
         self.message = {
             401: "Invalid email, password, or session.",
             429: "Too many authentication requests. Please try again later.",
             409: "This email is already registered. Please sign in instead.",
-            422: "Please check your email address and password requirements.",
+            422: "We couldn't validate these details. Please try again or contact support.",
         }.get(status, "Authentication service is unavailable. Please try again later.")
+        # App-owned copy only: provider messages can contain credentials or user input.
+        if code == "weak_password":
+            hints = {
+                "length": "Choose a longer password.",
+                "characters": "Include uppercase and lowercase letters, a number, and a symbol.",
+                "pwned": "This password is known to be compromised. Choose a unique password you haven't used elsewhere.",
+            }
+            self.message = " ".join(hints[key] for key in hints if key in reasons)
+            if not self.message:
+                self.message = "This password is too easy to guess. Choose a longer, unique password."
+            self.field_errors = {"password": self.message}
+        elif code == "email_address_invalid":
+            self.message = (
+                "This email address cannot be used. Enter another valid email address."
+            )
+            self.field_errors = {"email": self.message}
+        elif code == "email_exists":
+            self.field_errors = {"email": self.message}
+        elif code == "email_not_confirmed":
+            self.message = "Please confirm your email using the link in your inbox before signing in."
+        elif code == "email_address_not_authorized":
+            self.message = "Email verification isn't fully set up yet. Please try again later or contact support."
+        elif code == "over_email_send_rate_limit":
+            self.message = "Too many verification emails have been requested. Please wait before trying again."
+        elif code in {"signup_disabled", "email_provider_disabled"}:
+            self.message = (
+                "Account registration is currently unavailable. Please try again later."
+            )
         super().__init__(self.message)
 
 
@@ -79,21 +108,40 @@ class SupabaseAuth:
                     body = response.json()
                 except ValueError:
                     raise AuthProviderError() from None
-                if response.status_code == 429:
-                    raise AuthProviderError(429)
                 if response.status_code not in (200, 201):
                     code = body.get("error_code") if isinstance(body, dict) else None
-                    # Only this known flag affects control flow; never relay provider text.
+                    if not isinstance(code, str):
+                        code = None
+                    if response.status_code == 429:
+                        raise AuthProviderError(
+                            429,
+                            "over_email_send_rate_limit"
+                            if code == "over_email_send_rate_limit"
+                            else "rate_limited",
+                        )
+                    # Allowlisted codes affect UX; never relay raw provider text.
                     if code == "email_not_confirmed":
                         raise AuthProviderError(401, "email_not_confirmed")
                     if code in {"user_already_exists", "email_exists"}:
                         raise AuthProviderError(409, "email_exists")
+                    if code == "weak_password":
+                        weak = body.get("weak_password")
+                        reasons = (
+                            weak.get("reasons") if isinstance(weak, dict) else None
+                        )
+                        raise AuthProviderError(
+                            422,
+                            code,
+                            reasons=reasons if isinstance(reasons, list) else (),
+                        )
+                    if code in {"email_address_invalid", "validation_failed"}:
+                        raise AuthProviderError(422, code)
                     if code in {
-                        "weak_password",
-                        "email_address_invalid",
-                        "validation_failed",
+                        "email_address_not_authorized",
+                        "signup_disabled",
+                        "email_provider_disabled",
                     }:
-                        raise AuthProviderError(422, "invalid_signup")
+                        raise AuthProviderError(503, code)
                     if response.status_code in (400, 401, 403, 422):
                         raise AuthProviderError(401)
                     raise AuthProviderError()
