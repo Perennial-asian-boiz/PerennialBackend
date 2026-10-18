@@ -167,6 +167,37 @@ def test_signup_link_then_login_otp_persistence_and_private_headers(api):
     assert "password" not in body and "development_code" not in body
 
 
+def test_first_login_after_email_confirmation_does_not_wait_for_signup_cooldown(api):
+    client, provider, _ = api
+    email = "first-login@example.com"
+    signup = client.post(
+        "/auth/signup",
+        json={"email": email, "full_name": "First Login", "password": "password123"},
+    )
+    assert signup.status_code == 201
+    link = provider.verify_code(email, "123456", "signup")
+    assert (
+        client.post(
+            "/auth/confirm-email", json={"access_token": link["access_token"]}
+        ).status_code
+        == 200
+    )
+
+    login = client.post("/auth/login", json={"email": email, "password": "password123"})
+    assert login.status_code == 200, login.text
+    assert login.json()["flow"] == "login"
+    assert provider.sent == [(email, "login")]
+
+    repeated = client.post(
+        "/auth/login", json={"email": email, "password": "password123"}
+    )
+    assert repeated.status_code == 429  # Active login OTP still has a cooldown.
+    wrong_password = client.post(
+        "/auth/login", json={"email": email, "password": "incorrect"}
+    )
+    assert wrong_password.status_code == 401
+
+
 def test_wrong_login_and_unapproved_native_tokens_denied(api):
     client, provider, engine = api
     body, _ = register(api)

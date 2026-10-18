@@ -200,7 +200,7 @@ def lock_email(connection, email):
     )
 
 
-def check_email_limit(connection, email):
+def check_email_limit(connection, email, flow):
     rows = (
         connection.execute(
             select(tables.auth_challenges).where(
@@ -211,9 +211,13 @@ def check_email_limit(connection, email):
         .mappings()
         .all()
     )
+    # The cooldown applies to another email for the same active challenge.
+    # A confirmed signup must not delay the user's first login OTP. Keep the
+    # hourly cap across all flows so switching flows cannot bypass it.
+    active = [row for row in rows if row.flow == flow and row.consumed_at is None]
     if (
-        rows
-        and (now() - max(row.last_sent_at for row in rows)).total_seconds()
+        active
+        and (now() - max(row.last_sent_at for row in active)).total_seconds()
         < RESEND_SECONDS
     ):
         raise HTTPException(
@@ -401,7 +405,7 @@ def signup(payload: SignupRequest, engine: EngineDep, provider: ProviderDep):
             raise HTTPException(
                 409, "This email is already registered. Please sign in instead."
             )
-        check_email_limit(connection, payload.email)
+        check_email_limit(connection, payload.email, "signup")
         provider.signup(payload.email, payload.password, payload.full_name)
         if not email_is_registered(connection, payload.email):
             # Detect wrong-project configuration or a malformed provider success.
@@ -438,7 +442,6 @@ def confirm_email(
 def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         lock_email(connection, payload.email)
-        check_email_limit(connection, payload.email)
         flow = "login"
         try:
             provider.check_password(payload.email, payload.password)
@@ -447,6 +450,7 @@ def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
             if error.code != "email_not_confirmed":
                 raise
             flow = "signup"
+        check_email_limit(connection, payload.email, flow)
         provider.send_code(payload.email, flow)
         return start_challenge(connection, payload.email, flow)
 
@@ -455,7 +459,7 @@ def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
 def forgot_password(payload: EmailRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         lock_email(connection, payload.email)
-        check_email_limit(connection, payload.email)
+        check_email_limit(connection, payload.email, "recovery")
         provider.send_code(payload.email, "recovery")
         return start_challenge(connection, payload.email, "recovery")
 
@@ -468,7 +472,7 @@ def resend_otp(payload: ChallengeRequest, engine: EngineDep, provider: ProviderD
             raise HTTPException(
                 400, "Use the email confirmation link, not a signup code."
             )
-        check_email_limit(connection, payload.email)
+        check_email_limit(connection, payload.email, row.flow)
         provider.send_code(payload.email, row.flow)
         connection.execute(
             update(tables.auth_challenges)
@@ -490,7 +494,7 @@ def resend_confirmation(
         row = pending_challenge(connection, payload)
         if row.flow != "signup":
             raise HTTPException(400, "An email confirmation request is required.")
-        check_email_limit(connection, payload.email)
+        check_email_limit(connection, payload.email, "signup")
         provider.send_code(payload.email, "signup")
         connection.execute(
             update(tables.auth_challenges)

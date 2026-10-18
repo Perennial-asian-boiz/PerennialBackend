@@ -213,8 +213,10 @@ refresh. The browser keeps only tokens and the pending challenge in tab-scoped
 `sessionStorage`; account data is stored in PostgreSQL, not localStorage.
 
 Codes/challenges expire after 15 minutes, lock after five wrong attempts and
-are single-use. Resend waits 60 seconds; five emails per hour per email address
-are allowed. Resending does not reset failed attempts. Supabase and Resend may
+are single-use. Resend waits 60 seconds for an active challenge of the same
+flow (signup, login or recovery); confirming a signup email does not delay the
+first login code. Five emails per hour per email address are allowed across all
+flows. Resending does not reset failed attempts. Supabase and Resend may
 apply stricter limits. Provider failures do not become successful login or
 consume an invalid-code attempt. Only the challenge token's SHA-256 digest is
 stored by FastAPI; Supabase owns password/OTP storage.
