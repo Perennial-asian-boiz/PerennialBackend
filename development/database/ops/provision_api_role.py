@@ -76,6 +76,12 @@ def provision(conn, role="perennial_api"):
                 sql.Identifier(table), sql.Identifier(role)
             )
         )
+    # Boolean only; the runtime still cannot SELECT identities/password hashes.
+    conn.execute(
+        sql.SQL("GRANT EXECUTE ON FUNCTION app.email_is_registered(text) TO {}").format(
+            sql.Identifier(role)
+        )
+    )
 
 
 if __name__ == "__main__":

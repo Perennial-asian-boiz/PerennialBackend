@@ -97,6 +97,7 @@ class ChallengeResponse(BaseModel):
     flow: Literal["signup", "login", "recovery"]
     verification_required: bool = True
     resend_after_seconds: int = RESEND_SECONDS
+    verification_method: Literal["email_link", "email_otp"] = "email_otp"
 
 
 class UserResponse(BaseModel):
@@ -125,6 +126,10 @@ class Principal(UserResponse):
 
 class RefreshRequest(BaseModel):
     refresh_token: str = Field(min_length=1, max_length=8192)
+
+
+class ConfirmEmailRequest(BaseModel):
+    access_token: str = Field(min_length=1, max_length=16384, repr=False)
 
 
 class NewPassword(BaseModel):
@@ -220,6 +225,12 @@ def check_email_limit(connection, email):
         )
 
 
+def email_is_registered(connection, email):
+    return connection.execute(
+        text("SELECT app.email_is_registered(:email)"), {"email": email}
+    ).scalar_one()
+
+
 def start_challenge(connection, email, flow):
     token = secrets.token_urlsafe(32)
     connection.execute(
@@ -238,7 +249,11 @@ def start_challenge(connection, email, flow):
             expires_at=now() + timedelta(minutes=OTP_MINUTES),
         )
     )
-    return ChallengeResponse(challenge_id=token, flow=flow)
+    return ChallengeResponse(
+        challenge_id=token,
+        flow=flow,
+        verification_method="email_link" if flow == "signup" else "email_otp",
+    )
 
 
 def pending_challenge(connection, payload):
@@ -382,9 +397,41 @@ def token_response(body, user, flow="login"):
 def signup(payload: SignupRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         lock_email(connection, payload.email)
+        if email_is_registered(connection, payload.email):
+            raise HTTPException(
+                409, "This email is already registered. Please sign in instead."
+            )
         check_email_limit(connection, payload.email)
         provider.signup(payload.email, payload.password, payload.full_name)
+        if not email_is_registered(connection, payload.email):
+            # Detect wrong-project configuration or a malformed provider success.
+            raise AuthProviderError()
         return start_challenge(connection, payload.email, "signup")
+
+
+@router.post("/auth/confirm-email")
+def confirm_email(
+    payload: ConfirmEmailRequest, engine: EngineDep, provider: ProviderDep
+):
+    # The emailed link has already been consumed by Supabase's /verify endpoint.
+    # Validate its JWT, sync only the profile, and never approve an app login.
+    identity, _session_id = provider.identity(payload.access_token)
+    with engine.begin() as connection:
+        sync_profile(connection, identity)
+        connection.execute(
+            update(tables.auth_challenges)
+            .where(
+                tables.auth_challenges.c.email == identity["email"].casefold(),
+                tables.auth_challenges.c.flow == "signup",
+                tables.auth_challenges.c.consumed_at.is_(None),
+            )
+            .values(consumed_at=now())
+        )
+    try:
+        provider.logout(payload.access_token, scope="local")
+    except AuthProviderError:
+        pass  # No app session was approved; a valid password + login OTP is still required.
+    return {"email_confirmed": True}
 
 
 @router.post("/auth/login", response_model=ChallengeResponse)
@@ -417,6 +464,10 @@ def forgot_password(payload: EmailRequest, engine: EngineDep, provider: Provider
 def resend_otp(payload: ChallengeRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         row = pending_challenge(connection, payload)
+        if row.flow == "signup":
+            raise HTTPException(
+                400, "Use the email confirmation link, not a signup code."
+            )
         check_email_limit(connection, payload.email)
         provider.send_code(payload.email, row.flow)
         connection.execute(
@@ -431,10 +482,38 @@ def resend_otp(payload: ChallengeRequest, engine: EngineDep, provider: ProviderD
     return ChallengeResponse(challenge_id=payload.challenge_id, flow=row.flow)
 
 
+@router.post("/auth/resend-confirmation", response_model=ChallengeResponse)
+def resend_confirmation(
+    payload: ChallengeRequest, engine: EngineDep, provider: ProviderDep
+):
+    with engine.begin() as connection:
+        row = pending_challenge(connection, payload)
+        if row.flow != "signup":
+            raise HTTPException(400, "An email confirmation request is required.")
+        check_email_limit(connection, payload.email)
+        provider.send_code(payload.email, "signup")
+        connection.execute(
+            update(tables.auth_challenges)
+            .where(tables.auth_challenges.c.token_hash == row.token_hash)
+            .values(
+                last_sent_at=now(),
+                send_count=row.send_count + 1,
+                expires_at=now() + timedelta(minutes=OTP_MINUTES),
+            )
+        )
+    return ChallengeResponse(
+        challenge_id=payload.challenge_id,
+        flow="signup",
+        verification_method="email_link",
+    )
+
+
 @router.post("/auth/verify-otp", response_model=AuthResponse)
 def verify_otp(payload: VerifyRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         row = pending_challenge(connection, payload)
+        if row.flow == "signup":
+            raise HTTPException(400, "Confirm your email using the link, then sign in.")
         try:
             body = provider.verify_code(payload.email, payload.code, row.flow)
         except AuthProviderError as error:

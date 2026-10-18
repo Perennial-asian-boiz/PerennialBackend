@@ -12,6 +12,7 @@ include = [
     "development/database/ops/provision_api_role.py",
     "development/backend/tests/test_supabase_accounts.py",
     "development/database/migrations/versions/20261018_supabase_accounts.py",
+    "development/database/migrations/versions/20261018_registration_email_check.py",
 ]
 
 [tool.ruff.lint]

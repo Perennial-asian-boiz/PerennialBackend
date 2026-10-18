@@ -88,7 +88,7 @@ class FakeProvider:
         self.identity(token)
         return {"access_token": token, "refresh_token": token}
 
-    def logout(self, token):
+    def logout(self, token, *, scope="global"):
         if self.fail:
             raise AuthProviderError()
 
@@ -97,8 +97,13 @@ class FakeProvider:
 
 
 @pytest.fixture
-def api(engine):
+def api(engine, monkeypatch):
     provider = FakeProvider()
+    monkeypatch.setattr(
+        accounts,
+        "email_is_registered",
+        lambda _connection, email: email in provider.users,
+    )
     app.dependency_overrides[accounts.get_engine] = lambda: engine
     app.dependency_overrides[accounts.get_provider] = lambda: provider
     with TestClient(app) as client:
@@ -107,12 +112,24 @@ def api(engine):
 
 
 def register(api, email="one@example.com"):
-    client, _, _ = api
+    client, provider, engine = api
     response = client.post(
         "/auth/signup",
         json={"email": email, "full_name": "Test Person", "password": "password123"},
     )
     assert response.status_code == 201, response.text
+    assert response.json()["verification_method"] == "email_link"
+    # Simulate consuming the link at Supabase, not typing a signup OTP in the app.
+    link_session = provider.verify_code(email, "123456", "signup")
+    confirmed = client.post(
+        "/auth/confirm-email", json={"access_token": link_session["access_token"]}
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert "access_token" not in confirmed.json()
+    allow_resend(engine)
+    response = client.post(
+        "/auth/login", json={"email": email, "password": "password123"}
+    )
     challenge = response.json()
     verified = client.post(
         "/auth/verify-otp",
@@ -136,7 +153,7 @@ def allow_resend(engine):
         )
 
 
-def test_signup_otp_persistence_and_private_headers(api):
+def test_signup_link_then_login_otp_persistence_and_private_headers(api):
     client, _, engine = api
     body, headers = register(api)
     assert body["user"]["onboarding_completed"] is False
@@ -144,8 +161,9 @@ def test_signup_otp_persistence_and_private_headers(api):
     assert client.get("/me").status_code == 401
     assert client.get("/me", headers=headers).headers["cache-control"] == "no-store"
     with engine.connect() as conn:
-        challenge = conn.execute(select(tables.auth_challenges)).mappings().one()
-        assert len(challenge.token_hash) == 64 and challenge.consumed_at
+        challenges = conn.execute(select(tables.auth_challenges)).mappings().all()
+        assert len(challenges) == 2
+        assert all(len(row.token_hash) == 64 and row.consumed_at for row in challenges)
     assert "password" not in body and "development_code" not in body
 
 
@@ -215,8 +233,10 @@ def test_unconfirmed_login_resumes_signup(api):
 
 def test_five_failed_attempts_persist_and_block_even_correct_code(api):
     client, _, engine = api
+    register(api)
+    allow_resend(engine)
     challenge = client.post(
-        "/auth/signup",
+        "/auth/login",
         json={
             "email": "one@example.com",
             "full_name": "One",
@@ -231,7 +251,15 @@ def test_five_failed_attempts_persist_and_block_even_correct_code(api):
     for _ in range(5):
         assert client.post("/auth/verify-otp", json=payload).status_code == 400
     with engine.connect() as conn:
-        assert conn.execute(select(tables.auth_challenges.c.attempts)).scalar_one() == 5
+        assert (
+            conn.execute(
+                select(tables.auth_challenges.c.attempts)
+                .where(tables.auth_challenges.c.flow == "login")
+                .order_by(tables.auth_challenges.c.created_at.desc())
+                .limit(1)
+            ).scalar_one()
+            == 5
+        )
     payload["code"] = "123456"
     assert client.post("/auth/verify-otp", json=payload).status_code == 400
 
@@ -262,8 +290,10 @@ def test_resend_cooldown_hourly_limit_and_expiry(api):
 
 def test_provider_outage_does_not_consume_attempts(api):
     client, provider, engine = api
+    register(api)
+    allow_resend(engine)
     challenge = client.post(
-        "/auth/signup",
+        "/auth/login",
         json={
             "email": "one@example.com",
             "full_name": "One",
@@ -281,7 +311,166 @@ def test_provider_outage_does_not_consume_attempts(api):
     )
     assert response.status_code == 503
     with engine.connect() as conn:
-        assert conn.execute(select(tables.auth_challenges.c.attempts)).scalar_one() == 0
+        assert all(
+            value == 0
+            for value in conn.execute(
+                select(tables.auth_challenges.c.attempts)
+            ).scalars()
+        )
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_duplicate_signup_rejected_without_replacing_password(api, confirm):
+    client, provider, _engine = api
+    if confirm:
+        register(api)
+    else:
+        client.post(
+            "/auth/signup",
+            json={
+                "email": "one@example.com",
+                "full_name": "Original",
+                "password": "password123",
+            },
+        ).raise_for_status()
+    response = client.post(
+        "/auth/signup",
+        json={
+            "email": " ONE@EXAMPLE.COM ",
+            "full_name": "Replacement",
+            "password": "different-password",
+        },
+    )
+    assert response.status_code == 409
+    assert "already registered" in response.json()["detail"]
+    assert (
+        len(provider.users) == 1
+        and provider.users["one@example.com"]["password"] == "password123"
+    )
+
+
+def test_signup_cannot_verify_with_six_digit_code(api):
+    client, provider, engine = api
+    body = client.post(
+        "/auth/signup",
+        json={
+            "email": "one@example.com",
+            "full_name": "One",
+            "password": "password123",
+        },
+    ).json()
+    response = client.post(
+        "/auth/verify-otp",
+        json={
+            "email": "one@example.com",
+            "challenge_id": body["challenge_id"],
+            "code": "123456",
+        },
+    )
+    assert response.status_code == 400 and "link" in response.json()["detail"]
+    assert provider.users["one@example.com"]["email_confirmed_at"] is None
+    with engine.connect() as conn:
+        assert conn.execute(select(tables.verified_sessions)).all() == []
+
+
+def test_email_confirmation_does_not_log_user_in(api):
+    client, provider, engine = api
+    client.post(
+        "/auth/signup",
+        json={
+            "email": "one@example.com",
+            "full_name": "One",
+            "password": "password123",
+        },
+    ).raise_for_status()
+    token = provider.verify_code("one@example.com", "123456", "signup")["access_token"]
+    assert (
+        client.post("/auth/confirm-email", json={"access_token": "invalid"}).status_code
+        == 401
+    )
+    result = client.post("/auth/confirm-email", json={"access_token": token})
+    assert result.json() == {"email_confirmed": True}
+    assert (
+        client.get("/me", headers={"Authorization": "Bearer " + token}).status_code
+        == 401
+    )
+    with engine.connect() as conn:
+        assert conn.execute(select(tables.profiles)).first() is not None
+        assert conn.execute(select(tables.verified_sessions)).all() == []
+
+
+def test_resend_confirmation_keeps_link_flow(api):
+    client, provider, engine = api
+    body = client.post(
+        "/auth/signup",
+        json={
+            "email": "one@example.com",
+            "full_name": "One",
+            "password": "password123",
+        },
+    ).json()
+    payload = {"email": "one@example.com", "challenge_id": body["challenge_id"]}
+    assert client.post("/auth/resend-confirmation", json=payload).status_code == 429
+    allow_resend(engine)
+    response = client.post("/auth/resend-confirmation", json=payload)
+    assert (
+        response.status_code == 200
+        and response.json()["verification_method"] == "email_link"
+    )
+    assert provider.sent[-1] == ("one@example.com", "signup")
+
+
+def test_boolean_directory_lookup_has_no_public_or_direct_auth_access(engine):
+    from pathlib import Path
+    from runpy import run_path
+
+    from sqlalchemy import event
+    from sqlalchemy.exc import DBAPIError
+    from src.db.session import make_engine
+
+    provision = run_path(
+        str(Path(__file__).resolve().parents[2] / "database/ops/provision_api_role.py")
+    )["provision"]
+    role = "lookup_test_" + uuid4().hex[:12]
+    with engine.begin() as conn:
+        assert conn.execute(text("SELECT to_regnamespace('auth')")).scalar_one() is None
+        conn.execute(text("CREATE SCHEMA auth"))
+        conn.execute(text("CREATE TABLE auth.users (email text PRIMARY KEY)"))
+        conn.execute(text("INSERT INTO auth.users VALUES ('existing@example.com')"))
+        provision(conn.connection.driver_connection, role)
+    restricted = make_engine(engine.url, connect_args={"hostaddr": "127.0.0.1"})
+
+    @event.listens_for(restricted, "connect")
+    def select_role(connection, _record):
+        connection.execute(f"SET ROLE {role}")
+        connection.commit()
+
+    try:
+        with restricted.connect() as conn:
+            assert accounts.email_is_registered(conn, "EXISTING@example.com") is True
+            assert accounts.email_is_registered(conn, "missing@example.com") is False
+        with pytest.raises(DBAPIError), restricted.begin() as conn:
+            conn.execute(text("SELECT * FROM auth.users"))
+    finally:
+        restricted.dispose()
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP OWNED BY {role}"))
+            conn.execute(text(f"DROP ROLE {role}"))
+            conn.execute(text("DROP TABLE auth.users"))
+            conn.execute(text("DROP SCHEMA auth RESTRICT"))
+
+
+def test_signup_provider_detects_sanitized_duplicate_and_sets_callback(monkeypatch):
+    provider = SupabaseAuth("https://example.supabase.co", "test")
+    monkeypatch.setenv("AUTH_EMAIL_REDIRECT_URL", "http://127.0.0.1:5173/auth/confirm")
+    with patch.object(provider, "request", return_value={"identities": []}) as request:
+        with pytest.raises(AuthProviderError) as error:
+            provider.signup("one@example.com", "password123", "One")
+        assert error.value.status == 409
+        assert (
+            "redirect_to=http%3A%2F%2F127.0.0.1%3A5173%2Fauth%2Fconfirm"
+            in request.call_args.args[1]
+        )
 
 
 def test_two_accounts_preferences_watchlists_settings_are_separate(api):

@@ -139,16 +139,21 @@ Open the frontend at port 5173, not the API port. API reference: port 8000
    password length to at least 8, **Email OTP Expiration = 900 seconds** and
    **OTP length = 6**. The API fails closed if signup immediately returns a session.
 3. Set Site URL to the frontend URL and allow the exact local/deployed redirect
-   URLs. Email codes are entered in our UI, not consumed from a magic-link URL.
+   URLs. For local development use Site URL `http://127.0.0.1:5173` and allow
+   `http://127.0.0.1:5173/auth/confirm`. Set `AUTH_EMAIL_REDIRECT_URL` to that
+   callback in the backend. The old default `localhost:3000` is not this app.
 4. In Authentication's email/SMTP settings, enable custom SMTP:
    host `smtp.resend.com`, port `465`, username `resend`, password =
    Resend sending API key, sender name `Perennial`.
 5. Use a sender on a verified domain for arbitrary users. Without a domain,
    `onboarding@resend.dev` can test **only the Resend account's own email**.
    Supabase's default SMTP is also restricted and is not the production setup.
-6. Include `{{ .Token }}` in **Confirm signup**, **Magic Link** (login OTP),
-   and **Reset Password** templates. Remove login links if using codes only.
-   A minimal body is `Your Perennial verification code is {{ .Token }}.`
+6. **Confirm signup** uses `{{ .ConfirmationURL }}`: registration sends a link,
+   not a six-digit signup code. **Magic Link** (login) and **Reset Password**
+   use `{{ .Token }}` for the existing six-digit login/recovery screens.
+   Supabase's dashboard currently requires custom SMTP to edit these templates;
+   without it the default login/recovery emails may still contain links. Do not
+   claim email OTP delivery is ready until SMTP/templates and inbox tests pass.
 7. Test signup, existing-user login, resend, recovery and delivery/bounce status
    in both Supabase Auth logs and the Resend dashboard. Never post API keys,
    SMTP passwords, DB URLs or OTPs in Discord.
@@ -160,8 +165,18 @@ Official setup:
 #### Login and data contract
 
 Signup/login/recovery first return `challenge_id`, `flow` and
-`resend_after_seconds`; they never return a usable session. Send
-`email + challenge_id + code` to verify. Only successful OTP verification
+`resend_after_seconds`; they never return a usable session. Signup also returns
+`verification_method=email_link`. Show **Account created** immediately with
+only **Back to sign in**; the user confirms their email independently later.
+Do not route registration to the six-digit verification screen.
+
+The emailed signup link is consumed by Supabase and returns to `/auth/confirm`.
+The frontend removes its token fragment immediately, validates the result via
+`/auth/confirm-email`, and returns to Sign in with a confirmation notice. The
+confirmation JWT is never stored as an app session. Confirmation alone grants
+no Dashboard access. Invalid, expired or reused links show a safe retry message.
+
+For login/recovery send `email + challenge_id + code` to verify. Only successful OTP verification
 approves the provider's `session_id` and returns access/refresh tokens.
 A directly obtained Supabase password or passwordless token cannot access
 Perennial data without this approval. Email OTP here is an application
@@ -175,6 +190,8 @@ Recovery-approved sessions can only reset a password, not read app data.
 | Method | Endpoint | Purpose |
 |---|---|---|
 | POST | `/auth/signup` | Register with Supabase and start signup challenge |
+| POST | `/auth/confirm-email` | Validate email link, sync profile, return to Sign in; no app session |
+| POST | `/auth/resend-confirmation` | Resend a signup confirmation link |
 | POST | `/auth/login` | Validate password, send email OTP, no session yet |
 | POST | `/auth/forgot-password` | Start recovery; generic reply for unknown emails |
 | POST | `/auth/resend-otp` | Resend within the existing challenge |
@@ -208,6 +225,20 @@ The new `app` tables are `profiles`, `preferences`, `notifications`,
 `watchlist`, `auth_challenges` and `verified_sessions`. User-data RLS is
 forced, with transaction-local identity context set only after authentication.
 Backend-only challenge/approval tables have no browser grants.
+
+Signup checks both confirmed and unconfirmed emails against the authoritative
+Supabase database and returns 409 for an existing email (including differences
+in case/outer whitespace). It does not overwrite an account or its password.
+`app.email_is_registered(text)` is a fixed-search-path SECURITY DEFINER
+function that returns only a boolean. Only the API group can execute it; the
+API still cannot SELECT `auth.users`, hashes or identity lists. Supabase's
+sanitized duplicate-signup response is also handled rather than displayed as
+new-account success. Explicit 409 errors intentionally reveal that an email
+exists, as requested by the product; production also needs IP/bot rate limits.
+
+Auth identities are saved at signup in `auth.users`. App profiles are synced
+after a verified confirmation link or first verified login, not before email
+ownership is established. Preferences/settings/watchlists remain per-user.
 
 Legacy custom-auth tables/migration files are retained for history/recovery,
 but are no longer read by the API. Old opaque tokens are invalid. Existing
