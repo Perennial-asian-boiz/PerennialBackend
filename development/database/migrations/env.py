@@ -1,6 +1,8 @@
 """Alembic environment. Online migrations only; the URL is never logged."""
 
 from alembic import context
+from sqlalchemy import MetaData
+from src.api.account_models import metadata as account_metadata
 
 # development/backend is on sys.path via prepend_sys_path in alembic.ini.
 from src.db.config import DatabaseConfigError
@@ -9,6 +11,12 @@ from src.db.session import make_engine
 from src.ingestion.redaction import describe_exception
 
 config = context.config
+# Preserve the naming convention used by historical migrations. Passing a list
+# loses it in Alembic's operations layer, changing old constraint names.
+migration_metadata = MetaData(naming_convention=metadata.naming_convention)
+for registry in (metadata, account_metadata):
+    for table in registry.sorted_tables:
+        table.to_metadata(migration_metadata)
 if config.config_file_name is not None:
     from logging.config import fileConfig
 
@@ -28,12 +36,16 @@ def run_migrations_online() -> None:
     except DatabaseConfigError as exc:
         raise SystemExit(f"error: {exc}") from None
     except Exception as exc:
-        raise SystemExit(f"error: database engine could not be created: {describe_exception(exc)}") from None
+        raise SystemExit(
+            f"error: database engine could not be created: {describe_exception(exc)}"
+        ) from None
     try:
         try:
             conn = engine.connect()
         except Exception as exc:
-            raise SystemExit(f"error: could not connect to the database: {describe_exception(exc)}") from None
+            raise SystemExit(
+                f"error: could not connect to the database: {describe_exception(exc)}"
+            ) from None
         with conn:
             _run(conn)
     finally:
@@ -43,9 +55,11 @@ def run_migrations_online() -> None:
 def _run(connection) -> None:
     context.configure(
         connection=connection,
-        target_metadata=metadata,
+        target_metadata=migration_metadata,
         include_schemas=True,
-        include_name=lambda name, type_, parent: type_ != "schema" or name == SCHEMA,
+        include_name=lambda name, type_, parent: (
+            type_ != "schema" or name in {SCHEMA, "app"}
+        ),
         compare_type=True,
     )
     with context.begin_transaction():
@@ -56,5 +70,7 @@ def _run(connection) -> None:
 
 
 if context.is_offline_mode():
-    raise SystemExit("Offline (--sql) migrations are not supported; connect to a database.")
+    raise SystemExit(
+        "Offline (--sql) migrations are not supported; connect to a database."
+    )
 run_migrations_online()

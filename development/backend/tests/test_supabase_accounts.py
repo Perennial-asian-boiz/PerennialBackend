@@ -1,0 +1,589 @@
+"""Offline provider tests + isolated PostgreSQL integration; never real accounts/email."""
+
+import base64
+import json
+import time
+from datetime import timedelta
+from unittest.mock import MagicMock, patch
+from uuid import uuid4
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select, text, update
+from src.api import account_models as tables
+from src.api import accounts
+from src.api.app import app
+from src.api.supabase_auth import AuthProviderError, SupabaseAuth
+from src.db.config import DatabaseConfigError, get_database_url
+
+
+def jwt(user_id, sid, **changes):
+    claims = {
+        "sub": str(user_id),
+        "session_id": str(sid),
+        "iss": "https://example.supabase.co/auth/v1",
+        "aud": "authenticated",
+        "role": "authenticated",
+        "exp": int(time.time()) + 3600,
+    }
+    claims.update(changes)
+    encoded = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{encoded}.signature"
+
+
+class FakeProvider:
+    """The provider, not the browser, owns identities and codes."""
+
+    def __init__(self):
+        self.users = {}
+        self.tokens = {}
+        self.sent = []
+        self.fail = False
+
+    def signup(self, email, password, name):
+        if self.fail:
+            raise AuthProviderError()
+        if email not in self.users:
+            self.users[email] = {
+                "id": str(uuid4()),
+                "email": email,
+                "user_metadata": {"full_name": name},
+                "email_confirmed_at": None,
+                "password": password,
+            }
+
+    def check_password(self, email, password):
+        user = self.users.get(email)
+        if not user or user["password"] != password:
+            raise AuthProviderError(401)
+        if not user["email_confirmed_at"]:
+            raise AuthProviderError(401, "email_not_confirmed")
+        return user
+
+    def send_code(self, email, flow):
+        if self.fail:
+            raise AuthProviderError()
+        self.sent.append((email, flow))
+
+    def verify_code(self, email, code, flow):
+        if self.fail:
+            raise AuthProviderError()
+        if code != "123456" or email not in self.users:
+            raise AuthProviderError(401)
+        user = self.users[email]
+        user["email_confirmed_at"] = "2026-10-18T00:00:00Z"
+        token = jwt(user["id"], uuid4())
+        self.tokens[token] = user
+        return {"access_token": token, "refresh_token": token}
+
+    def identity(self, token):
+        if token not in self.tokens:
+            raise AuthProviderError(401)
+        claims = json.loads(base64.urlsafe_b64decode(token.split(".")[1] + "=="))
+        from uuid import UUID
+
+        return self.tokens[token], UUID(claims["session_id"])
+
+    def refresh(self, token):
+        self.identity(token)
+        return {"access_token": token, "refresh_token": token}
+
+    def logout(self, token):
+        if self.fail:
+            raise AuthProviderError()
+
+    def change_password(self, token, password):
+        self.tokens[token]["password"] = password
+
+
+@pytest.fixture
+def api(engine):
+    provider = FakeProvider()
+    app.dependency_overrides[accounts.get_engine] = lambda: engine
+    app.dependency_overrides[accounts.get_provider] = lambda: provider
+    with TestClient(app) as client:
+        yield client, provider, engine
+    app.dependency_overrides.clear()
+
+
+def register(api, email="one@example.com"):
+    client, _, _ = api
+    response = client.post(
+        "/auth/signup",
+        json={"email": email, "full_name": "Test Person", "password": "password123"},
+    )
+    assert response.status_code == 201, response.text
+    challenge = response.json()
+    verified = client.post(
+        "/auth/verify-otp",
+        json={
+            "email": email,
+            "challenge_id": challenge["challenge_id"],
+            "code": "123456",
+        },
+    )
+    assert verified.status_code == 200, verified.text
+    body = verified.json()
+    return body, {"Authorization": "Bearer " + body["access_token"]}
+
+
+def allow_resend(engine):
+    with engine.begin() as conn:
+        conn.execute(
+            update(tables.auth_challenges).values(
+                last_sent_at=accounts.now() - timedelta(seconds=61)
+            )
+        )
+
+
+def test_signup_otp_persistence_and_private_headers(api):
+    client, _, engine = api
+    body, headers = register(api)
+    assert body["user"]["onboarding_completed"] is False
+    assert client.get("/me", headers=headers).json()["id"] == body["user"]["id"]
+    assert client.get("/me").status_code == 401
+    assert client.get("/me", headers=headers).headers["cache-control"] == "no-store"
+    with engine.connect() as conn:
+        challenge = conn.execute(select(tables.auth_challenges)).mappings().one()
+        assert len(challenge.token_hash) == 64 and challenge.consumed_at
+    assert "password" not in body and "development_code" not in body
+
+
+def test_wrong_login_and_unapproved_native_tokens_denied(api):
+    client, provider, engine = api
+    body, _ = register(api)
+    allow_resend(engine)
+    assert (
+        client.post(
+            "/auth/login",
+            json={"email": "missing@example.com", "password": "random123"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/auth/login",
+            json={"email": body["user"]["email"], "password": "incorrect"},
+        ).status_code
+        == 401
+    )
+    direct = provider.verify_code(body["user"]["email"], "123456", "login")
+    assert (
+        client.get(
+            "/me", headers={"Authorization": "Bearer " + direct["access_token"]}
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/auth/refresh", json={"refresh_token": direct["refresh_token"]}
+        ).status_code
+        == 401
+    )
+
+
+def test_existing_user_still_needs_otp_then_keeps_onboarding(api):
+    client, _, engine = api
+    body, headers = register(api)
+    client.put(
+        "/me/preferences", headers=headers, json={"sectors": [], "risk_level": None}
+    ).raise_for_status()
+    allow_resend(engine)
+    challenge = client.post(
+        "/auth/login", json={"email": body["user"]["email"], "password": "password123"}
+    ).json()
+    assert challenge["flow"] == "login" and "access_token" not in challenge
+    payload = {
+        "email": body["user"]["email"],
+        "challenge_id": challenge["challenge_id"],
+        "code": "123456",
+    }
+    result = client.post("/auth/verify-otp", json=payload)
+    assert result.json()["user"]["onboarding_completed"] is True
+    assert client.post("/auth/verify-otp", json=payload).status_code == 400
+
+
+def test_unconfirmed_login_resumes_signup(api):
+    client, provider, _ = api
+    provider.signup("pending@example.com", "password123", "Pending")
+    response = client.post(
+        "/auth/login", json={"email": "pending@example.com", "password": "password123"}
+    )
+    assert response.status_code == 200 and response.json()["flow"] == "signup"
+    assert provider.sent == [("pending@example.com", "signup")]
+
+
+def test_five_failed_attempts_persist_and_block_even_correct_code(api):
+    client, _, engine = api
+    challenge = client.post(
+        "/auth/signup",
+        json={
+            "email": "one@example.com",
+            "full_name": "One",
+            "password": "password123",
+        },
+    ).json()
+    payload = {
+        "email": "one@example.com",
+        "challenge_id": challenge["challenge_id"],
+        "code": "000000",
+    }
+    for _ in range(5):
+        assert client.post("/auth/verify-otp", json=payload).status_code == 400
+    with engine.connect() as conn:
+        assert conn.execute(select(tables.auth_challenges.c.attempts)).scalar_one() == 5
+    payload["code"] = "123456"
+    assert client.post("/auth/verify-otp", json=payload).status_code == 400
+
+
+def test_resend_cooldown_hourly_limit_and_expiry(api):
+    client, _, engine = api
+    challenge = client.post(
+        "/auth/forgot-password", json={"email": "one@example.com"}
+    ).json()
+    payload = {"email": "one@example.com", "challenge_id": challenge["challenge_id"]}
+    assert client.post("/auth/resend-otp", json=payload).status_code == 429
+    for _ in range(4):
+        allow_resend(engine)
+        assert client.post("/auth/resend-otp", json=payload).status_code == 200
+    allow_resend(engine)
+    assert client.post("/auth/resend-otp", json=payload).status_code == 429
+    with engine.begin() as conn:
+        conn.execute(
+            update(tables.auth_challenges).values(
+                expires_at=accounts.now() - timedelta(seconds=1)
+            )
+        )
+    assert (
+        client.post("/auth/verify-otp", json={**payload, "code": "123456"}).status_code
+        == 400
+    )
+
+
+def test_provider_outage_does_not_consume_attempts(api):
+    client, provider, engine = api
+    challenge = client.post(
+        "/auth/signup",
+        json={
+            "email": "one@example.com",
+            "full_name": "One",
+            "password": "password123",
+        },
+    ).json()
+    provider.fail = True
+    response = client.post(
+        "/auth/verify-otp",
+        json={
+            "email": "one@example.com",
+            "challenge_id": challenge["challenge_id"],
+            "code": "123456",
+        },
+    )
+    assert response.status_code == 503
+    with engine.connect() as conn:
+        assert conn.execute(select(tables.auth_challenges.c.attempts)).scalar_one() == 0
+
+
+def test_two_accounts_preferences_watchlists_settings_are_separate(api):
+    client, _, _ = api
+    _, first = register(api)
+    _, second = register(api, "two@example.com")
+    assert (
+        client.put(
+            "/me/preferences",
+            headers=first,
+            json={"sectors": ["Technology"], "risk_level": "High"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            "/me/notifications", headers=first, json={"confidence_score_enabled": False}
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post("/me/watchlist", headers=first, json={"ticker": "aapl"}).status_code
+        == 201
+    )
+    assert client.get("/me/preferences", headers=second).json()["sectors"] == []
+    assert (
+        client.get("/me/notifications", headers=second).json()[
+            "confidence_score_enabled"
+        ]
+        is True
+    )
+    assert client.get("/me/watchlist", headers=second).json() == []
+    assert client.delete("/me/watchlist/AAPL", headers=second).status_code == 204
+    assert client.get("/me/watchlist", headers=first).json() == [{"ticker": "AAPL"}]
+    assert (
+        client.put(
+            "/me/preferences", headers=first, json={"sectors": ["not a sector"]}
+        ).status_code
+        == 422
+    )
+
+
+@pytest.mark.parametrize("action", ["logout", "password"])
+def test_revocation_blocks_access_and_refresh(api, action):
+    client, provider, engine = api
+    body, headers = register(api)
+    allow_resend(engine)
+    pending = client.post(
+        "/auth/login", json={"email": body["user"]["email"], "password": "password123"}
+    ).json()
+    if action == "password":
+        assert (
+            client.put(
+                "/me/password",
+                headers=headers,
+                json={"old_password": "incorrect", "new_password": "newpassword"},
+            ).status_code
+            == 401
+        )
+        response = client.put(
+            "/me/password",
+            headers=headers,
+            json={"old_password": "password123", "new_password": "newpassword"},
+        )
+    else:
+        provider.fail = True  # Local revocation must work even during provider outage.
+        response = client.post("/auth/logout", headers=headers)
+    assert response.status_code in (200, 204)
+    assert (
+        client.post(
+            "/auth/verify-otp",
+            json={
+                "email": body["user"]["email"],
+                "challenge_id": pending["challenge_id"],
+                "code": "123456",
+            },
+        ).status_code
+        == 400
+    )
+    assert client.get("/me", headers=headers).status_code == 401
+    assert (
+        client.post(
+            "/auth/refresh", json={"refresh_token": body["refresh_token"]}
+        ).status_code
+        == 401
+    )
+
+
+def test_recovery_session_cannot_read_data_and_resets_password(api):
+    client, _, engine = api
+    body, normal = register(api)
+    assert (
+        client.post(
+            "/auth/reset-password", headers=normal, json={"new_password": "newpassword"}
+        ).status_code
+        == 403
+    )
+    allow_resend(engine)
+    challenge = client.post(
+        "/auth/forgot-password", json={"email": body["user"]["email"]}
+    ).json()
+    recovery = client.post(
+        "/auth/verify-otp",
+        json={
+            "email": body["user"]["email"],
+            "challenge_id": challenge["challenge_id"],
+            "code": "123456",
+        },
+    ).json()
+    headers = {"Authorization": "Bearer " + recovery["access_token"]}
+    assert recovery["flow"] == "recovery"
+    assert client.get("/me/preferences", headers=headers).status_code == 401
+    assert (
+        client.post(
+            "/auth/reset-password",
+            headers=headers,
+            json={"new_password": "newpassword"},
+        ).status_code
+        == 200
+    )
+    assert client.get("/me", headers=normal).status_code == 401
+
+
+def test_rls_for_non_owner_even_without_where_clause(api):
+    _, _, engine = api
+    first, _ = register(api)
+    register(api, "two@example.com")
+    role = "auth_test_" + uuid4().hex[:12]
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE ROLE {role} NOLOGIN NOBYPASSRLS"))
+        conn.execute(text(f"GRANT USAGE ON SCHEMA app TO {role}"))
+        conn.execute(text(f"GRANT SELECT ON app.profiles TO {role}"))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f"SET LOCAL ROLE {role}"))
+            assert conn.execute(select(tables.profiles)).all() == []
+            conn.execute(
+                text("SELECT set_config('request.jwt.claim.sub', :id, true)"),
+                {"id": first["user"]["id"]},
+            )
+            assert [str(row.id) for row in conn.execute(select(tables.profiles))] == [
+                first["user"]["id"]
+            ]
+        with engine.begin() as conn:
+            conn.execute(text(f"SET LOCAL ROLE {role}"))
+            assert (
+                conn.execute(select(tables.profiles)).all() == []
+            )  # Pool context did not leak.
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP OWNED BY {role}"))
+            conn.execute(text(f"DROP ROLE {role}"))
+
+
+def test_full_flow_with_restricted_api_group(api):
+    from pathlib import Path
+    from runpy import run_path
+
+    from sqlalchemy import event
+    from sqlalchemy.exc import DBAPIError
+    from src.db.session import make_engine
+
+    client, _, engine = api
+    role = "api_test_" + uuid4().hex[:12]
+    provision = run_path(
+        str(Path(__file__).resolve().parents[2] / "database/ops/provision_api_role.py")
+    )["provision"]
+    with engine.begin() as conn:
+        provision(conn.connection.driver_connection, role)
+    restricted = make_engine(engine.url, connect_args={"hostaddr": "127.0.0.1"})
+
+    @event.listens_for(restricted, "connect")
+    def select_role(connection, _record):
+        connection.execute(f"SET ROLE {role}")
+        connection.commit()
+
+    app.dependency_overrides[accounts.get_engine] = lambda: restricted
+    try:
+        _, headers = register(api)
+        assert (
+            client.put(
+                "/me/preferences", headers=headers, json={"sectors": ["Technology"]}
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                "/me/watchlist", headers=headers, json={"ticker": "MSFT"}
+            ).status_code
+            == 201
+        )
+        assert client.get("/me/watchlist", headers=headers).json() == [
+            {"ticker": "MSFT"}
+        ]
+        with restricted.begin() as conn:
+            assert conn.execute(select(tables.profiles)).all() == []
+        with pytest.raises(DBAPIError), restricted.begin() as conn:
+            conn.execute(text("DELETE FROM perennial.publications"))
+        with pytest.raises(DBAPIError), restricted.begin() as conn:
+            conn.execute(text("SELECT * FROM perennial.users"))
+    finally:
+        app.dependency_overrides[accounts.get_engine] = lambda: engine
+        restricted.dispose()
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP OWNED BY {role}"))
+            conn.execute(text(f"DROP ROLE {role}"))
+
+
+def test_invalid_fields_never_echo_passwords(api):
+    client, _, _ = api
+    response = client.post(
+        "/auth/login", json={"email": "invalid", "password": "secret"}
+    )
+    assert response.status_code == 422
+    assert "secret" not in response.text
+
+
+def test_db_password_placeholder_is_encoded_and_never_logged(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text(
+        'DATABASE_URL=postgresql://postgres.example:[YOUR-PASSWORD]@localhost:5432/postgres\nSUPABASE_DB_PASSWORD="a@b:/?#%"\n'
+    )
+    assert get_database_url({}, env).password == "a@b:/?#%"
+    assert (
+        get_database_url({"SUPABASE_DB_PASSWORD": "override"}, env).password
+        == "override"
+    )
+    with pytest.raises(DatabaseConfigError, match="SUPABASE_DB_PASSWORD"):
+        get_database_url(
+            {"DATABASE_URL": "postgresql://user:[YOUR-PASSWORD]@localhost/postgres"},
+            tmp_path / "missing",
+        )
+
+
+def test_provider_never_creates_users_for_login_otp():
+    provider = SupabaseAuth("https://example.supabase.co", "test")
+    with patch.object(provider, "request", return_value={}) as request:
+        provider.send_code("one@example.com", "login")
+        request.assert_called_once_with(
+            "POST", "otp", {"email": "one@example.com", "create_user": False}
+        )
+
+
+def test_password_check_discards_native_session():
+    provider = SupabaseAuth("https://example.supabase.co", "test")
+    with patch.object(
+        provider,
+        "request",
+        side_effect=[{"access_token": "temporary", "user": {"id": "one"}}, {}],
+    ) as request:
+        assert provider.check_password("one@example.com", "password123") == {
+            "id": "one"
+        }
+        assert request.call_args_list[1].args == ("POST", "logout?scope=local")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"exp": 1},
+        {"exp": True},
+        {"exp": float("nan")},
+        {"iss": "https://wrong.example/auth/v1"},
+        {"aud": "anon"},
+        {"role": "service_role"},
+        {"session_id": "invalid"},
+        {"nbf": time.time() + 9999},
+    ],
+)
+def test_invalid_claims_denied_after_provider_verification(changes):
+    uid, sid = uuid4(), uuid4()
+    provider = SupabaseAuth("https://example.supabase.co", "test")
+    with patch.object(
+        provider,
+        "request",
+        return_value={
+            "id": str(uid),
+            "email": "one@example.com",
+            "email_confirmed_at": "yes",
+        },
+    ):
+        with pytest.raises(AuthProviderError):
+            provider.identity(jwt(uid, sid, **changes))
+
+
+def test_signature_validation_is_authoritative_and_provider_errors_sanitized():
+    provider = SupabaseAuth("https://example.supabase.co", "secret-sentinel")
+    response = MagicMock(status_code=401)
+    response.json.return_value = {"message": "secret-sentinel should never be exposed"}
+    response.__enter__.return_value = response
+    with patch("requests.request", return_value=response) as request:
+        with pytest.raises(AuthProviderError) as error:
+            provider.identity(jwt(uuid4(), uuid4()))
+        assert error.value.status == 401
+        assert "secret-sentinel" not in str(error.value)
+        assert request.call_args.kwargs["allow_redirects"] is False
+
+
+def test_confirmations_disabled_fails_closed():
+    provider = SupabaseAuth("https://example.supabase.co", "test")
+    with patch.object(
+        provider, "request", side_effect=[{"access_token": "temporary"}, {}]
+    ):
+        with pytest.raises(AuthProviderError):
+            provider.signup("one@example.com", "password123", "One")

@@ -53,4 +53,14 @@ def get_database_url(
     raw = environ.get("DATABASE_URL")
     if not raw and env_path.is_file():
         raw = dotenv_values(env_path).get("DATABASE_URL")
-    return parse_database_url(raw)
+    url = parse_database_url(raw)
+    if url.password == "[YOUR-PASSWORD]":
+        password = environ.get("SUPABASE_DB_PASSWORD")
+        if not password and env_path.is_file():
+            password = dotenv_values(env_path).get("SUPABASE_DB_PASSWORD")
+        if not password:
+            raise DatabaseConfigError("SUPABASE_DB_PASSWORD is not configured.")
+        # Let SQLAlchemy encode special characters instead of asking users to
+        # paste a raw password into a URL. The secret is never logged.
+        url = url.set(password=password)
+    return url

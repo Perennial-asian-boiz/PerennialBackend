@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Mapping, Literal
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict
-
 
 DashboardSentiment = Literal["Positive", "Neutral", "Watch"]
 

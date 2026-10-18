@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 
 from src.api.dashboard import DashboardCompanyResponse, DashboardResponse
 
-
 _SECTOR_SEEDS: dict[str, dict[str, list[tuple[str, str]]]] = {
     "Technology": {
         "affordable_growing": [

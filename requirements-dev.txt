@@ -5,3 +5,5 @@ ruff==0.16.10
 mypy==2.4.0
 types-requests==2.33.0.20261006
 pip-audit==2.10.1
+# ASGI integration tests (Starlette TestClient).
+httpx2==2.13.1

@@ -1,339 +1,71 @@
-"""FastAPI application for the Sprint 1 account and personalization flow.
-
-The API intentionally uses opaque database-backed sessions instead of JWTs for
-the first integration. This keeps token revocation simple and gives the
-frontend one stable contract while the backend team connects a mail provider.
-"""
-
-from __future__ import annotations
+"""FastAPI is the only application-data gateway; Supabase owns authentication."""
 
 import os
-import re
-from datetime import datetime, timedelta, timezone
-from functools import lru_cache
-from typing import Annotated, Literal
+from typing import Annotated
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import and_, delete, func, insert, select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
+from src.api.accounts import get_engine, router
 from src.api.dashboard import DashboardResponse, dashboard_response_from_publication
 from src.api.dashboard_fixture import temporary_dashboard_response
-from src.api.mail import EmailDeliveryError, send_verification_email
-from src.api.security import (
-    hash_secret,
-    hash_token,
-    new_otp,
-    new_session_token,
-    verify_secret,
-)
+from src.api.supabase_auth import AuthProviderError
 from src.db import models
-from src.db.session import make_engine
 from src.services.consensus_watchlist.paths import ENV_PATH
 
-# Match the documented .env location. Exported deployment settings win.
 load_dotenv(ENV_PATH)
-
-RiskLevel = Literal["Conservative", "Moderate", "High"]
-OTP_TTL_MINUTES = 15
-MAX_OTP_ATTEMPTS = 5
-OTP_RESEND_SECONDS = 30
-MAX_OTP_EMAILS_PER_HOUR = 5
-
-
-def normalize_email_address(value: str) -> str:
-    value = value.strip().casefold()
-    if not re.fullmatch(r"[^\s@<>(),;]+@[^\s@<>(),;]+\.[^\s@<>(),;]+", value):
-        raise ValueError("Email is not valid")
-    return value
-
-
-class APIModel(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-
-class UserResponse(APIModel):
-    id: int
-    email: str
-    full_name: str
-    is_verified: bool
-
-
-class SignupRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-    full_name: str = Field(min_length=1, max_length=200)
-    password: str = Field(min_length=8, max_length=200)
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        return normalize_email_address(value)
-
-    @field_validator("full_name")
-    @classmethod
-    def normalize_name(cls, value: str) -> str:
-        return " ".join(value.strip().split())
-
-
-class SignupResponse(APIModel):
-    user: UserResponse
-    verification_required: bool
-    development_code: str | None = None
-
-
-class VerifyOTPRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-    code: str = Field(min_length=6, max_length=6)
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        return normalize_email_address(value)
-
-
-class ResendOTPRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        return normalize_email_address(value)
-
-
-class LoginRequest(BaseModel):
-    email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=1, max_length=200)
-
-    @field_validator("email")
-    @classmethod
-    def normalize_email(cls, value: str) -> str:
-        return normalize_email_address(value)
-
-
-class AuthResponse(APIModel):
-    access_token: str
-    token_type: Literal["bearer"]
-    user: UserResponse
-
-
-class LoginResponse(APIModel):
-    user: UserResponse
-    verification_required: bool
-    development_code: str | None = None
-
-
-class PreferencesRequest(BaseModel):
-    sectors: list[str] = Field(default_factory=list, max_length=11)
-    risk_level: RiskLevel | None = None
-
-    @field_validator("sectors")
-    @classmethod
-    def normalize_sectors(cls, values: list[str]) -> list[str]:
-        cleaned = [" ".join(value.strip().split()) for value in values]
-        return list(dict.fromkeys(value for value in cleaned if value))
-
-
-class PreferencesResponse(APIModel):
-    sectors: list[str]
-    risk_level: RiskLevel | None
-
-
-class NotificationSettingsRequest(BaseModel):
-    confidence_score_enabled: bool = True
-    earnings_alerts_enabled: bool = True
-
-
-class NotificationSettingsResponse(APIModel):
-    confidence_score_enabled: bool
-    earnings_alerts_enabled: bool
-
-
-class PasswordChangeRequest(BaseModel):
-    old_password: str = Field(min_length=1, max_length=200)
-    new_password: str = Field(min_length=8, max_length=200)
-
-
-class WatchlistItem(APIModel):
-    ticker: str
-
-
-class WatchlistRequest(BaseModel):
-    ticker: str = Field(min_length=1, max_length=20)
-
-    @field_validator("ticker")
-    @classmethod
-    def normalize_ticker(cls, value: str) -> str:
-        return value.strip().upper()
-
-
-class OTPResponse(APIModel):
-    verification_required: bool
-    development_code: str | None = None
-
-
-@lru_cache
-def get_engine() -> Engine:
-    return make_engine()
-
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def session_ttl_days() -> int:
-    raw = os.getenv("SESSION_TTL_DAYS", "7").strip()
-    try:
-        days = int(raw)
-    except ValueError:
-        raise RuntimeError("SESSION_TTL_DAYS must be a positive integer") from None
-    if days < 1:
-        raise RuntimeError("SESSION_TTL_DAYS must be a positive integer")
-    return days
 
 
 def cors_origins() -> list[str]:
     configured = os.getenv("CORS_ORIGINS", "")
     if configured.strip():
-        origins = [origin.strip().rstrip("/") for origin in configured.split(",")]
-        origins = [origin for origin in origins if origin]
+        origins = [
+            item.strip().rstrip("/") for item in configured.split(",") if item.strip()
+        ]
     else:
         if os.getenv("APP_ENV", "development").casefold() == "production":
             raise RuntimeError("CORS_ORIGINS must be configured in production")
         origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
     if "*" in origins:
-        raise RuntimeError("CORS_ORIGINS cannot use '*' with credentials enabled")
+        raise RuntimeError("CORS_ORIGINS cannot use '*'")
     return origins
 
 
-def user_response(row: object) -> UserResponse:
-    return UserResponse(
-        id=row.id, email=row.email, full_name=row.full_name, is_verified=row.is_verified
-    )
-
-
-def find_user(connection: object, normalized_email: str) -> object | None:
-    return (
-        connection.execute(
-            select(models.users)
-            .where(models.users.c.normalized_email == normalized_email)
-            .with_for_update()
-        )
-        .mappings()
-        .first()
-    )
-
-
-def issue_verification_code(connection: object, user_id: int, email: str) -> str | None:
-    """Issue and send while holding the account lock; failed sends roll back."""
-    now = utc_now()
-    last_created = connection.execute(
-        select(func.max(models.email_verification_codes.c.created_at)).where(
-            models.email_verification_codes.c.user_id == user_id
-        )
-    ).scalar_one()
-    if last_created is not None:
-        remaining = OTP_RESEND_SECONDS - int((now - last_created).total_seconds())
-        if remaining > 0:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Please wait {remaining} seconds before requesting another code.",
-                headers={"Retry-After": str(remaining)},
-            )
-    recent_count = connection.execute(
-        select(func.count())
-        .select_from(models.email_verification_codes)
-        .where(
-            models.email_verification_codes.c.user_id == user_id,
-            models.email_verification_codes.c.created_at > now - timedelta(hours=1),
-        )
-    ).scalar_one()
-    if recent_count >= MAX_OTP_EMAILS_PER_HOUR:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many verification emails. Please try again later.",
-        )
-    code = new_otp()
-    connection.execute(
-        update(models.email_verification_codes)
-        .where(
-            and_(
-                models.email_verification_codes.c.user_id == user_id,
-                models.email_verification_codes.c.used_at.is_(None),
-            )
-        )
-        .values(used_at=now)
-    )
-    connection.execute(
-        insert(models.email_verification_codes).values(
-            user_id=user_id,
-            code_hash=hash_secret(code),
-            created_at=now,
-            expires_at=now + timedelta(minutes=OTP_TTL_MINUTES),
-        )
-    )
-    try:
-        delivered = send_verification_email(
-            email, code, expires_minutes=OTP_TTL_MINUTES
-        )
-    except EmailDeliveryError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Unable to send verification email. Please try again later.",
-        ) from None
-    return None if delivered else code
-
-
-def get_current_user(
-    credentials: Annotated[
-        HTTPAuthorizationCredentials | None, Depends(HTTPBearer(auto_error=False))
-    ],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> object:
-    if credentials is None or credentials.scheme.casefold() != "bearer":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required"
-        )
-    with engine.begin() as connection:
-        row = (
-            connection.execute(
-                select(models.users)
-                .join(
-                    models.auth_sessions,
-                    models.auth_sessions.c.user_id == models.users.c.id,
-                )
-                .where(
-                    and_(
-                        models.auth_sessions.c.token_hash
-                        == hash_token(credentials.credentials),
-                        models.auth_sessions.c.revoked_at.is_(None),
-                        models.auth_sessions.c.expires_at > utc_now(),
-                    )
-                )
-            )
-            .mappings()
-            .first()
-        )
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired session",
-        )
-    return row
-
-
-app = FastAPI(title="Perennial API", version="0.1.0")
+app = FastAPI(title="Perennial API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+app.include_router(router)
+
+
+@app.exception_handler(AuthProviderError)
+async def provider_error(_request: Request, error: AuthProviderError):
+    return JSONResponse(status_code=error.status, content={"detail": error.message})
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_input(_request: Request, _error: RequestValidationError):
+    # Pydantic's default details include rejected input (including passwords).
+    return JSONResponse(
+        status_code=422, content={"detail": "Please check the fields and try again."}
+    )
+
+
+@app.middleware("http")
+async def private_responses(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith(("/auth/", "/me")):
+        response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @app.get("/health")
@@ -345,17 +77,14 @@ def health() -> dict[str, str]:
 def dashboard_watchlist(
     engine: Annotated[Engine, Depends(get_engine)],
 ) -> DashboardResponse:
-    """Expose the current published ranking in the frontend display contract."""
-
+    """Keep the team's publication contract and clearly labelled temporary data."""
     default_mode = (
         "publication"
         if os.getenv("APP_ENV", "development").casefold() == "production"
         else "fixture"
     )
-    data_mode = os.getenv("DASHBOARD_DATA_MODE", default_mode).casefold()
-    if data_mode == "fixture":
+    if os.getenv("DASHBOARD_DATA_MODE", default_mode).casefold() == "fixture":
         return temporary_dashboard_response()
-
     with engine.begin() as connection:
         publication = (
             connection.execute(
@@ -371,402 +100,3 @@ def dashboard_watchlist(
             .first()
         )
     return dashboard_response_from_publication(publication)
-
-
-@app.post(
-    "/auth/signup", response_model=SignupResponse, status_code=status.HTTP_201_CREATED
-)
-def signup(
-    payload: SignupRequest, engine: Annotated[Engine, Depends(get_engine)]
-) -> SignupResponse:
-    with engine.begin() as connection:
-        if find_user(connection, payload.email) is not None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Email is already registered",
-            )
-        result = connection.execute(
-            insert(models.users)
-            .values(
-                email=payload.email,
-                normalized_email=payload.email,
-                full_name=payload.full_name,
-                password_hash=hash_secret(payload.password),
-            )
-            .returning(*models.users.c)
-        )
-        user = result.mappings().one()
-        code = issue_verification_code(connection, user.id, user.email)
-    return SignupResponse(
-        user=user_response(user),
-        verification_required=True,
-        development_code=code,
-    )
-
-
-@app.post("/auth/verify-otp", response_model=AuthResponse)
-def verify_otp(
-    payload: VerifyOTPRequest, engine: Annotated[Engine, Depends(get_engine)]
-) -> AuthResponse:
-    with engine.begin() as connection:
-        user = find_user(connection, payload.email)
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification code",
-            )
-        code_row = (
-            connection.execute(
-                select(models.email_verification_codes)
-                .where(
-                    and_(
-                        models.email_verification_codes.c.user_id == user.id,
-                        models.email_verification_codes.c.used_at.is_(None),
-                    )
-                )
-                .order_by(models.email_verification_codes.c.created_at.desc())
-                .limit(1)
-                .with_for_update()
-            )
-            .mappings()
-            .first()
-        )
-        if (
-            code_row is None
-            or code_row.expires_at <= utc_now()
-            or code_row.attempts >= MAX_OTP_ATTEMPTS
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification code",
-            )
-        if not verify_secret(payload.code, code_row.code_hash):
-            connection.execute(
-                update(models.email_verification_codes)
-                .where(models.email_verification_codes.c.id == code_row.id)
-                .values(attempts=code_row.attempts + 1)
-            )
-            # Persist the failed attempt before raising the response error.
-            # Otherwise engine.begin() would roll the counter back on the error.
-            connection.commit()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid verification code",
-            )
-        connection.execute(
-            update(models.email_verification_codes)
-            .where(models.email_verification_codes.c.id == code_row.id)
-            .values(used_at=utc_now())
-        )
-        connection.execute(
-            update(models.users)
-            .where(models.users.c.id == user.id)
-            .values(is_verified=True, updated_at=utc_now())
-        )
-        token = new_session_token()
-        connection.execute(
-            insert(models.auth_sessions).values(
-                user_id=user.id,
-                token_hash=hash_token(token),
-                expires_at=utc_now() + timedelta(days=session_ttl_days()),
-            )
-        )
-        verified_user = (
-            connection.execute(select(models.users).where(models.users.c.id == user.id))
-            .mappings()
-            .one()
-        )
-    return AuthResponse(
-        access_token=token, token_type="bearer", user=user_response(verified_user)
-    )
-
-
-@app.post("/auth/resend-otp", response_model=OTPResponse)
-def resend_otp(
-    payload: ResendOTPRequest, engine: Annotated[Engine, Depends(get_engine)]
-) -> OTPResponse:
-    with engine.begin() as connection:
-        user = find_user(connection, payload.email)
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unable to resend verification code",
-            )
-        code = issue_verification_code(connection, user.id, user.email)
-    return OTPResponse(verification_required=True, development_code=code)
-
-
-@app.post("/auth/login", response_model=LoginResponse)
-def login(
-    payload: LoginRequest, engine: Annotated[Engine, Depends(get_engine)]
-) -> LoginResponse:
-    with engine.begin() as connection:
-        user = find_user(connection, payload.email)
-        if user is None or not verify_secret(payload.password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Email or password is invalid",
-            )
-        code = issue_verification_code(connection, user.id, user.email)
-    return LoginResponse(
-        user=user_response(user),
-        verification_required=True,
-        development_code=code,
-    )
-
-
-@app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> Response:
-    """Revoke every active session for the signed-in user."""
-
-    with engine.begin() as connection:
-        connection.execute(
-            update(models.auth_sessions)
-            .where(
-                and_(
-                    models.auth_sessions.c.user_id == user.id,
-                    models.auth_sessions.c.revoked_at.is_(None),
-                )
-            )
-            .values(revoked_at=utc_now())
-        )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@app.get("/me", response_model=UserResponse)
-def me(user: Annotated[object, Depends(get_current_user)]) -> UserResponse:
-    return user_response(user)
-
-
-@app.get("/me/preferences", response_model=PreferencesResponse)
-def get_preferences(
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> PreferencesResponse:
-    with engine.begin() as connection:
-        row = (
-            connection.execute(
-                select(models.user_preferences).where(
-                    models.user_preferences.c.user_id == user.id
-                )
-            )
-            .mappings()
-            .first()
-        )
-    if row is None:
-        return PreferencesResponse(sectors=[], risk_level=None)
-    return PreferencesResponse(sectors=row.sectors or [], risk_level=row.risk_level)
-
-
-@app.put("/me/preferences", response_model=PreferencesResponse)
-def save_preferences(
-    payload: PreferencesRequest,
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> PreferencesResponse:
-    with engine.begin() as connection:
-        existing = connection.execute(
-            select(models.user_preferences.c.user_id).where(
-                models.user_preferences.c.user_id == user.id
-            )
-        ).first()
-        values = {
-            "sectors": payload.sectors,
-            "risk_level": payload.risk_level,
-            "updated_at": utc_now(),
-        }
-        if existing is None:
-            connection.execute(
-                insert(models.user_preferences).values(user_id=user.id, **values)
-            )
-        else:
-            connection.execute(
-                update(models.user_preferences)
-                .where(models.user_preferences.c.user_id == user.id)
-                .values(**values)
-            )
-    return PreferencesResponse(sectors=payload.sectors, risk_level=payload.risk_level)
-
-
-@app.get("/me/notifications", response_model=NotificationSettingsResponse)
-def get_notification_settings(
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> NotificationSettingsResponse:
-    with engine.begin() as connection:
-        row = (
-            connection.execute(
-                select(models.user_notification_settings).where(
-                    models.user_notification_settings.c.user_id == user.id
-                )
-            )
-            .mappings()
-            .first()
-        )
-    if row is None:
-        return NotificationSettingsResponse(
-            confidence_score_enabled=True, earnings_alerts_enabled=True
-        )
-    return NotificationSettingsResponse(
-        confidence_score_enabled=row.confidence_score_enabled,
-        earnings_alerts_enabled=row.earnings_alerts_enabled,
-    )
-
-
-@app.put("/me/notifications", response_model=NotificationSettingsResponse)
-def save_notification_settings(
-    payload: NotificationSettingsRequest,
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> NotificationSettingsResponse:
-    values = {
-        "confidence_score_enabled": payload.confidence_score_enabled,
-        "earnings_alerts_enabled": payload.earnings_alerts_enabled,
-        "updated_at": utc_now(),
-    }
-    with engine.begin() as connection:
-        existing = connection.execute(
-            select(models.user_notification_settings.c.user_id).where(
-                models.user_notification_settings.c.user_id == user.id
-            )
-        ).first()
-        if existing is None:
-            connection.execute(
-                insert(models.user_notification_settings).values(
-                    user_id=user.id, **values
-                )
-            )
-        else:
-            connection.execute(
-                update(models.user_notification_settings)
-                .where(models.user_notification_settings.c.user_id == user.id)
-                .values(**values)
-            )
-    return NotificationSettingsResponse(
-        confidence_score_enabled=payload.confidence_score_enabled,
-        earnings_alerts_enabled=payload.earnings_alerts_enabled,
-    )
-
-
-@app.put("/me/password")
-def change_password(
-    payload: PasswordChangeRequest,
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> dict[str, str]:
-    if not verify_secret(payload.old_password, user.password_hash):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Current password is invalid",
-        )
-    if payload.old_password == payload.new_password:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="New password must be different from the current password",
-        )
-    with engine.begin() as connection:
-        connection.execute(
-            update(models.users)
-            .where(models.users.c.id == user.id)
-            .values(
-                password_hash=hash_secret(payload.new_password), updated_at=utc_now()
-            )
-        )
-        connection.execute(
-            update(models.auth_sessions)
-            .where(
-                and_(
-                    models.auth_sessions.c.user_id == user.id,
-                    models.auth_sessions.c.revoked_at.is_(None),
-                )
-            )
-            .values(revoked_at=utc_now())
-        )
-    return {"message": "Password changed successfully"}
-
-
-@app.get("/me/watchlist", response_model=list[WatchlistItem])
-def get_watchlist(
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> list[WatchlistItem]:
-    with engine.begin() as connection:
-        rows = connection.execute(
-            select(models.securities.c.symbol)
-            .join(
-                models.user_watchlist,
-                models.user_watchlist.c.security_id == models.securities.c.id,
-            )
-            .where(models.user_watchlist.c.user_id == user.id)
-            .order_by(models.securities.c.symbol)
-        ).all()
-    return [WatchlistItem(ticker=row.symbol) for row in rows]
-
-
-@app.post(
-    "/me/watchlist", response_model=WatchlistItem, status_code=status.HTTP_201_CREATED
-)
-def add_watchlist(
-    payload: WatchlistRequest,
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> WatchlistItem:
-    with engine.begin() as connection:
-        security = (
-            connection.execute(
-                select(models.securities).where(
-                    models.securities.c.symbol == payload.ticker
-                )
-            )
-            .mappings()
-            .first()
-        )
-        if security is None:
-            security = (
-                connection.execute(
-                    insert(models.securities)
-                    .values(symbol=payload.ticker)
-                    .returning(*models.securities.c)
-                )
-                .mappings()
-                .one()
-            )
-        connection.execute(
-            pg_insert(models.user_watchlist)
-            .values(user_id=user.id, security_id=security.id)
-            .on_conflict_do_nothing(
-                index_elements=[
-                    models.user_watchlist.c.user_id,
-                    models.user_watchlist.c.security_id,
-                ]
-            )
-        )
-    return WatchlistItem(ticker=payload.ticker)
-
-
-@app.delete("/me/watchlist/{ticker}", status_code=status.HTTP_204_NO_CONTENT)
-def remove_watchlist(
-    ticker: str,
-    user: Annotated[object, Depends(get_current_user)],
-    engine: Annotated[Engine, Depends(get_engine)],
-) -> Response:
-    normalized_ticker = ticker.strip().upper()
-    with engine.begin() as connection:
-        security = connection.execute(
-            select(models.securities.c.id).where(
-                models.securities.c.symbol == normalized_ticker
-            )
-        ).first()
-        if security is not None:
-            connection.execute(
-                delete(models.user_watchlist).where(
-                    and_(
-                        models.user_watchlist.c.user_id == user.id,
-                        models.user_watchlist.c.security_id == security.id,
-                    )
-                )
-            )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
