@@ -687,7 +687,7 @@ def test_invalid_fields_never_echo_passwords(api):
     assert response.status_code == 422
     assert "secret" not in response.text
     assert response.json()["field_errors"] == {
-        "email": "Enter a valid email address, such as name@example.com.",
+        "email": "Enter a valid email address in the format name@domain.com.",
         "password": "Use at least 8 characters for your password.",
     }
 

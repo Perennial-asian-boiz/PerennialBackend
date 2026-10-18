@@ -69,7 +69,7 @@ async def invalid_input(_request: Request, error: RequestValidationError):
             continue
         name, kind = location[1], issue["type"]
         if name == "email":
-            fields[name] = "Enter a valid email address, such as name@example.com."
+            fields[name] = "Enter a valid email address in the format name@domain.com."
         elif name == "full_name":
             fields[name] = (
                 "Use no more than 200 characters for your name."
