@@ -766,7 +766,7 @@ def test_provider_field_errors_reach_the_client(api):
         ("email_address_not_authorized", 503, None, "isn't fully set up"),
         ("email_provider_disabled", 503, None, "registration is currently unavailable"),
         ("signup_disabled", 503, None, "registration is currently unavailable"),
-        ("over_email_send_rate_limit", 429, None, "Too many verification emails"),
+        ("over_email_send_rate_limit", 429, None, "can't send another email"),
         ("validation_failed", 422, None, "couldn't validate"),
         ("unknown-secret-sentinel", 401, None, "Invalid email, password, or session"),
         ({"secret": "sentinel"}, 401, None, "Invalid email, password, or session"),

@@ -51,7 +51,7 @@ class AuthProviderError(Exception):
         elif code == "email_address_not_authorized":
             self.message = "Email verification isn't fully set up yet. Please try again later or contact support."
         elif code == "over_email_send_rate_limit":
-            self.message = "Too many verification emails have been requested. Please wait before trying again."
+            self.message = "We can't send another email to this address yet. Please try again later."
         elif code in {"signup_disabled", "email_provider_disabled"}:
             self.message = (
                 "Account registration is currently unavailable. Please try again later."
