@@ -61,9 +61,10 @@ it does not change `main` or the team's company-data collectors.
   endpoint, then checks the app's OTP-approved session record.
 - **PostgreSQL on Supabase** stores per-user preferences, watchlists and settings
   in the separate `app` schema. Row-level security isolates identity UUIDs.
-- **Resend SMTP** delivers Supabase's email templates. No second mail sender,
-  custom password hash, fake login, displayed development OTP or admin key in
-  the browser remains.
+- **Custom SMTP** delivers Supabase's email templates. The development project
+  currently uses Gmail SMTP for testing; Resend is not connected yet. No second
+  mail sender, custom password hash, fake login, displayed development OTP or
+  admin key in the browser remains.
 
 Company information is **still temporary fixture data** in development.
 Authentication and account data are not fixtures. Real company integration is
@@ -77,8 +78,13 @@ migration have been verified there. Runtime credentials are private and must
 be shared through a secret manager, not committed or posted to Discord.
 Invite teammates to the Supabase organization instead of sharing your login.
 
-**Resend SMTP and the email-template settings still require dashboard setup
-and an inbox test.** Passing offline tests does not prove email delivery.
+Gmail SMTP is configured for the development project, and its login template
+uses `{{ .Token }}`. The project has a six-digit OTP with a 900-second expiry.
+The sender is temporary: the team still needs to test the full login and
+recovery flows, then replace Gmail with a transactional sender before real-user
+deployment. Resend requires a verified sending domain; the team does not have
+one yet. Passing offline tests or receiving one email does not prove the full
+authentication flow works.
 Production hosting, HTTPS, secret rotation, monitoring and team merge review
 are separate deployment work, not completed by this branch.
 
@@ -130,7 +136,7 @@ In the frontend repo, copy `.env.example` to `.env`, keep
 Open the frontend at port 5173, not the API port. API reference: port 8000
 `/docs`. No Supabase secret, database password or Resend key goes in `VITE_*`.
 
-#### Supabase + Resend dashboard checklist
+#### Supabase email dashboard checklist
 
 1. Keep the Data API disabled: this application reads/writes through FastAPI.
    Supabase Auth continues to work without PostgREST. Do not expose `app`
@@ -142,23 +148,28 @@ Open the frontend at port 5173, not the API port. API reference: port 8000
    URLs. For local development use Site URL `http://127.0.0.1:5173` and allow
    `http://127.0.0.1:5173/auth/confirm`. Set `AUTH_EMAIL_REDIRECT_URL` to that
    callback in the backend. The old default `localhost:3000` is not this app.
-4. In Authentication's email/SMTP settings, enable custom SMTP:
-   host `smtp.resend.com`, port `465`, username `resend`, password =
-   Resend sending API key, sender name `Perennial`.
-5. Use a sender on a verified domain for arbitrary users. Without a domain,
-   `onboarding@resend.dev` can test **only the Resend account's own email**.
-   Supabase's default SMTP is also restricted and is not the production setup.
+4. In Authentication's email/SMTP settings, enable custom SMTP. For the
+   **temporary development setup**, use `smtp.gmail.com`, port `465`, the full
+   sending Gmail address as sender and username, and that account's Google App
+   Password as the SMTP password. Never use the normal Gmail password or share
+   the App Password in Git, chat or Discord. Gmail is not the production sender.
+5. For Resend later, verify a domain the team owns, then change SMTP to
+   `smtp.resend.com`, port `465`, username `resend`, password = Resend sending
+   API key and a sender on that verified domain. Resend is **not** connected to
+   this project yet. Supabase's default SMTP is also restricted.
 6. **Confirm signup** uses `{{ .ConfirmationURL }}`: registration sends a link,
    not a six-digit signup code. **Magic Link** (login) and **Reset Password**
    use `{{ .Token }}` for the existing six-digit login/recovery screens.
    Supabase's dashboard currently requires custom SMTP to edit these templates;
    without it the default login/recovery emails may still contain links. Do not
    claim email OTP delivery is ready until SMTP/templates and inbox tests pass.
-7. Test signup, existing-user login, resend, recovery and delivery/bounce status
-   in both Supabase Auth logs and the Resend dashboard. Never post API keys,
-   SMTP passwords, DB URLs or OTPs in Discord.
+7. Test signup, existing-user login, resend and recovery against the live
+   inbox and Supabase Auth logs. After switching to Resend, also check delivery
+   and bounce status in its dashboard. Never post API keys, SMTP passwords,
+   DB URLs or OTPs in Discord.
 
 Official setup:
+[Supabase custom SMTP](https://supabase.com/docs/guides/auth/auth-smtp),
 [Resend SMTP](https://resend.com/docs/send-with-supabase-smtp),
 [Supabase email OTP](https://supabase.com/docs/guides/auth/auth-email-passwordless).
 
@@ -213,10 +224,10 @@ refresh. The browser keeps only tokens and the pending challenge in tab-scoped
 `sessionStorage`; account data is stored in PostgreSQL, not localStorage.
 
 Codes/challenges expire after 15 minutes, lock after five wrong attempts and
-are single-use. Resend waits 60 seconds for an active challenge of the same
+are single-use. Sending another email waits 60 seconds for an active challenge of the same
 flow (signup, login or recovery); confirming a signup email does not delay the
 first login code. Five emails per hour per email address are allowed across all
-flows. Resending does not reset failed attempts. Supabase and Resend may
+flows. Resending does not reset failed attempts. Supabase and the SMTP provider may
 apply stricter limits. Provider failures do not become successful login or
 consume an invalid-code attempt. Only the challenge token's SHA-256 digest is
 stored by FastAPI; Supabase owns password/OTP storage.
