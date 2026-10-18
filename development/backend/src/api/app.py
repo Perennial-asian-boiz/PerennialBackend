@@ -8,20 +8,23 @@ frontend one stable contract while the backend team connects a mail provider.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Annotated, Literal
 
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import and_, delete, insert, select, update
+from sqlalchemy import and_, delete, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 
 from src.api.dashboard import DashboardResponse, dashboard_response_from_publication
 from src.api.dashboard_fixture import temporary_dashboard_response
+from src.api.mail import EmailDeliveryError, send_verification_email
 from src.api.security import (
     hash_secret,
     hash_token,
@@ -31,10 +34,23 @@ from src.api.security import (
 )
 from src.db import models
 from src.db.session import make_engine
+from src.services.consensus_watchlist.paths import ENV_PATH
+
+# Match the documented .env location. Exported deployment settings win.
+load_dotenv(ENV_PATH)
 
 RiskLevel = Literal["Conservative", "Moderate", "High"]
 OTP_TTL_MINUTES = 15
 MAX_OTP_ATTEMPTS = 5
+OTP_RESEND_SECONDS = 30
+MAX_OTP_EMAILS_PER_HOUR = 5
+
+
+def normalize_email_address(value: str) -> str:
+    value = value.strip().casefold()
+    if not re.fullmatch(r"[^\s@<>(),;]+@[^\s@<>(),;]+\.[^\s@<>(),;]+", value):
+        raise ValueError("Email is not valid")
+    return value
 
 
 class APIModel(BaseModel):
@@ -56,7 +72,7 @@ class SignupRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, value: str) -> str:
-        return value.strip().casefold()
+        return normalize_email_address(value)
 
     @field_validator("full_name")
     @classmethod
@@ -77,7 +93,7 @@ class VerifyOTPRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, value: str) -> str:
-        return value.strip().casefold()
+        return normalize_email_address(value)
 
 
 class ResendOTPRequest(BaseModel):
@@ -86,7 +102,7 @@ class ResendOTPRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, value: str) -> str:
-        return value.strip().casefold()
+        return normalize_email_address(value)
 
 
 class LoginRequest(BaseModel):
@@ -96,7 +112,7 @@ class LoginRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, value: str) -> str:
-        return value.strip().casefold()
+        return normalize_email_address(value)
 
 
 class AuthResponse(APIModel):
@@ -169,13 +185,6 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def development_code_response(code: str) -> str | None:
-    """Expose OTP only for local testing, never when APP_ENV is production."""
-    if os.getenv("APP_ENV", "development").casefold() != "production":
-        return code
-    return None
-
-
 def session_ttl_days() -> int:
     raw = os.getenv("SESSION_TTL_DAYS", "7").strip()
     try:
@@ -210,18 +219,45 @@ def user_response(row: object) -> UserResponse:
 def find_user(connection: object, normalized_email: str) -> object | None:
     return (
         connection.execute(
-            select(models.users).where(
-                models.users.c.normalized_email == normalized_email
-            )
+            select(models.users)
+            .where(models.users.c.normalized_email == normalized_email)
+            .with_for_update()
         )
         .mappings()
         .first()
     )
 
 
-def issue_verification_code(connection: object, user_id: int) -> str:
-    code = new_otp()
+def issue_verification_code(connection: object, user_id: int, email: str) -> str | None:
+    """Issue and send while holding the account lock; failed sends roll back."""
     now = utc_now()
+    last_created = connection.execute(
+        select(func.max(models.email_verification_codes.c.created_at)).where(
+            models.email_verification_codes.c.user_id == user_id
+        )
+    ).scalar_one()
+    if last_created is not None:
+        remaining = OTP_RESEND_SECONDS - int((now - last_created).total_seconds())
+        if remaining > 0:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Please wait {remaining} seconds before requesting another code.",
+                headers={"Retry-After": str(remaining)},
+            )
+    recent_count = connection.execute(
+        select(func.count())
+        .select_from(models.email_verification_codes)
+        .where(
+            models.email_verification_codes.c.user_id == user_id,
+            models.email_verification_codes.c.created_at > now - timedelta(hours=1),
+        )
+    ).scalar_one()
+    if recent_count >= MAX_OTP_EMAILS_PER_HOUR:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many verification emails. Please try again later.",
+        )
+    code = new_otp()
     connection.execute(
         update(models.email_verification_codes)
         .where(
@@ -236,10 +272,20 @@ def issue_verification_code(connection: object, user_id: int) -> str:
         insert(models.email_verification_codes).values(
             user_id=user_id,
             code_hash=hash_secret(code),
+            created_at=now,
             expires_at=now + timedelta(minutes=OTP_TTL_MINUTES),
         )
     )
-    return code
+    try:
+        delivered = send_verification_email(
+            email, code, expires_minutes=OTP_TTL_MINUTES
+        )
+    except EmailDeliveryError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to send verification email. Please try again later.",
+        ) from None
+    return None if delivered else code
 
 
 def get_current_user(
@@ -350,11 +396,11 @@ def signup(
             .returning(*models.users.c)
         )
         user = result.mappings().one()
-        code = issue_verification_code(connection, user.id)
+        code = issue_verification_code(connection, user.id, user.email)
     return SignupResponse(
         user=user_response(user),
         verification_required=True,
-        development_code=development_code_response(code),
+        development_code=code,
     )
 
 
@@ -379,6 +425,8 @@ def verify_otp(
                     )
                 )
                 .order_by(models.email_verification_codes.c.created_at.desc())
+                .limit(1)
+                .with_for_update()
             )
             .mappings()
             .first()
@@ -398,6 +446,9 @@ def verify_otp(
                 .where(models.email_verification_codes.c.id == code_row.id)
                 .values(attempts=code_row.attempts + 1)
             )
+            # Persist the failed attempt before raising the response error.
+            # Otherwise engine.begin() would roll the counter back on the error.
+            connection.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid verification code",
@@ -441,10 +492,8 @@ def resend_otp(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Unable to resend verification code",
             )
-        code = issue_verification_code(connection, user.id)
-    return OTPResponse(
-        verification_required=True, development_code=development_code_response(code)
-    )
+        code = issue_verification_code(connection, user.id, user.email)
+    return OTPResponse(verification_required=True, development_code=code)
 
 
 @app.post("/auth/login", response_model=LoginResponse)
@@ -458,11 +507,11 @@ def login(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Email or password is invalid",
             )
-        code = issue_verification_code(connection, user.id)
+        code = issue_verification_code(connection, user.id, user.email)
     return LoginResponse(
         user=user_response(user),
         verification_required=True,
-        development_code=development_code_response(code),
+        development_code=code,
     )
 
 

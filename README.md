@@ -51,7 +51,7 @@ It publishes a verified watchlist without source JSON files. Read the
 ### Sprint 1 account API
 
 The `feature/backend-auth-api` branch adds the first user-facing API layer on
-top of the existing PostgreSQL database. It includes account creation, local
+top of the existing PostgreSQL database. It includes account creation, emailed
 OTP verification, login sessions, onboarding preferences, notification
 settings, password changes, logout/session revocation, and a personal
 watchlist. The API is started from `development/backend` after applying the
@@ -63,12 +63,14 @@ cd ../backend
 uvicorn src.api.app:app --reload --port 8000
 ```
 
-During local development, signup and resend responses include a
-`development_code` so the frontend flow can be tested before an email provider
-is selected. Set `APP_ENV=production` before deployment; production hides that
-field and requires a real email-delivery adapter to be connected. The current
-branch does not send email yet, so do not deploy public signup until delivery
-is configured.
+The API loads `development/backend/.env`; exported environment variables take
+precedence. Resend is the default email provider. Signup, password login, and
+resend send a six-digit OTP to the user's email. They return
+`development_code: null` even during local development when Resend is enabled.
+No session is created until the code is verified. Missing email configuration
+or a provider failure returns 503 without committing the pending account/code
+changes. Resend accepting a message does not guarantee inbox delivery; check
+the Resend dashboard for delivery or bounce status.
 
 #### Account API endpoints
 
@@ -76,23 +78,41 @@ is configured.
 |---|---|---|
 | `POST` | `/auth/signup` | Create an account and issue a verification code |
 | `POST` | `/auth/verify-otp` | Verify the account and create a session |
-| `POST` | `/auth/resend-otp` | Issue another development/provider code |
-| `POST` | `/auth/login` | Create a session for a verified account |
+| `POST` | `/auth/resend-otp` | Email a replacement verification code |
+| `POST` | `/auth/login` | Check credentials and email an OTP; no session yet |
 | `POST` | `/auth/logout` | Revoke all active sessions for the account |
 | `GET/PUT` | `/me/preferences` | Read or save sectors and risk level |
 | `GET/PUT` | `/me/notifications` | Read or save notification toggles |
 | `PUT` | `/me/password` | Change the password and revoke sessions |
 | `GET/POST/DELETE` | `/me/watchlist` | Read or update the account watchlist |
 
-#### Planned email delivery
+#### Resend email setup
 
-Resend is the recommended first provider because it has a small HTTP API and
-fits verification-code and password emails without adding email credentials to
-the frontend. The provider must be implemented behind a backend mail service;
-the frontend should continue calling the auth endpoints above.
+Auth architecture is still pending alignment with
+[issue #3 (Supabase Auth/JWT)](https://github.com/Perennial-asian-boiz/PerennialBackend/issues/3)
+and the `main` branch's schema review plan. This branch's current opaque
+sessions are a temporary integration, not an implementation of Supabase Auth.
+The adapter below supports the current account endpoints. After migrating to
+Supabase Auth, configure Resend as
+[Supabase's SMTP provider](https://resend.com/docs/send-with-supabase-smtp)
+and retire the custom identity/code/session path; do not treat the two token
+formats as interchangeable. This change does not migrate any shared database.
 
-When the provider integration is added, configure these values only in the
-deployment secret store or the untracked `development/backend/.env`:
+Email delivery lives in `development/backend/src/api/mail.py` and uses Resend's
+HTTP API with the existing `requests` dependency. The frontend continues using
+the same account endpoints; no provider key belongs in `VITE_*` variables.
+
+1. Create a [Resend account](https://resend.com) owned by the team and a
+   sending API key.
+2. For a first test without a domain, use
+   `EMAIL_FROM=Perennial <onboarding@resend.dev>` and register in Perennial
+   using **the same email address as your Resend account**. Resend's test sender
+   cannot send to arbitrary users.
+3. For other users, [verify a domain you control](https://resend.com/docs/dashboard/domains/introduction)
+   and change `EMAIL_FROM` to an address on that domain. A Gmail address cannot
+   be used as a verified Resend sender.
+4. Put these values in the deployment secret store or the untracked
+   `development/backend/.env`, then restart the backend:
 
 ```dotenv
 EMAIL_PROVIDER=resend
@@ -102,6 +122,21 @@ EMAIL_FROM=Perennial <noreply@verified-domain.example>
 
 The sender domain must be verified with Resend. Never commit `RESEND_API_KEY`,
 `.env`, or a real sender credential.
+
+OTP codes expire after **15 minutes**, are stored as salted hashes, and can be
+used once. **Five failed attempts** lock a code. Requests for another code
+(including password login) are limited to **one every 30 seconds** and
+**five per hour per account**. These are application limits, independent of
+the provider's own quotas. A replacement invalidates the previous code only
+after the provider accepts the new email. Delivery failures retain the prior
+code. Timeouts are not retried automatically because Resend may already have
+accepted the message; a late email from a failed request may contain an invalid
+code, so request a new one after a timeout.
+
+For offline UI work only, explicitly set `EMAIL_PROVIDER=development` and
+`APP_ENV=development`. This mode sends no email and returns `development_code`
+for the existing development UI. It is rejected in production or staging and
+is never an automatic fallback when Resend fails.
 
 The frontend can use `http://127.0.0.1:8000` as `VITE_API_URL`. The initial
 endpoint contract is documented by the OpenAPI page at
