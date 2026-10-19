@@ -35,6 +35,7 @@ MAX_ENTRIES = 20
 MAX_BYTES = 8192  # half the column CHECK; jsonb::text renders larger than json.dumps
 
 ERROR_SUMMARIES = {
+    "publication_quality_failed": "publication quality checks failed",
     "worker_abandoned": "Worker heartbeat expired.",
     "collection_failed": "collection did not complete",
     "partial_collection": "collection was incomplete; some units failed",
@@ -67,6 +68,8 @@ UNIT_KINDS = frozenset(
     }
 )
 _COUNT_KEYS = (
+    "senate_pages_fetched",
+    "house_pages_fetched",
     "input_count",
     "error_count",
     "planned",
@@ -107,7 +110,7 @@ _REQUEST_ERRORS = frozenset(
 )
 _HTTP_CODE = re.compile(r"^http_[1-5][0-9]{2}$")
 _UNIT = re.compile(
-    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|senate watcher|trades_congress\.json|ark_holdings\.json)$"
+    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|trades_congress\.json|ark_holdings\.json)$"
 )
 MAX_COUNT = 10**9
 

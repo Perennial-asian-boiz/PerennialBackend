@@ -21,6 +21,7 @@ from src.pipeline.lifecycle import (
 )
 from src.pipeline.publication import PublicationError, publish
 from src.pipeline.ranking import candidate_symbols
+from src.settings import QualityThreshold
 
 logger = logging.getLogger(__name__)
 UPSTREAM = ("congress_trades", "ark_holdings")
@@ -192,11 +193,15 @@ def run_pipeline(
     collectors: Mapping[str, Callable[..., CollectionOutcome]] | None = None,
     market_cap_collector: Callable[[Sequence[str]], Mapping[str, dict[str, Any]]]
     | None = None,
+    quality_thresholds: Mapping[str, QualityThreshold] | None = None,
 ) -> int:
     """Stop on a failed stage; all publication writes commit together at the end."""
     with source_lock(engine, "pipeline"):
         return _run_pipeline(
-            engine, collectors=collectors, market_cap_collector=market_cap_collector
+            engine,
+            collectors=collectors,
+            market_cap_collector=market_cap_collector,
+            quality_thresholds=quality_thresholds,
         )
 
 
@@ -206,6 +211,7 @@ def _run_pipeline(
     collectors: Mapping[str, Callable[..., CollectionOutcome]] | None = None,
     market_cap_collector: Callable[[Sequence[str]], Mapping[str, dict[str, Any]]]
     | None = None,
+    quality_thresholds: Mapping[str, QualityThreshold] | None = None,
 ) -> int:
     from src.ingestion.collectors import COLLECTORS
 
@@ -228,6 +234,8 @@ def _run_pipeline(
     with engine.connect() as conn:
         rows = {s: batch_rows(conn, s, b) for s, b in batches.items()}
     observations = market_cap_collector(candidate_symbols(rows))
-    publication_id = publish(engine, run_ids, observations)
+    publication_id = publish(
+        engine, run_ids, observations, quality_thresholds=quality_thresholds
+    )
     logger.info("publication succeeded publication_id=%s", publication_id)
     return publication_id

@@ -13,6 +13,7 @@ database URL, request URLs or exception messages.
 """
 
 import argparse
+import getpass
 import json
 import sys
 from dataclasses import asdict
@@ -64,6 +65,13 @@ def _parser() -> argparse.ArgumentParser:
         "run-pipeline",
         help="collect all sources from database inputs and publish atomically",
     )
+    manual = sub.add_parser(
+        "publish", help="publish the latest successful live batches"
+    )
+    manual.add_argument(
+        "--override", help="reason for overriding failed quality checks"
+    )
+    manual.add_argument("--actor", help="operator identity for the override audit")
     sub.add_parser("current", help="show the published watchlist")
     sub.add_parser("health", help="machine-readable health; exits 1 when unhealthy")
     replay = sub.add_parser(
@@ -84,12 +92,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "run-pipeline":
             settings.require_provider_keys("fmp")
             settings.require_provider_keys("finnhub")
+        elif args.command == "publish":
+            settings.require_provider_keys("fmp")
         elif args.command == "fetch":
             if args.source == "congress_trades":
                 settings.require_provider_keys("fmp")
             elif args.source == "insider_trades":
                 settings.require_provider_keys("finnhub")
-        engine = make_engine(settings.database_url.get_secret_value())
+        engine = make_engine(
+            settings.database_url.get_secret_value(),
+            workload="pipeline" if args.command == "run-pipeline" else "cli",
+        )
     except SettingsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -107,7 +120,54 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "run-pipeline":
             from src.pipeline.runner import run_pipeline
 
-            _print({"publication_id": run_pipeline(engine)})
+            _print(
+                {
+                    "publication_id": run_pipeline(
+                        engine, quality_thresholds=settings.quality_thresholds
+                    )
+                }
+            )
+            return 0
+        if args.command == "publish":
+            from src.pipeline.publication import PublicationError, publish
+            from src.pipeline.ranking import candidate_symbols
+            from src.pipeline.runner import collect_market_caps
+
+            with engine.connect() as conn:
+                latest = {
+                    source: latest_successful_run(conn, source) for source in SOURCES
+                }
+                if any(run is None for run in latest.values()):
+                    raise PublicationError("all sources need a successful batch")
+                run_ids = {
+                    source: run.run_id
+                    for source, run in latest.items()
+                    if run is not None
+                }
+                publish_rows = {
+                    source: batch_rows(conn, source, run.batch_id)
+                    for source, run in latest.items()
+                    if run is not None
+                }
+            observations = collect_market_caps(
+                candidate_symbols(publish_rows),
+                api_key=settings.fmp_api_key.get_secret_value()
+                if settings.fmp_api_key is not None
+                else None,
+            )
+            actor = (args.actor or getpass.getuser()) if args.override else None
+            _print(
+                {
+                    "publication_id": publish(
+                        engine,
+                        run_ids,
+                        observations,
+                        quality_thresholds=settings.quality_thresholds,
+                        override_reason=args.override,
+                        override_actor=actor,
+                    )
+                }
+            )
             return 0
         if args.command == "current":
             from src.pipeline.publication import current
@@ -180,6 +240,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0 if result.succeeded else 1
         result = import_collection(engine, outcome)
     except Exception as exc:
+        from src.pipeline.publication import PublicationQualityError
+
+        if isinstance(exc, PublicationQualityError):
+            _print({"error_code": exc.code, "checks": list(exc.checks)})
+            return 1
         print(
             f"error: database operation failed: {describe_exception(exc)}",
             file=sys.stderr,
