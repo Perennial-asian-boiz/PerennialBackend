@@ -311,7 +311,8 @@ class SupabaseAuth:
                 if isinstance(entry, dict) and entry.get("method") == "recovery"
             ]
             valid = [
-                stamp for stamp in timestamps
+                stamp
+                for stamp in timestamps
                 if isinstance(stamp, (int, float))
                 and not isinstance(stamp, bool)
                 and math.isfinite(stamp)

@@ -73,7 +73,8 @@ class FakeProvider:
         user = self.users[email]
         user["email_confirmed_at"] = "2026-10-18T00:00:00Z"
         token = jwt(
-            user["id"], uuid4(),
+            user["id"],
+            uuid4(),
             amr=[{"method": flow, "timestamp": int(time.time())}],
         )
         self.tokens[token] = user
@@ -612,21 +613,34 @@ def test_recovery_session_cannot_read_data_and_resets_password(api):
         "/auth/forgot-password", json={"email": body["user"]["email"]}
     ).json()
     assert challenge["verification_method"] == "email_link"
-    assert client.post(
-        "/auth/verify-otp",
-        json={"email": body["user"]["email"], "challenge_id": challenge["challenge_id"], "code": "123456"},
-    ).status_code == 400
-    assert client.post(
-        "/auth/accept-recovery-link", json={"access_token": body["access_token"]}
-    ).status_code == 400  # An ordinary login JWT cannot approve password recovery.
+    assert (
+        client.post(
+            "/auth/verify-otp",
+            json={
+                "email": body["user"]["email"],
+                "challenge_id": challenge["challenge_id"],
+                "code": "123456",
+            },
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            "/auth/accept-recovery-link", json={"access_token": body["access_token"]}
+        ).status_code
+        == 400
+    )  # An ordinary login JWT cannot approve password recovery.
     link = provider.verify_code(body["user"]["email"], "123456", "recovery")
     recovery = client.post(
         "/auth/accept-recovery-link", json={"access_token": link["access_token"]}
     )
     assert recovery.status_code == 200 and recovery.json() == {"recovery_ready": True}
-    assert client.post(
-        "/auth/accept-recovery-link", json={"access_token": link["access_token"]}
-    ).status_code == 400  # The link is single-use in the app.
+    assert (
+        client.post(
+            "/auth/accept-recovery-link", json={"access_token": link["access_token"]}
+        ).status_code
+        == 400
+    )  # The link is single-use in the app.
     headers = {"Authorization": "Bearer " + link["access_token"]}
     assert client.get("/me/preferences", headers=headers).status_code == 401
     assert (
