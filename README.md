@@ -157,12 +157,12 @@ Open the frontend at port 5173, not the API port. API reference: port 8000
    `smtp.resend.com`, port `465`, username `resend`, password = Resend sending
    API key and a sender on that verified domain. Resend is **not** connected to
    this project yet. Supabase's default SMTP is also restricted.
-6. **Confirm signup** uses `{{ .ConfirmationURL }}`: registration sends a link,
-   not a six-digit signup code. **Magic Link** (login) and **Reset Password**
-   use `{{ .Token }}` for the existing six-digit login/recovery screens.
+6. **Confirm signup** and **Reset Password** use `{{ .ConfirmationURL }}`;
+   both send links. **Magic Link** (login) uses `{{ .Token }}` for the six-digit
+   login code.
    Supabase's dashboard currently requires custom SMTP to edit these templates;
-   without it the default login/recovery emails may still contain links. Do not
-   claim email OTP delivery is ready until SMTP/templates and inbox tests pass.
+   without it the default login email may still contain a link. Do not claim
+   email OTP delivery is ready until SMTP/templates and inbox tests pass.
 7. Test signup, existing-user login, resend and recovery against the live
    inbox and Supabase Auth logs. After switching to Resend, also check delivery
    and bounce status in its dashboard. Never post API keys, SMTP passwords,
@@ -187,8 +187,9 @@ The frontend removes its token fragment immediately, validates the result via
 confirmation JWT is never stored as an app session. Confirmation alone grants
 no Dashboard access. Invalid, expired or reused links show a safe retry message.
 
-For login/recovery send `email + challenge_id + code` to verify. Only successful OTP verification
-approves the provider's `session_id` and returns access/refresh tokens.
+For login, send `email + challenge_id + code` to verify. For recovery, the
+emailed link returns a fresh provider session to `/auth/confirm`; the API
+approves it only when a matching, unexpired recovery request exists.
 A directly obtained Supabase password or passwordless token cannot access
 Perennial data without this approval. Email OTP here is an application
 verification gate, **not Supabase native MFA/AAL2**.
@@ -205,6 +206,7 @@ Recovery-approved sessions can only reset a password, not read app data.
 | POST | `/auth/resend-confirmation` | Resend a signup confirmation link |
 | POST | `/auth/login` | Validate password, send email OTP, no session yet |
 | POST | `/auth/forgot-password` | Start recovery; generic reply for unknown emails |
+| POST | `/auth/accept-recovery-link` | Approve a fresh recovery email session for password reset only |
 | POST | `/auth/resend-otp` | Resend within the existing challenge |
 | POST | `/auth/verify-otp` | Verify code and approve session |
 | POST | `/auth/refresh` | Refresh only an approved, unrevoked session |

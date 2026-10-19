@@ -305,10 +305,14 @@ class SupabaseAuth:
                     part + "=" * (-len(part) % 4), altchars=b"-_", validate=True
                 )
             )
+            # Supabase can label a verified recovery email as "otp" in the
+            # session AMR. The account API also requires a matching, recent,
+            # single-use recovery challenge before approving this session.
             timestamps = [
                 entry.get("timestamp")
                 for entry in claims.get("amr", [])
-                if isinstance(entry, dict) and entry.get("method") == "recovery"
+                if isinstance(entry, dict)
+                and entry.get("method") in {"recovery", "otp"}
             ]
             valid = [
                 stamp

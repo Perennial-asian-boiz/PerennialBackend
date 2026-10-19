@@ -75,7 +75,12 @@ class FakeProvider:
         token = jwt(
             user["id"],
             uuid4(),
-            amr=[{"method": flow, "timestamp": int(time.time())}],
+            amr=[
+                {
+                    "method": "otp" if flow == "recovery" else flow,
+                    "timestamp": int(time.time()),
+                }
+            ],
         )
         self.tokens[token] = user
         return {"access_token": token, "refresh_token": token}
@@ -630,6 +635,18 @@ def test_recovery_session_cannot_read_data_and_resets_password(api):
         ).status_code
         == 400
     )  # An ordinary login JWT cannot approve password recovery.
+    stale_link = jwt(
+        body["user"]["id"],
+        uuid4(),
+        amr=[{"method": "otp", "timestamp": int(time.time()) - 120}],
+    )
+    provider.tokens[stale_link] = provider.users[body["user"]["email"]]
+    assert (
+        client.post(
+            "/auth/accept-recovery-link", json={"access_token": stale_link}
+        ).status_code
+        == 400
+    )
     link = provider.verify_code(body["user"]["email"], "123456", "recovery")
     recovery = client.post(
         "/auth/accept-recovery-link", json={"access_token": link["access_token"]}
