@@ -463,11 +463,13 @@ def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
 def forgot_password(payload: EmailRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         lock_email(connection, payload.email)
+        if not email_is_registered(connection, payload.email):
+            raise HTTPException(
+                404,
+                "No account has been created with this email address yet. Please create an account first.",
+            )
         check_email_limit(connection, payload.email, "recovery")
-        # Keep the public response indistinguishable for unknown addresses, but
-        # only ask Supabase to send a reset link for an account that exists.
-        if email_is_registered(connection, payload.email):
-            provider.send_code(payload.email, "recovery")
+        provider.send_code(payload.email, "recovery")
         return start_challenge(connection, payload.email, "recovery")
 
 
