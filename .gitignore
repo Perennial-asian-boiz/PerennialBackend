@@ -53,3 +53,7 @@ mastodon_ticker_posts.json
 
 #reddit stuff
 cookies.txt
+
+#youtube stuff
+/credentials
+youtube_cookies.txt
