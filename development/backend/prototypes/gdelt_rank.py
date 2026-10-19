@@ -32,6 +32,8 @@ sys.path.insert(0, str(HERE.parent))  # development/backend, so `src` imports re
 from src.services.gdelt.client import DocApiClient, GdeltError, Pacer, parse_tone, parse_volume  # noqa: E402
 
 RESULTS = HERE / "gdelt_rank_results.json"
+# Transport problems worth waiting out; parse errors are not retried.
+RETRYABLE = {"http_429", "timeout", "deadline_exceeded", "http_500", "http_502", "http_503", "http_504"}
 THEME = "ECON_STOCKMARKET"
 
 # ticker: (DOC API search terms, stand-in large cap?)  Quoted terms are exact phrases.
@@ -103,6 +105,8 @@ COMPANIES = {
     'SDGR': (['schrodinger'], False),
     'CMPS': (['"compass pathways"'], False),
     'NRIX': (['"Nurix Therapeutics"'], False),
+    'CERS': (['"Cerus Corporation"', '"Cerus Corp"'], False),
+    'ABSI': (['Absci'], False),
     'ADPT': (['"adaptive biotechnologies"'], False),
     'PSNL': (['personalis'], False),
     'BFLY': (['"Butterfly Network"'], False),
@@ -217,6 +221,9 @@ def main():
 
     if not args.show:
         tickers = args.tickers.split(",") if args.tickers else list(COMPANIES)
+        unknown = [t for t in tickers if t not in COMPANIES]
+        if unknown:
+            print(f"Skipping tickers with no search terms: {', '.join(unknown)}")
         tickers = [t for t in tickers if t in COMPANIES][: args.limit]
         todo = [t for t in tickers if t not in results]
         calls = 1 if args.no_tone else 2
@@ -231,12 +238,16 @@ def main():
                     results[ticker] = fetch(client, query, not args.no_tone)
                     break
                 except GdeltError as exc:
-                    if str(exc) != "http_429" or attempt == args.retries:
+                    if str(exc) not in RETRYABLE and not str(exc).startswith("request_error"):
+                        print(f"stopped at {ticker}: {exc}. Rerun later to continue; progress is saved.")
+                        stopped = True
+                        break
+                    if attempt == args.retries:
                         print(f"stopped at {ticker}: {exc}. Rerun later to continue; progress is saved.")
                         stopped = True
                         break
                     wait = args.backoff * 2 ** attempt
-                    print(f"  {ticker}: GDELT throttled (429), waiting {wait:.0f}s before retry {attempt + 1}/{args.retries}")
+                    print(f"  {ticker}: GDELT {exc}, waiting {wait:.0f}s before retry {attempt + 1}/{args.retries}")
                     time.sleep(wait)
             if stopped:
                 break
