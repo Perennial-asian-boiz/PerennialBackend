@@ -11,17 +11,19 @@ SCHEDULE:
 
 import requests
 import json
-import os
 from datetime import datetime, timezone
 from collections import Counter
-from dotenv import load_dotenv
+from typing import TYPE_CHECKING
 # ── shared path resolution (see paths.py) ──
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(next(
     p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
 )))
-from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+from paths import LOCAL_DATA_DIR, local_data_dir
+
+if TYPE_CHECKING:
+    from src.settings import ProviderSettings
 
 from pathlib import Path
 
@@ -29,35 +31,38 @@ from pathlib import Path
 # CONFIG
 # ─────────────────────────────────────────────────────────
 
-load_dotenv(dotenv_path=ENV_PATH)
-
-FMP_API_KEY = os.getenv("FMP_API_KEY", "YOUR_FMP_KEY_HERE")
+# Historical JSON callers and synthetic contract tests may set this explicitly.
+# Importing the fetcher never reads a key or a dotenv file.
+FMP_API_KEY: str | None = None
 BASE_URL = "https://financialmodelingprep.com/stable"
-MAX_PAGES = 3  # 20 trades per page = ~60 trades per chamber
-
-# Senate Stock Watcher — free, no key, 8,350+ records back to 2019
-SENATE_WATCHER_URL = (
-    "https://raw.githubusercontent.com/timothycarambat/"
-    "senate-stock-watcher-data/master/aggregate/all_transactions.json")
+MAX_PAGES = 50  # Safety cap per chamber; full final page is not a complete result.
 
 
 # ─────────────────────────────────────────────────────────
 # FETCH
 # ─────────────────────────────────────────────────────────
 
-def fetch_chamber_trades(chamber: str):
+def fetch_chamber_trades(
+    chamber: str, *, api_key: str | None = None, max_pages: int | None = None
+):
     """
     Fetches trades for one chamber.
     chamber = "senate" or "house"
     """
     endpoint = f"{BASE_URL}/{chamber}-latest"
+    key = api_key if api_key is not None else FMP_API_KEY
+    if not key:
+        raise ValueError("FMP_API_KEY is required")
+    page_limit = MAX_PAGES if max_pages is None else max_pages
+    if page_limit < 1:
+        raise ValueError("FMP page limit must be positive")
     all_trades = []
 
-    for page in range(MAX_PAGES):
+    for page in range(page_limit):
         try:
             resp = requests.get(
                 endpoint,
-                params={"page": page, "limit": 20, "apikey": FMP_API_KEY},
+                params={"page": page, "limit": 20, "apikey": key},
                 timeout=15
             )
 
@@ -74,43 +79,23 @@ def fetch_chamber_trades(chamber: str):
             resp.raise_for_status()
             data = resp.json()
 
-            if not data:
-                break
-
             for item in data:
                 item["_chamber"] = chamber.capitalize()
 
             all_trades.extend(data)
-            print(f"[fmp] {chamber.capitalize()} page {page + 1} — {len(data)} trades")
+            if data:
+                print(f"[fmp] {chamber.capitalize()} page {page + 1} — {len(data)} trades")
 
         except Exception as e:
             print(f"[fmp] ❌ {chamber} page {page} error: {e}")
             break
 
+        if len(data) < 20:
+            break
+        if page == page_limit - 1:
+            raise RuntimeError("FMP pagination exhausted")
+
     return all_trades
-
-def fetch_senate_watcher():
-    """
-    Fetches full Senate trade history from Senate Stock Watcher.
-    Free, no key needed. 8,350+ records going back to 2019.
-    """
-    try:
-        print(f"[fmp] Fetching Senate Stock Watcher (full history)...")
-        resp = requests.get(SENATE_WATCHER_URL, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        for item in data:
-            item["_chamber"] = "Senate"
-            item["_source"]  = "senate_watcher"
-
-        print(f"[fmp] Senate Stock Watcher — {len(data)} records")
-        return data
-
-    except Exception as e:
-        print(f"[fmp] ❌ Senate Stock Watcher failed: {e}")
-        return []
-
 
 # ─────────────────────────────────────────────────────────
 # PARSE
@@ -178,49 +163,9 @@ def parse_trades(raw_data: list, *, preserve_provenance: bool = True):
 
     return trades
 
-def parse_watcher_trade(item: dict, *, preserve_provenance: bool = True):
-    """
-    Parses Senate Stock Watcher format into standard Perennial format.
-    Different from FMP — uses MM/DD/YYYY dates and different field names.
-    """
-    ticker = (item.get("ticker") or "").strip().upper()
-
-    # Watcher uses "--" for unknown tickers
-    if not ticker or ticker == "--":
-        return None
-
-    # Convert MM/DD/YYYY to YYYY-MM-DD
-    trade_date_str = ""
-    raw_date = item.get("transaction_date") or ""
-    try:
-        parsed = datetime.strptime(raw_date, "%m/%d/%Y")
-        trade_date_str = parsed.strftime("%Y-%m-%d")
-    except ValueError:
-        trade_date_str = raw_date
-
-    trade = {
-        "politician_name":   item.get("senator", "").strip(),
-        "chamber":           "Senate",
-        "ticker":            ticker,
-        "asset_description": item.get("asset_description", "").strip(),
-        "asset_type":        item.get("asset_type", "").strip(),
-        "trade_type":        item.get("type", "").strip(),
-        "amount_range":      item.get("amount", "").strip(),
-        "transaction_date":  trade_date_str,
-        "disclosure_date":   "",
-        "days_to_disclose":  None,
-        "district":          "",
-        "source_link":       item.get("ptr_link", "").strip(),
-        "data_source":       "senate_watcher",
-        "fetched_at":        datetime.now(timezone.utc).isoformat(),
-    }
-    if preserve_provenance:
-        trade["provider_record_id"] = _provider_record_id(item)
-    return trade
-
 def deduplicate(trades: list):
     """
-    Removes duplicate trades that appear in both FMP and Senate Watcher.
+    Removes repeated trades from the legacy JSON output.
     Key: politician + ticker + transaction_date + trade_type
     """
     seen   = {}
@@ -376,40 +321,38 @@ def print_summary(trades: list, analysis: dict):
 # MAIN
 # ─────────────────────────────────────────────────────────
 
-def run():
-    if FMP_API_KEY == "YOUR_FMP_KEY_HERE":
-        print("[fmp] ⚠️  No FMP_API_KEY set in .env")
-        return
+def run(provider_settings: "ProviderSettings | None" = None):
+    # The compatibility branch is only for existing JSON callers that set the
+    # module symbol themselves. Normal runs resolve settings at invocation.
+    legacy_key = provider_settings is None and FMP_API_KEY is not None
+    if legacy_key:
+        key = FMP_API_KEY
+    else:
+        if provider_settings is None:
+            from src.settings import load_provider_settings
+            provider_settings = load_provider_settings()
+        provider_settings.require_provider_keys("fmp")
+        key = provider_settings.fmp_api_key.get_secret_value()
+    page_limit = getattr(provider_settings, "fmp_max_pages", MAX_PAGES)
 
     print("[fmp] Starting Congress trades fetch...")
 
-    # Fetch all sources
-    fmp_senate = fetch_chamber_trades("senate")
-    fmp_house  = fetch_chamber_trades("house")
-    sw_senate  = fetch_senate_watcher()
+    # Fetch both chambers
+    if legacy_key:
+        fmp_senate = fetch_chamber_trades("senate")
+        fmp_house  = fetch_chamber_trades("house")
+    else:
+        fmp_senate = fetch_chamber_trades("senate", api_key=key, max_pages=page_limit)
+        fmp_house  = fetch_chamber_trades("house", api_key=key, max_pages=page_limit)
 
-    all_raw = fmp_senate + fmp_house + sw_senate
+    all_raw = fmp_senate + fmp_house
     print(f"\n[fmp] Total raw records: {len(all_raw)}")
 
-    # Parse — FMP records already parsed by existing parse_trades()
     # Legacy file output keeps fab7188 fields; database collection keeps the
     # provider transaction identity and provenance via the default parsers.
-    fmp_trades = parse_trades(fmp_senate + fmp_house, preserve_provenance=False)
+    fmp_trades = parse_trades(all_raw, preserve_provenance=False)
 
-    # Parse Senate Watcher records separately
-    sw_trades = []
-    skipped = 0
-    for item in sw_senate:
-        parsed = parse_watcher_trade(item, preserve_provenance=False)
-        if parsed:
-            sw_trades.append(parsed)
-        else:
-            skipped += 1
-    print(f"[fmp] Senate Watcher: {len(sw_trades)} valid, {skipped} skipped (no ticker)")
-
-    # Combine and deduplicate
-    all_trades = fmp_trades + sw_trades
-    trades = deduplicate(all_trades)
+    trades = deduplicate(fmp_trades)
 
     # Filter to recent 2 years only
     trades = filter_recent(trades, years=2)

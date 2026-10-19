@@ -19,9 +19,9 @@ reads all four back and ranks them.
 
 | Signal | Source | Script | Output File | Key needed |
 |---|---|---|---|---|
-| **Congress trades** | Financial Modeling Prep / Senate Stock Watcher | `fetchers/fmp.py` | `trades_congress.json` | `FMP_API_KEY` |
+| **Congress trades** | Financial Modeling Prep | `fetchers/fmp.py` | `trades_congress.json` | `FMP_API_KEY` |
 | **ARK holdings** | arkfunds.io API | `fetchers/ark.py` | `ark_holdings.json` | — |
-| **Insider trades** | SecuritiesDB (SEC Form 4) | `fetchers/insider.py` | `trades_insider.json` | `FINNHUB_API_KEY` |
+| **Insider trades** | Finnhub (SEC Form 4) | `fetchers/insider.py` | `trades_insider.json` | `FINNHUB_API_KEY` |
 | **Short interest** | Nasdaq public quote API | `fetchers/short_interest.py` | `short_interest.json` | — |
 | **Aggregation** | Internal | `consensus.py` | `consensus_watchlist.json` | `FMP_API_KEY` |
 

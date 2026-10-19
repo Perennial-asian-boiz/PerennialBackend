@@ -1,8 +1,8 @@
 """
 Database configuration.
 
-DATABASE_URL comes from the process environment first, then from
-development/backend/.env (read without modifying os.environ). Error messages
+DATABASE_URL comes from the process environment first. Local development may
+opt into development/backend/.env with PERENNIAL_ENV=local. Error messages
 are fixed text that never include any part of the URL.
 """
 
@@ -49,9 +49,13 @@ def get_database_url(
     environ: Optional[Mapping[str, str]] = None, env_path: Optional[Path] = None
 ) -> URL:
     environ = os.environ if environ is None else environ
-    env_path = ENV_PATH if env_path is None else env_path
+    env_path = (
+        (ENV_PATH if environ.get("PERENNIAL_ENV") == "local" else None)
+        if env_path is None
+        else env_path
+    )
     raw = environ.get("DATABASE_URL")
-    if not raw and env_path.is_file():
+    if not raw and env_path is not None and env_path.is_file():
         raw = dotenv_values(env_path).get("DATABASE_URL")
     url = parse_database_url(raw)
     if url.password == "[YOUR-PASSWORD]":

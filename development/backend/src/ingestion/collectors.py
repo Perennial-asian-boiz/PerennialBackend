@@ -63,6 +63,7 @@ import requests
 from src.ingestion.files import read_json_bounded
 from src.ingestion.importer import CollectionOutcome
 from src.services.consensus_watchlist.paths import PACKAGE_DIR
+from src.settings import Settings
 
 FETCHERS_DIR = PACKAGE_DIR / "fetchers"
 MAX_RESPONSE_BYTES = 50 * 1024 * 1024
@@ -246,6 +247,7 @@ class _Tracker:
     completed: int = 0
     failures: List[Dict[str, str]] = field(default_factory=list)
     failure_count: int = 0
+    extra_counts: Dict[str, int] = field(default_factory=dict)
 
     def ok(self) -> None:
         self.attempted += 1
@@ -270,6 +272,7 @@ class _Tracker:
                 planned=self.planned,
                 not_attempted=max(0, self.planned - self.attempted),
             )
+        counts.update(self.extra_counts)
         return counts
 
     def outcome(
@@ -471,7 +474,7 @@ def collect_ark(
     )
 
 
-# ── Congress (FMP + Senate Stock Watcher) ────────────────
+# ── Congress (FMP) ───────────────────────────────────────
 
 
 def _string_fields_ok(item: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
@@ -491,36 +494,35 @@ _FMP_KEYS = (
     "district",
     "link",
 )
-_WATCHER_KEYS = (
-    "ticker",
-    "transaction_date",
-    "senator",
-    "asset_description",
-    "asset_type",
-    "type",
-    "amount",
-    "ptr_link",
-)
 
 
 def collect_congress(
     session: Optional[requests.Session] = None,
     api_key: Optional[str] = None,
     sleep: Callable[[float], None] = time.sleep,
+    *,
+    settings: Optional[Settings] = None,
 ) -> CollectionOutcome:
     fmp = _fetcher("fmp")
-    key = api_key if api_key is not None else fmp.FMP_API_KEY
-    if not key or key == "YOUR_FMP_KEY_HERE":
+    if api_key is not None:
+        key = api_key
+    elif settings is not None and settings.fmp_api_key is not None:
+        key = settings.fmp_api_key.get_secret_value()
+    else:
+        key = fmp.FMP_API_KEY
+    if not key or key.lower().startswith("your_"):
         return CollectionOutcome.failure(
             "congress_trades", "live", "missing_credential"
         )
+    page_limit = settings.fmp_max_pages if settings is not None else fmp.MAX_PAGES
     session = session or requests.Session()
-    # Initially one request per chamber plus Watcher. Full pages discover
-    # further required units; terminated pagination is not unattempted work.
-    tracker = _Tracker("Congress requests", planned=3)
+    # Initially one request per chamber. Full pages discover further required
+    # units; terminated pagination is not unattempted work.
+    page_counts = {"senate_pages_fetched": 0, "house_pages_fetched": 0}
+    tracker = _Tracker("Congress requests", planned=2, extra_counts=page_counts)
     raw_fmp: List[Dict[str, Any]] = []
     for chamber in ("senate", "house"):
-        for page in range(fmp.MAX_PAGES):
+        for page in range(page_limit):
             unit = f"{chamber} page {page}"
             resp = _get_json(
                 session,
@@ -540,7 +542,8 @@ def collect_congress(
             if len(items) > 20:
                 tracker.fail(unit, "malformed_response")
                 return tracker.outcome("congress_trades", [])
-            if len(items) == 20 and page == fmp.MAX_PAGES - 1:
+            page_counts[f"{chamber}_pages_fetched"] += 1
+            if len(items) == 20 and page == page_limit - 1:
                 tracker.fail(unit, "pagination_exhausted")
                 return tracker.outcome("congress_trades", [])
             tracker.ok()
@@ -551,22 +554,8 @@ def collect_congress(
                 break
             if tracker.planned is not None:
                 tracker.planned += 1
-    resp = _get_json(session, fmp.SENATE_WATCHER_URL, timeout=30, sleep=sleep)
-    watcher: List[Dict[str, Any]] = []
-    if not resp.ok:
-        tracker.fail("senate watcher", resp.code)
-    elif not isinstance(resp.data, list) or not all(
-        isinstance(i, dict) and _string_fields_ok(i, _WATCHER_KEYS) for i in resp.data
-    ):
-        tracker.fail("senate watcher", "malformed_response")
-    else:
-        watcher = resp.data
-        tracker.ok()
-    if tracker.failure_count:
-        return tracker.outcome("congress_trades", [])
     try:
         trades = fmp.parse_trades(raw_fmp)
-        trades += [t for t in (fmp.parse_watcher_trade(i) for i in watcher) if t]
         # filter_recent silently drops rows whose date does not parse, so a
         # malformed required date must fail the collection before it runs.
         if not all(_is_iso_date(t.get("transaction_date")) for t in trades):
