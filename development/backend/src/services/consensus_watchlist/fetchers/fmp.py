@@ -35,14 +35,7 @@ from pathlib import Path
 # Importing the fetcher never reads a key or a dotenv file.
 FMP_API_KEY: str | None = None
 BASE_URL = "https://financialmodelingprep.com/stable"
-MAX_PAGES = 3  # 20 trades per page = ~60 trades per chamber
-
-# Senate Stock Watcher — its newest trade is 2020-12-02, so the 2-year filter
-# drops every record. run() no longer downloads it. The URL and
-# parse_watcher_trade stay because src/ingestion/collectors.py still uses them.
-SENATE_WATCHER_URL = (
-    "https://raw.githubusercontent.com/timothycarambat/"
-    "senate-stock-watcher-data/master/aggregate/all_transactions.json")
+MAX_PAGES = 50  # Safety cap per chamber; full final page is not a complete result.
 
 
 # ─────────────────────────────────────────────────────────
@@ -86,18 +79,21 @@ def fetch_chamber_trades(
             resp.raise_for_status()
             data = resp.json()
 
-            if not data:
-                break
-
             for item in data:
                 item["_chamber"] = chamber.capitalize()
 
             all_trades.extend(data)
-            print(f"[fmp] {chamber.capitalize()} page {page + 1} — {len(data)} trades")
+            if data:
+                print(f"[fmp] {chamber.capitalize()} page {page + 1} — {len(data)} trades")
 
         except Exception as e:
             print(f"[fmp] ❌ {chamber} page {page} error: {e}")
             break
+
+        if len(data) < 20:
+            break
+        if page == page_limit - 1:
+            raise RuntimeError("FMP pagination exhausted")
 
     return all_trades
 
@@ -166,46 +162,6 @@ def parse_trades(raw_data: list, *, preserve_provenance: bool = True):
             trades[-1].update(data_source="fmp", provider_record_id=_provider_record_id(item))
 
     return trades
-
-def parse_watcher_trade(item: dict, *, preserve_provenance: bool = True):
-    """
-    Parses Senate Stock Watcher format into standard Perennial format.
-    Different from FMP — uses MM/DD/YYYY dates and different field names.
-    """
-    ticker = (item.get("ticker") or "").strip().upper()
-
-    # Watcher uses "--" for unknown tickers
-    if not ticker or ticker == "--":
-        return None
-
-    # Convert MM/DD/YYYY to YYYY-MM-DD
-    trade_date_str = ""
-    raw_date = item.get("transaction_date") or ""
-    try:
-        parsed = datetime.strptime(raw_date, "%m/%d/%Y")
-        trade_date_str = parsed.strftime("%Y-%m-%d")
-    except ValueError:
-        trade_date_str = raw_date
-
-    trade = {
-        "politician_name":   item.get("senator", "").strip(),
-        "chamber":           "Senate",
-        "ticker":            ticker,
-        "asset_description": item.get("asset_description", "").strip(),
-        "asset_type":        item.get("asset_type", "").strip(),
-        "trade_type":        item.get("type", "").strip(),
-        "amount_range":      item.get("amount", "").strip(),
-        "transaction_date":  trade_date_str,
-        "disclosure_date":   "",
-        "days_to_disclose":  None,
-        "district":          "",
-        "source_link":       item.get("ptr_link", "").strip(),
-        "data_source":       "senate_watcher",
-        "fetched_at":        datetime.now(timezone.utc).isoformat(),
-    }
-    if preserve_provenance:
-        trade["provider_record_id"] = _provider_record_id(item)
-    return trade
 
 def deduplicate(trades: list):
     """

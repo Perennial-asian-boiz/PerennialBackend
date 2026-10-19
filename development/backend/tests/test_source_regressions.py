@@ -525,7 +525,7 @@ def test_fail_fast_ark_stops_after_failed_fund_without_delay():
     )
 
 
-def test_fail_fast_congress_stops_before_other_chamber_and_watcher():
+def test_fail_fast_congress_stops_before_other_chamber():
     session = FakeSession(lambda u, p: FakeResponse(status=401))
     sleeps = []
     result = collectors.collect_congress(
@@ -737,7 +737,7 @@ def _golden_congress_session(golden):
             return FakeResponse(body=inputs["fmp_senate"])
         if url.endswith("house-latest"):
             return FakeResponse(body=inputs["fmp_house"])
-        return FakeResponse(body=inputs["senate_watcher"])
+        pytest.fail(f"unexpected request: {url}")
 
     return FakeSession(handler)
 
@@ -754,16 +754,19 @@ def test_database_congress_golden_hash_and_observations_stay_unchanged(
         _golden_congress_session(legacy_golden), api_key="synthetic", sleep=NO_SLEEP
     )
     assert result.succeeded
-    duplicate = [r for r in result.records if r["ticker"] == "ZZAA"]
-    assert len(duplicate) == 2 and {r["data_source"] for r in duplicate} == {
-        "fmp",
-        "senate_watcher",
-    }
+    # Senate Stock Watcher was removed as a feature, so the fab7188 golden batch
+    # minus its Watcher row is exactly what the FMP-only collector must produce.
+    expected = [
+        r
+        for r in legacy_golden["database"]["records"]
+        if r["data_source"] != "senate_watcher"
+    ]
+    assert len(expected) == len(legacy_golden["database"]["records"]) - 1
     batch = canonicalize(
         "congress_trades", validate_records("congress_trades", result.records)
     )
-    assert batch.content_hash == legacy_golden["database"]["content_hash"]
-    assert batch.payload["records"] == legacy_golden["database"]["records"]
+    assert batch.payload["records"] == expected
+    assert batch.content_hash != legacy_golden["database"]["content_hash"]
 
 
 def test_database_collectors_cannot_reach_legacy_dedup_or_lenient_parser(
@@ -780,7 +783,7 @@ def test_database_collectors_cannot_reach_legacy_dedup_or_lenient_parser(
     congress = collectors.collect_congress(
         _golden_congress_session(legacy_golden), api_key="synthetic", sleep=NO_SLEEP
     )
-    assert congress.succeeded and len(congress.records) == 3
+    assert congress.succeeded and len(congress.records) == 2
     malformed = legacy_golden["inputs"]["short_interest"]["payload"]
     result = collectors.collect_short_interest(
         FakeSession(lambda u, p: FakeResponse(body=malformed)),

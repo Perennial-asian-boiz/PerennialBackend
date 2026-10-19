@@ -4,7 +4,7 @@ Only this module changes the production pointer. Importing/backfilling remains
 independent. Defaults are deliberately visible policy, configurable by the caller.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence, cast
 
@@ -15,6 +15,7 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from src.db import models as m
 from src.db.queries import batch_rows
 from src.pipeline.ranking import DEFAULT_CONFIG, VERSION, calculate, candidate_symbols
+from src.settings import QualityThreshold, _quality_defaults
 
 MAX_AGE = {
     "congress_trades": timedelta(days=3),
@@ -26,6 +27,119 @@ MAX_AGE = {
 
 class PublicationError(ValueError):
     """A fixed, safe publication eligibility error."""
+
+    code = "publication_ineligible"
+
+
+class PublicationQualityError(PublicationError):
+    """A selected batch failed one or more fixed quality checks."""
+
+    code = "publication_quality_failed"
+
+    def __init__(self, checks: Sequence[str]):
+        self.checks = tuple(sorted(checks))
+        super().__init__("publication quality checks failed: " + ", ".join(self.checks))
+
+
+def _null_share(rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> float:
+    if not rows or not fields:
+        return 0.0
+    return sum(row.get(field) is None for row in rows for field in fields) / (
+        len(rows) * len(fields)
+    )
+
+
+def _quality_failures(
+    previous: Sequence[Mapping[str, Any]],
+    candidate: Sequence[Mapping[str, Any]],
+    previous_as_of: date | None,
+    candidate_as_of: date | None,
+    threshold: QualityThreshold,
+) -> list[str]:
+    """Return fixed check names; exact thresholds pass at their boundary."""
+    issues = []
+    before, after = len(previous), len(candidate)
+    if (before == 0 and after > 0) or (
+        before > 0
+        and (
+            after < before * threshold.min_count_ratio
+            or after > before * threshold.max_count_ratio
+        )
+    ):
+        issues.append("row_count")
+    if _null_share(candidate, threshold.null_fields) > (
+        _null_share(previous, threshold.null_fields) + threshold.null_share_margin
+    ):
+        issues.append("null_share")
+    if candidate_as_of is None or (
+        previous_as_of is not None
+        and (
+            candidate_as_of < previous_as_of
+            or (candidate_as_of == previous_as_of and not threshold.allow_equal_as_of)
+        )
+    ):
+        issues.append("source_as_of")
+    return issues
+
+
+def _quality_audit(
+    conn: Connection,
+    runs: Mapping[str, RowMapping],
+    batches: Mapping[str, int],
+    rows: Mapping[str, list[dict[str, Any]]],
+    thresholds: Mapping[str, QualityThreshold],
+) -> tuple[dict[str, Any], list[str]]:
+    audit: dict[str, Any] = {}
+    failed: list[str] = []
+    for source in m.SOURCES:
+        candidate = runs[source]
+        previous = (
+            conn.execute(
+                select(m.source_batches.c.id, m.source_batches.c.source_as_of)
+                .join(
+                    m.ingestion_runs,
+                    m.ingestion_runs.c.batch_id == m.source_batches.c.id,
+                )
+                .where(
+                    m.ingestion_runs.c.source == source,
+                    m.ingestion_runs.c.status == "succeeded",
+                    m.ingestion_runs.c.collection_mode == "live",
+                    m.ingestion_runs.c.id != candidate["id"],
+                    m.ingestion_runs.c.finished_at <= candidate["finished_at"],
+                    m.source_batches.c.id != batches[source],
+                )
+                .order_by(
+                    m.ingestion_runs.c.finished_at.desc(), m.ingestion_runs.c.id.desc()
+                )
+                .limit(1)
+            )
+            .mappings()
+            .one_or_none()
+        )
+        if previous is None:
+            audit[source] = {"status": "no_baseline", "batch_id": batches[source]}
+            continue
+        earlier_rows = batch_rows(conn, source, previous["id"])
+        candidate_as_of = conn.execute(
+            select(m.source_batches.c.source_as_of).where(
+                m.source_batches.c.id == batches[source]
+            )
+        ).scalar_one()
+        issues = _quality_failures(
+            earlier_rows,
+            rows[source],
+            previous["source_as_of"],
+            candidate_as_of,
+            thresholds[source],
+        )
+        audit[source] = {
+            "status": "failed" if issues else "passed",
+            "batch_id": batches[source],
+            "baseline_batch_id": previous["id"],
+            "failed_checks": issues,
+        }
+        failed.extend(f"{source}:{issue}" for issue in issues)
+    return audit, sorted(failed)
 
 
 def _time_ok(value: Any, now: datetime, max_age: timedelta) -> bool:
@@ -160,17 +274,39 @@ def publish(
     observations: Mapping[str, dict[str, Any]],
     *,
     max_age: Mapping[str, timedelta] | None = None,
+    quality_thresholds: Mapping[str, QualityThreshold] | None = None,
+    override_reason: str | None = None,
+    override_actor: str | None = None,
 ) -> int:
     max_age = dict(MAX_AGE if max_age is None else max_age)
     if set(max_age) != set(m.SOURCES) or any(
         v.total_seconds() <= 0 for v in max_age.values()
     ):
         raise ValueError("freshness policy must cover every source with positive ages")
+    quality_thresholds = (
+        _quality_defaults() if quality_thresholds is None else quality_thresholds
+    )
+    if set(quality_thresholds) != set(m.SOURCES):
+        raise ValueError("quality policy must cover every source")
+    if override_reason is not None:
+        override_reason = override_reason.strip()
+        override_actor = (override_actor or "").strip()
+        if not override_reason or len(override_reason) > 500:
+            raise ValueError("override reason must be 1 to 500 characters")
+        if not override_actor or len(override_actor) > 200:
+            raise ValueError("override actor must be 1 to 200 characters")
+    elif override_actor is not None:
+        raise ValueError("override actor requires a reason")
     now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         # Serialize pointer changes and compare against the actual prior publication.
         conn.execute(text("SELECT pg_advisory_xact_lock(170099)"))
         runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age)
+        source_audit, failed_checks = _quality_audit(
+            conn, runs, batches, rows, quality_thresholds
+        )
+        if failed_checks and override_reason is None:
+            raise PublicationQualityError(failed_checks)
         prior = conn.execute(
             select(m.current_publication.c.publication_id).where(
                 m.current_publication.c.channel == "production"
@@ -201,20 +337,32 @@ def publish(
             for old in previous:
                 if runs[old.source]["collected_at"] < old.collected_at:
                     raise PublicationError("publication would regress collection time")
-                if old.source_as_of and (
-                    as_of[old.source] is None
-                    or as_of[old.source] < old.source_as_of.isoformat()
+                if (
+                    override_reason is None
+                    and old.source_as_of
+                    and (
+                        as_of[old.source] is None
+                        or as_of[old.source] < old.source_as_of.isoformat()
+                    )
                 ):
                     raise PublicationError("publication would regress observation date")
         symbols = candidate_symbols(rows)
         cap_data = _caps(observations, symbols, now)
+        quality_audit: dict[str, Any] = {"sources": source_audit}
         config = {
             **DEFAULT_CONFIG,
             "source_as_of": as_of,
             "freshness_seconds": {
                 s: int(age.total_seconds()) for s, age in max_age.items()
             },
+            "quality_audit": quality_audit,
         }
+        if override_reason is not None:
+            quality_audit["override"] = {
+                "actor": override_actor,
+                "reason": override_reason,
+                "checks": failed_checks,
+            }
         output = calculate(
             rows, {s: o["value"] for s, o in cap_data.items()}, now, config
         )

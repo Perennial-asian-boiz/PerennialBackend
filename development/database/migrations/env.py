@@ -24,7 +24,7 @@ def run_migrations_online() -> None:
     # Fixed-text boundary for configuration/connection problems: no URL,
     # no driver message (which can echo host/user details).
     try:
-        engine = make_engine()
+        engine = make_engine(workload="migrate")
     except DatabaseConfigError as exc:
         raise SystemExit(f"error: {exc}") from None
     except Exception as exc:
