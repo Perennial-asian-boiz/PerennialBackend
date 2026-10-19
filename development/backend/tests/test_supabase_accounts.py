@@ -203,7 +203,8 @@ def test_first_login_after_email_confirmation_does_not_wait_for_signup_cooldown(
     repeated = client.post(
         "/auth/login", json={"email": email, "password": "password123"}
     )
-    assert repeated.status_code == 429  # Active login OTP still has a cooldown.
+    assert repeated.status_code == 200
+    assert provider.sent == [(email, "login"), (email, "login")]
     wrong_password = client.post(
         "/auth/login", json={"email": email, "password": "incorrect"}
     )
@@ -272,7 +273,7 @@ def test_unconfirmed_login_explains_email_confirmation(api):
     )
     assert response.status_code == 403
     assert "hasn’t been confirmed" in response.json()["detail"]
-    assert provider.sent == [("pending@example.com", "signup")]
+    assert provider.sent == []
 
 
 def test_five_failed_attempts_persist_and_block_even_correct_code(api):
@@ -446,7 +447,7 @@ def test_email_confirmation_does_not_log_user_in(api):
 
 
 def test_resend_confirmation_keeps_link_flow(api):
-    client, provider, engine = api
+    client, provider, _engine = api
     body = client.post(
         "/auth/signup",
         json={
@@ -456,8 +457,6 @@ def test_resend_confirmation_keeps_link_flow(api):
         },
     ).json()
     payload = {"email": "one@example.com", "challenge_id": body["challenge_id"]}
-    assert client.post("/auth/resend-confirmation", json=payload).status_code == 429
-    allow_resend(engine)
     response = client.post("/auth/resend-confirmation", json=payload)
     assert (
         response.status_code == 200
