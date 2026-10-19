@@ -24,8 +24,7 @@ from src.db.session import make_engine
 router = APIRouter()
 OTP_MINUTES = 15
 MAX_ATTEMPTS = 5
-RESEND_SECONDS = 60
-MAX_EMAILS_PER_HOUR = 5
+MAX_EMAILS_PER_HOUR = 60
 
 
 def now():
@@ -96,7 +95,7 @@ class ChallengeResponse(BaseModel):
     challenge_id: str
     flow: Literal["signup", "login", "recovery"]
     verification_required: bool = True
-    resend_after_seconds: int = RESEND_SECONDS
+    resend_after_seconds: int = 0
     verification_method: Literal["email_link", "email_otp"] = "email_otp"
 
 
@@ -204,7 +203,7 @@ def lock_email(connection, email):
     )
 
 
-def check_email_limit(connection, email, flow):
+def check_email_limit(connection, email):
     rows = (
         connection.execute(
             select(tables.auth_challenges).where(
@@ -215,18 +214,8 @@ def check_email_limit(connection, email, flow):
         .mappings()
         .all()
     )
-    # The cooldown applies to another email for the same active challenge.
-    # A confirmed signup must not delay the user's first login OTP. Keep the
-    # hourly cap across all flows so switching flows cannot bypass it.
-    active = [row for row in rows if row.flow == flow and row.consumed_at is None]
-    if (
-        active
-        and (now() - max(row.last_sent_at for row in active)).total_seconds()
-        < RESEND_SECONDS
-    ):
-        raise HTTPException(
-            429, "Please wait 60 seconds before requesting another code."
-        )
+    # Do not add an app-level resend cooldown. Supabase may still enforce its
+    # own provider-level email rate limits; keep an hourly app cap as well.
     if sum(row.send_count for row in rows) >= MAX_EMAILS_PER_HOUR:
         raise HTTPException(
             429, "Too many verification emails. Please try again later."
@@ -409,7 +398,7 @@ def signup(payload: SignupRequest, engine: EngineDep, provider: ProviderDep):
             raise HTTPException(
                 409, "This email is already registered. Please sign in instead."
             )
-        check_email_limit(connection, payload.email, "signup")
+        check_email_limit(connection, payload.email)
         provider.signup(payload.email, payload.password, payload.full_name)
         if not email_is_registered(connection, payload.email):
             # Detect wrong-project configuration or a malformed provider success.
@@ -450,11 +439,13 @@ def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
         try:
             provider.check_password(payload.email, payload.password)
         except AuthProviderError as error:
-            # Supabase checks the password BEFORE reporting email_not_confirmed.
-            if error.code != "email_not_confirmed":
-                raise
-            flow = "signup"
-        check_email_limit(connection, payload.email, flow)
+            if error.code == "email_not_confirmed":
+                raise HTTPException(
+                    403,
+                    "Your account hasn’t been confirmed yet. Open the confirmation link sent to your email, then sign in.",
+                ) from None
+            raise
+        check_email_limit(connection, payload.email)
         provider.send_code(payload.email, flow)
         return start_challenge(connection, payload.email, flow)
 
@@ -468,7 +459,7 @@ def forgot_password(payload: EmailRequest, engine: EngineDep, provider: Provider
                 404,
                 "No account has been created with this email address yet. Please create an account first.",
             )
-        check_email_limit(connection, payload.email, "recovery")
+        check_email_limit(connection, payload.email)
         provider.send_code(payload.email, "recovery")
         return start_challenge(connection, payload.email, "recovery")
 
@@ -533,7 +524,7 @@ def resend_otp(payload: ChallengeRequest, engine: EngineDep, provider: ProviderD
         row = pending_challenge(connection, payload)
         if row.flow != "login":
             raise HTTPException(400, "Request a new email link to continue.")
-        check_email_limit(connection, payload.email, row.flow)
+        check_email_limit(connection, payload.email)
         provider.send_code(payload.email, row.flow)
         connection.execute(
             update(tables.auth_challenges)
@@ -555,7 +546,7 @@ def resend_confirmation(
         row = pending_challenge(connection, payload)
         if row.flow != "signup":
             raise HTTPException(400, "An email confirmation request is required.")
-        check_email_limit(connection, payload.email, "signup")
+        check_email_limit(connection, payload.email)
         provider.send_code(payload.email, "signup")
         connection.execute(
             update(tables.auth_challenges)

@@ -264,13 +264,14 @@ def test_existing_user_still_needs_otp_then_keeps_onboarding(api):
     assert client.post("/auth/verify-otp", json=payload).status_code == 400
 
 
-def test_unconfirmed_login_resumes_signup(api):
+def test_unconfirmed_login_explains_email_confirmation(api):
     client, provider, _ = api
     provider.signup("pending@example.com", "password123", "Pending")
     response = client.post(
         "/auth/login", json={"email": "pending@example.com", "password": "password123"}
     )
-    assert response.status_code == 200 and response.json()["flow"] == "signup"
+    assert response.status_code == 403
+    assert "hasn’t been confirmed" in response.json()["detail"]
     assert provider.sent == [("pending@example.com", "signup")]
 
 
@@ -307,7 +308,7 @@ def test_five_failed_attempts_persist_and_block_even_correct_code(api):
     assert client.post("/auth/verify-otp", json=payload).status_code == 400
 
 
-def test_resend_cooldown_hourly_limit_and_expiry(api):
+def test_resend_has_no_cooldown_but_hourly_limit_and_expiry(api):
     client, provider, engine = api
     provider.signup("one@example.com", "password123", "One")
     provider.users["one@example.com"]["email_confirmed_at"] = "2026-10-18T00:00:00Z"
@@ -315,8 +316,8 @@ def test_resend_cooldown_hourly_limit_and_expiry(api):
         "/auth/login", json={"email": "one@example.com", "password": "password123"}
     ).json()
     payload = {"email": "one@example.com", "challenge_id": challenge["challenge_id"]}
-    assert client.post("/auth/resend-otp", json=payload).status_code == 429
-    for _ in range(4):
+    assert client.post("/auth/resend-otp", json=payload).status_code == 200
+    for _ in range(accounts.MAX_EMAILS_PER_HOUR - 2):
         allow_resend(engine)
         assert client.post("/auth/resend-otp", json=payload).status_code == 200
     allow_resend(engine)
