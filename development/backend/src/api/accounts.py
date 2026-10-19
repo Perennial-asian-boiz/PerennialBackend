@@ -464,7 +464,10 @@ def forgot_password(payload: EmailRequest, engine: EngineDep, provider: Provider
     with engine.begin() as connection:
         lock_email(connection, payload.email)
         check_email_limit(connection, payload.email, "recovery")
-        provider.send_code(payload.email, "recovery")
+        # Keep the public response indistinguishable for unknown addresses, but
+        # only ask Supabase to send a reset link for an account that exists.
+        if email_is_registered(connection, payload.email):
+            provider.send_code(payload.email, "recovery")
         return start_challenge(connection, payload.email, "recovery")
 
 
