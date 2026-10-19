@@ -153,9 +153,8 @@ def congress_session(fail_with=None):
     def handler(url, params):
         if fail_with and "apikey" in params:
             return fail_with(url, params)
-        if url.endswith("-latest"):
-            return FakeResponse(body=[fmp_item()] if params["page"] == 0 else [])
-        return FakeResponse(body=[])  # Senate Stock Watcher
+        assert url.endswith("-latest"), "only the two FMP chamber endpoints"
+        return FakeResponse(body=[fmp_item()] if params["page"] == 0 else [])
 
     return FakeSession(handler)
 
@@ -198,22 +197,29 @@ def test_congress_402_truncation_is_failure():
     assert outcome.error_code == "partial_collection"
 
 
-def test_congress_malformed_watcher_date_fails_before_filter():
+def test_congress_malformed_date_fails_before_filter():
     def handler(url, params):
-        if url.endswith("-latest"):
-            return FakeResponse(body=[])
-        good = {
-            "ticker": "ZZAA",
-            "senator": "Synthetic",
-            "type": "Purchase",
-            "transaction_date": "09/01/2026",
-        }
-        return FakeResponse(body=[dict(good, transaction_date="2026/09/01"), good])
+        if url.endswith("senate-latest") and params["page"] == 0:
+            bad = dict(fmp_item(), transactionDate="2026/09/01")
+            return FakeResponse(body=[bad, fmp_item(symbol="ZZBB")])
+        return FakeResponse(body=[])
 
     outcome = collectors.collect_congress(
         FakeSession(handler), api_key="k", sleep=NO_SLEEP
     )
     assert not outcome.succeeded and outcome.error_code == "parse_error"
+
+
+def test_congress_requests_only_fmp_chambers():
+    """Senate Stock Watcher was removed as a feature; nothing else is downloaded."""
+    session = congress_session()
+    outcome = collectors.collect_congress(
+        session, api_key="synthetic-key", sleep=NO_SLEEP
+    )
+    assert outcome.succeeded
+    assert outcome.diagnostics["planned"] == 2
+    assert all(call[0].endswith("-latest") for call in session.calls)
+    assert all(r["data_source"] == "fmp" for r in outcome.records)
 
 
 def test_congress_missing_key():
