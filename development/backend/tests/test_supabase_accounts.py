@@ -124,7 +124,7 @@ def api(engine, monkeypatch):
 
 
 def register(api, email="one@example.com"):
-    client, provider, engine = api
+    client, provider, _engine = api
     response = client.post(
         "/auth/signup",
         json={"email": email, "full_name": "Test Person", "password": "password123"},
@@ -138,7 +138,6 @@ def register(api, email="one@example.com"):
     )
     assert confirmed.status_code == 200, confirmed.text
     assert "access_token" not in confirmed.json()
-    allow_resend(engine)
     response = client.post(
         "/auth/login", json={"email": email, "password": "password123"}
     )
@@ -154,15 +153,6 @@ def register(api, email="one@example.com"):
     assert verified.status_code == 200, verified.text
     body = verified.json()
     return body, {"Authorization": "Bearer " + body["access_token"]}
-
-
-def allow_resend(engine):
-    with engine.begin() as conn:
-        conn.execute(
-            update(tables.auth_challenges).values(
-                last_sent_at=accounts.now() - timedelta(seconds=61)
-            )
-        )
 
 
 def test_signup_link_then_login_otp_persistence_and_private_headers(api):
@@ -212,9 +202,8 @@ def test_first_login_after_email_confirmation_does_not_wait_for_signup_cooldown(
 
 
 def test_wrong_login_and_unapproved_native_tokens_denied(api):
-    client, provider, engine = api
+    client, provider, _engine = api
     body, _ = register(api)
-    allow_resend(engine)
     assert (
         client.post(
             "/auth/login",
@@ -245,12 +234,11 @@ def test_wrong_login_and_unapproved_native_tokens_denied(api):
 
 
 def test_existing_user_still_needs_otp_then_keeps_onboarding(api):
-    client, _, engine = api
+    client, _, _engine = api
     body, headers = register(api)
     client.put(
         "/me/preferences", headers=headers, json={"sectors": [], "risk_level": None}
     ).raise_for_status()
-    allow_resend(engine)
     challenge = client.post(
         "/auth/login", json={"email": body["user"]["email"], "password": "password123"}
     ).json()
@@ -279,7 +267,6 @@ def test_unconfirmed_login_explains_email_confirmation(api):
 def test_five_failed_attempts_persist_and_block_even_correct_code(api):
     client, _, engine = api
     register(api)
-    allow_resend(engine)
     challenge = client.post(
         "/auth/login",
         json={
@@ -319,9 +306,7 @@ def test_resend_has_no_cooldown_but_hourly_limit_and_expiry(api):
     payload = {"email": "one@example.com", "challenge_id": challenge["challenge_id"]}
     assert client.post("/auth/resend-otp", json=payload).status_code == 200
     for _ in range(accounts.MAX_EMAILS_PER_HOUR - 2):
-        allow_resend(engine)
         assert client.post("/auth/resend-otp", json=payload).status_code == 200
-    allow_resend(engine)
     assert client.post("/auth/resend-otp", json=payload).status_code == 429
     with engine.begin() as conn:
         conn.execute(
@@ -338,7 +323,6 @@ def test_resend_has_no_cooldown_but_hourly_limit_and_expiry(api):
 def test_provider_outage_does_not_consume_attempts(api):
     client, provider, engine = api
     register(api)
-    allow_resend(engine)
     challenge = client.post(
         "/auth/login",
         json={
@@ -562,7 +546,6 @@ def test_two_accounts_preferences_watchlists_settings_are_separate(api):
 def test_revocation_blocks_access_and_refresh(api, action):
     client, provider, engine = api
     body, headers = register(api)
-    allow_resend(engine)
     pending = client.post(
         "/auth/login", json={"email": body["user"]["email"], "password": "password123"}
     ).json()
@@ -613,7 +596,6 @@ def test_recovery_session_cannot_read_data_and_resets_password(api):
         ).status_code
         == 403
     )
-    allow_resend(engine)
     challenge = client.post(
         "/auth/forgot-password", json={"email": body["user"]["email"]}
     ).json()
