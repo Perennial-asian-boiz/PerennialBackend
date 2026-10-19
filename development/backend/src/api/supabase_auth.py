@@ -223,7 +223,9 @@ class SupabaseAuth:
                 {"email": email, "type": "signup"},
             )
         if flow == "recovery":
-            return self.request("POST", "recover", {"email": email})
+            return self.request(
+                "POST", self.confirmation_path("recover"), {"email": email}
+            )
         return self.request("POST", "otp", {"email": email, "create_user": False})
 
     def verify_code(self, email, code, flow):
@@ -289,5 +291,34 @@ class SupabaseAuth:
             ):
                 raise ValueError()
             return user, UUID(claims["session_id"])
+        except (KeyError, ValueError, TypeError, AttributeError):
+            raise AuthProviderError(401) from None
+
+    def recovery_identity(self, token):
+        # /user validation in identity() establishes the JWT's issuer and
+        # signature before we inspect its signed authentication method.
+        user, session_id = self.identity(token)
+        try:
+            part = token.split(".")[1]
+            claims = json.loads(
+                base64.b64decode(
+                    part + "=" * (-len(part) % 4), altchars=b"-_", validate=True
+                )
+            )
+            timestamps = [
+                entry.get("timestamp")
+                for entry in claims.get("amr", [])
+                if isinstance(entry, dict) and entry.get("method") == "recovery"
+            ]
+            valid = [
+                stamp for stamp in timestamps
+                if isinstance(stamp, (int, float))
+                and not isinstance(stamp, bool)
+                and math.isfinite(stamp)
+                and 0 < stamp <= time.time() + 60
+            ]
+            if not valid:
+                raise ValueError()
+            return user, session_id, max(valid)
         except (KeyError, ValueError, TypeError, AttributeError):
             raise AuthProviderError(401) from None

@@ -72,7 +72,10 @@ class FakeProvider:
             raise AuthProviderError(401)
         user = self.users[email]
         user["email_confirmed_at"] = "2026-10-18T00:00:00Z"
-        token = jwt(user["id"], uuid4())
+        token = jwt(
+            user["id"], uuid4(),
+            amr=[{"method": flow, "timestamp": int(time.time())}],
+        )
         self.tokens[token] = user
         return {"access_token": token, "refresh_token": token}
 
@@ -83,6 +86,9 @@ class FakeProvider:
         from uuid import UUID
 
         return self.tokens[token], UUID(claims["session_id"])
+
+    def recovery_identity(self, token):
+        return SupabaseAuth.recovery_identity(self, token)
 
     def refresh(self, token):
         self.identity(token)
@@ -296,9 +302,11 @@ def test_five_failed_attempts_persist_and_block_even_correct_code(api):
 
 
 def test_resend_cooldown_hourly_limit_and_expiry(api):
-    client, _, engine = api
+    client, provider, engine = api
+    provider.signup("one@example.com", "password123", "One")
+    provider.users["one@example.com"]["email_confirmed_at"] = "2026-10-18T00:00:00Z"
     challenge = client.post(
-        "/auth/forgot-password", json={"email": "one@example.com"}
+        "/auth/login", json={"email": "one@example.com", "password": "password123"}
     ).json()
     payload = {"email": "one@example.com", "challenge_id": challenge["challenge_id"]}
     assert client.post("/auth/resend-otp", json=payload).status_code == 429
@@ -591,7 +599,7 @@ def test_revocation_blocks_access_and_refresh(api, action):
 
 
 def test_recovery_session_cannot_read_data_and_resets_password(api):
-    client, _, engine = api
+    client, provider, engine = api
     body, normal = register(api)
     assert (
         client.post(
@@ -603,16 +611,23 @@ def test_recovery_session_cannot_read_data_and_resets_password(api):
     challenge = client.post(
         "/auth/forgot-password", json={"email": body["user"]["email"]}
     ).json()
-    recovery = client.post(
+    assert challenge["verification_method"] == "email_link"
+    assert client.post(
         "/auth/verify-otp",
-        json={
-            "email": body["user"]["email"],
-            "challenge_id": challenge["challenge_id"],
-            "code": "123456",
-        },
-    ).json()
-    headers = {"Authorization": "Bearer " + recovery["access_token"]}
-    assert recovery["flow"] == "recovery"
+        json={"email": body["user"]["email"], "challenge_id": challenge["challenge_id"], "code": "123456"},
+    ).status_code == 400
+    assert client.post(
+        "/auth/accept-recovery-link", json={"access_token": body["access_token"]}
+    ).status_code == 400  # An ordinary login JWT cannot approve password recovery.
+    link = provider.verify_code(body["user"]["email"], "123456", "recovery")
+    recovery = client.post(
+        "/auth/accept-recovery-link", json={"access_token": link["access_token"]}
+    )
+    assert recovery.status_code == 200 and recovery.json() == {"recovery_ready": True}
+    assert client.post(
+        "/auth/accept-recovery-link", json={"access_token": link["access_token"]}
+    ).status_code == 400  # The link is single-use in the app.
+    headers = {"Authorization": "Bearer " + link["access_token"]}
     assert client.get("/me/preferences", headers=headers).status_code == 401
     assert (
         client.post(

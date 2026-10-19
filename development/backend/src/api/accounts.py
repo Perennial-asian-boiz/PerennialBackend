@@ -132,6 +132,10 @@ class ConfirmEmailRequest(BaseModel):
     access_token: str = Field(min_length=1, max_length=16384, repr=False)
 
 
+class RecoveryLinkRequest(BaseModel):
+    access_token: str = Field(min_length=1, max_length=16384, repr=False)
+
+
 class NewPassword(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
@@ -256,7 +260,7 @@ def start_challenge(connection, email, flow):
     return ChallengeResponse(
         challenge_id=token,
         flow=flow,
-        verification_method="email_link" if flow == "signup" else "email_otp",
+        verification_method="email_otp" if flow == "login" else "email_link",
     )
 
 
@@ -464,14 +468,66 @@ def forgot_password(payload: EmailRequest, engine: EngineDep, provider: Provider
         return start_challenge(connection, payload.email, "recovery")
 
 
+@router.post("/auth/accept-recovery-link")
+def accept_recovery_link(
+    payload: RecoveryLinkRequest, engine: EngineDep, provider: ProviderDep
+):
+    try:
+        identity, session_id, recovery_at = provider.recovery_identity(
+            payload.access_token
+        )
+    except AuthProviderError as error:
+        if error.status == 401:
+            raise HTTPException(400, "This reset link is invalid or expired.") from None
+        raise
+    email = identity["email"].casefold()
+    with engine.begin() as connection:
+        lock_email(connection, email)
+        challenge = (
+            connection.execute(
+                select(tables.auth_challenges)
+                .where(
+                    tables.auth_challenges.c.email == email,
+                    tables.auth_challenges.c.flow == "recovery",
+                    tables.auth_challenges.c.consumed_at.is_(None),
+                    tables.auth_challenges.c.expires_at > now(),
+                )
+                .order_by(tables.auth_challenges.c.created_at.desc())
+                .with_for_update()
+            )
+            .mappings()
+            .first()
+        )
+        if (
+            challenge is None
+            or recovery_at < challenge.last_sent_at.timestamp() - 60
+            or connection.execute(
+                select(tables.verified_sessions.c.session_id).where(
+                    tables.verified_sessions.c.session_id == session_id
+                )
+            ).first()
+        ):
+            raise HTTPException(400, "This reset link is invalid or expired.")
+        user = sync_profile(connection, identity)
+        connection.execute(
+            insert(tables.verified_sessions).values(
+                session_id=session_id, user_id=user.id, recovery_only=True
+            )
+        )
+        connection.execute(
+            update(tables.auth_challenges)
+            .where(tables.auth_challenges.c.token_hash == challenge.token_hash)
+            .values(consumed_at=now())
+        )
+    return {"recovery_ready": True}
+
+
 @router.post("/auth/resend-otp", response_model=ChallengeResponse)
 def resend_otp(payload: ChallengeRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         row = pending_challenge(connection, payload)
-        if row.flow == "signup":
-            raise HTTPException(
-                400, "Use the email confirmation link, not a signup code."
-            )
+        if row.flow != "login":
+            raise HTTPException(400, "Request a new email link to continue.")
         check_email_limit(connection, payload.email, row.flow)
         provider.send_code(payload.email, row.flow)
         connection.execute(
@@ -516,8 +572,8 @@ def resend_confirmation(
 def verify_otp(payload: VerifyRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         row = pending_challenge(connection, payload)
-        if row.flow == "signup":
-            raise HTTPException(400, "Confirm your email using the link, then sign in.")
+        if row.flow != "login":
+            raise HTTPException(400, "Use the email link to continue.")
         try:
             body = provider.verify_code(payload.email, payload.code, row.flow)
         except AuthProviderError as error:
@@ -539,7 +595,7 @@ def verify_otp(payload: VerifyRequest, engine: EngineDep, provider: ProviderDep)
             insert(tables.verified_sessions).values(
                 session_id=session_id,
                 user_id=user.id,
-                recovery_only=row.flow == "recovery",
+                recovery_only=False,
             )
         )
         connection.execute(
