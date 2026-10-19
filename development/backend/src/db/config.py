@@ -60,7 +60,7 @@ def get_database_url(
     url = parse_database_url(raw)
     if url.password == "[YOUR-PASSWORD]":
         password = environ.get("SUPABASE_DB_PASSWORD")
-        if not password and env_path.is_file():
+        if not password and env_path is not None and env_path.is_file():
             password = dotenv_values(env_path).get("SUPABASE_DB_PASSWORD")
         if not password:
             raise DatabaseConfigError("SUPABASE_DB_PASSWORD is not configured.")
