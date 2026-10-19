@@ -1,6 +1,17 @@
 # Branch sync plan
 
 **Owner:** Bryan · **Written:** 2026-10-14 from `origin/main` at `022152f`
+**Status: complete (2026-10-18).** Outcome:
+- **Our branches:** all merged. #9 and #15 merged directly. #10–#13 and #16 had been merged into their stack bases by mistake; they landed on `main` through #19 with an identical tree.
+- **Guardrails:** the CI migration guard (#15) is required, merge commits are the style, and head branches are deleted automatically on merge.
+- **Branches deleted:** 12 merged or superseded branches.
+- **Contributor branches, tracked in the roadmap rather than here:**
+  - #17 GDELT: Stage C review
+  - #18 Finnhub insider collector
+  - Jaden's `codex/supabase-auth-resend`: no PR yet
+  - CohenK's `public-sentiment`: no PR yet
+
+The rest of this document is the original plan, kept for the record.
 **Goal:** every active branch is merged or rebased onto one `main`, with exactly one migration history and green CI, and with guardrails so this doesn't happen again. Database building (roadmap M0 onward) resumes when this plan's exit criteria are met.
 
 ---
