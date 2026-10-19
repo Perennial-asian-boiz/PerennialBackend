@@ -1,15 +1,6 @@
 """
 Async Reddit scraper (no Reddit API) - posts + comments from the last N days.
 
-Scrapes old.reddit.com HTML. Plain Python HTTP clients (requests/aiohttp) get
-flagged because their TLS/HTTP2 fingerprint doesn't look like a browser, so
-this version fetches pages through one of two browser-like backends:
-
-  --backend curl         (default) curl_cffi impersonating Chrome's TLS + HTTP/2
-                         fingerprint. Fast and light; same async design.
-  --backend playwright   a real Chromium browser. Slower, but is a real browser.
-                         Add --headed if headless gets flagged.
-
 Design
 ------
 * All subreddits are listed concurrently (one producer task per subreddit).
@@ -26,26 +17,13 @@ Cookie file (required)
 ----------------------
 Reddit redirects logged-out visitors to a login page, so the scraper REQUIRES a
 cookie file from a logged-in browser session and refuses to start without it
-(default: ./cookies.txt, or --cookie-file PATH). Accepted formats (auto-detected):
 
-  * Netscape cookies.txt      (browser extensions such as "Get cookies.txt LOCALLY")
-  * JSON                      (Cookie-Editor / EditThisCookie export)
-  * a single raw Cookie line  (DevTools -> Network -> any reddit.com request ->
-                               Request Headers -> copy the value of "Cookie")
-
-Log in to reddit.com first, then export while on a reddit.com tab. Only
-reddit.com cookies are used; everything else in the file is ignored.
-
-Check what the file contains (names only, never values) with --list-cookies. A
-logged-in export must contain 'reddit_session' (an HttpOnly cookie) or 'token_v2'.
-
-Treat the file like a password: never share it, never commit it to git. Automated
-access with an account can get that account rate-limited or suspended, so use a
-throwaway account. If the session expires mid-run you'll hit the login page, the
-scraper stops and saves what it has: log in again, re-export, re-run.
-
-Run: python reddit_scraper.py 
-
+Run
+---
+  python reddit_scraper.py --max-posts 3
+  python reddit_scraper.py --days 7
+  python reddit_scraper.py --backend playwright --headed --max-posts 3
+  python reddit_scraper.py --no-comments
 
 Output (./output): posts.csv, comments.csv, reddit_data.json, run_summary.json
 """
@@ -108,7 +86,6 @@ class Resp(NamedTuple):
 
 
 REDDIT_SESSION_COOKIES = ("reddit_session", "token_v2")
-
 
 class CookieFileError(Exception):
     pass
@@ -358,6 +335,9 @@ class Ctx:
     cooldown_until: float = 0.0  # time.monotonic() value
     debug_dumps: int = 0
     login_walls: int = 0
+    empty_comment_posts: int = 0    # posts that report comments but parsed 0
+    parsed_comment_posts: int = 0   # posts where at least one comment parsed
+    debug_comment_dumps: int = 0
 
     posts: list = field(default_factory=list)
     comments: list = field(default_factory=list)
@@ -557,25 +537,60 @@ def parse_listing(soup, subreddit, cutoff):
     return posts, reached_cutoff, (nxt["href"] if nxt else None)
 
 
+def _parse_iso(value):
+    try:
+        d = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def comment_created(node, entry):
+    """
+    Comment time. Post listings carry a data-timestamp attribute, but comments
+    usually don't: they have a <time datetime="..."> element in their tagline.
+    `entry` excludes the replies (they live in the sibling div.child), so this
+    never picks up a child comment's time.
+    """
+    ts = node.get("data-timestamp")
+    if ts:
+        try:
+            return ts_to_dt(ts)
+        except (ValueError, OverflowError):
+            pass
+    t = entry.select_one("time.live-timestamp[datetime]") or entry.select_one("time[datetime]")
+    return _parse_iso(t["datetime"]) if t else None
+
+
 def parse_post_page(soup, post, cutoff):
-    """Return (selftext, comments, n_unexpanded_stubs)."""
+    """
+    Return (selftext, comments, n_unexpanded_stubs, diag).
+    A comment is never dropped just because its timestamp can't be read: all
+    comments on an in-window post are newer than the window anyway.
+    """
     body = soup.select_one("div.thing.link div.usertext-body div.md")
     selftext = body.get_text("\n", strip=True) if body else ""
 
+    diag = {"candidates": 0, "no_entry": 0, "no_time": 0, "too_old": 0}
     comments = []
     for c in soup.select("div.commentarea div.thing.comment"):
-        try:
-            created = ts_to_dt(c["data-timestamp"])
-        except (KeyError, ValueError):
-            continue
-        if created < cutoff:
-            continue
-
+        diag["candidates"] += 1
         entry = c.find("div", class_="entry", recursive=False)
         if entry is None:
+            diag["no_entry"] += 1
             continue
+        created = comment_created(c, entry)
+        if created is None:
+            diag["no_time"] += 1
+        elif created < cutoff:
+            diag["too_old"] += 1
+            continue
+
         md = entry.select_one("div.usertext-body div.md")
         score_tag = entry.select_one("span.score.unvoted")
+        score = ""
+        if score_tag:
+            score = score_tag.get("title") or score_tag.get_text(strip=True)
         parent = c.find_parent("div", class_="comment")
         parent_id = parent.get("data-fullname", "").replace("t1_", "") if parent else ""
 
@@ -585,14 +600,14 @@ def parse_post_page(soup, post, cutoff):
             "comment_id": c.get("data-fullname", "").replace("t1_", ""),
             "parent_id": parent_id or post["post_id"],  # top-level -> post id
             "author": c.get("data-author", ""),
-            "created_utc": created.isoformat(),
-            "score": score_tag.get("title", "") if score_tag else "",
+            "created_utc": created.isoformat() if created else "",
+            "score": score,
             "body": md.get_text("\n", strip=True) if md else "",
             "permalink": BASE + c.get("data-permalink", ""),
         })
 
     stubs = len(soup.select("div.commentarea div.thing.morechildren"))
-    return selftext, comments, stubs
+    return selftext, comments, stubs, diag
 
 
 # --------------------------------------------------------------------------- #
@@ -630,6 +645,19 @@ async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
         page += 1
 
 
+def dump_comment_debug(ctx: Ctx, post: dict, soup, diag: dict):
+    """Save a comment page that parsed to nothing so the layout can be inspected."""
+    if ctx.debug_comment_dumps >= 2:
+        return
+    ctx.debug_comment_dumps += 1
+    os.makedirs(ctx.out_dir, exist_ok=True)
+    path = os.path.join(ctx.out_dir, f"debug_comments_{ctx.debug_comment_dumps}.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"<!-- post={post['permalink']} reported_comments={post.get('num_comments')} "
+                f"diag={diag} -->\n{soup}")
+    print(f"    saved the comment page to {path}")
+
+
 async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
     """Pull posts off the queue and fetch their comment pages."""
     while True:
@@ -640,7 +668,7 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
             soup = await fetch(ctx, post["permalink"], {"limit": 500, "sort": "new"})
             if soup is None:
                 continue
-            selftext, comments, stubs = parse_post_page(soup, post, ctx.cutoff)
+            selftext, comments, stubs, diag = parse_post_page(soup, post, ctx.cutoff)
             post["selftext"] = selftext
             post["comments_scraped"] = True
             ctx.comments.extend(comments)
@@ -648,6 +676,26 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
             if stubs:
                 print(f"    note: {stubs} 'load more comments' stub(s) not expanded "
                       f"({post['post_id']})")
+
+            # Health check: the post says it has comments, but we parsed none
+            try:
+                expected = int(post.get("num_comments") or 0)
+            except ValueError:
+                expected = 0
+            if comments:
+                ctx.parsed_comment_posts += 1
+            elif expected > 0:
+                ctx.empty_comment_posts += 1
+                if ctx.empty_comment_posts <= 5:
+                    print(f"    warning: post {post['post_id']} reports {expected} "
+                          f"comments but 0 were parsed {diag}")
+                dump_comment_debug(ctx, post, soup, diag)
+                if ctx.empty_comment_posts >= 10 and ctx.parsed_comment_posts == 0:
+                    trip(ctx, f"comment pages load, but no comments could be parsed from "
+                              f"{ctx.empty_comment_posts} posts that have comments. The "
+                              f"page layout probably differs from what the parser expects: "
+                              f"inspect {ctx.out_dir}/debug_comments_1.html")
+
             if ctx.posts_done % 20 == 0:
                 print(f"  progress: {ctx.posts_done}/{ctx.posts_queued} posts' comments "
                       f"fetched, {len(ctx.comments)} comments total")
@@ -782,9 +830,9 @@ def main():
     ap.add_argument("--max-blocks", type=int, default=8,
                     help="stop after this many consecutive blocked responses (default 8)")
     ap.add_argument("--checkpoint-secs", type=float, default=60)
-    ap.add_argument("--cookie-file", default="cookies.txt",
+    ap.add_argument("--cookie-file", default="reddit_cookies.txt",
                     help="REQUIRED: cookie export from a logged-in reddit.com session "
-                         "(Netscape / JSON / raw Cookie line). Default: ./cookies.txt")
+                         "(Netscape / JSON / raw Cookie line). Default: ./reddit_cookies.txt")
     ap.add_argument("--list-cookies", action="store_true",
                     help="print the names/domains/expiry of the cookies in the file "
                          "(never the values) and exit")
