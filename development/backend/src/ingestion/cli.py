@@ -69,7 +69,14 @@ def _parser() -> argparse.ArgumentParser:
         "publish", help="publish the latest successful live batches"
     )
     manual.add_argument(
-        "--override", help="reason for overriding failed quality checks"
+        "--override", help="reason for overriding the named failed quality checks"
+    )
+    manual.add_argument(
+        "--override-check",
+        dest="override_checks",
+        action="append",
+        metavar="SOURCE:CHECK",
+        help="a failed check to override, as reported (repeatable; needs --override)",
     )
     manual.add_argument("--actor", help="operator identity for the override audit")
     sub.add_parser("current", help="show the published watchlist")
@@ -86,7 +93,10 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.command == "publish" and bool(args.override) != bool(args.override_checks):
+        parser.error("--override and --override-check must be given together")
     try:
         settings = load_settings()
         if args.command == "run-pipeline":
@@ -165,6 +175,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         quality_thresholds=settings.quality_thresholds,
                         override_reason=args.override,
                         override_actor=actor,
+                        override_checks=args.override_checks,
                     )
                 }
             )
@@ -240,10 +251,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0 if result.succeeded else 1
         result = import_collection(engine, outcome)
     except Exception as exc:
-        from src.pipeline.publication import PublicationQualityError
+        from src.pipeline.publication import (
+            PublicationInProgressError,
+            PublicationQualityError,
+        )
 
         if isinstance(exc, PublicationQualityError):
             _print({"error_code": exc.code, "checks": list(exc.checks)})
+            return 1
+        if isinstance(exc, PublicationInProgressError):
+            _print({"error_code": exc.code})
             return 1
         print(
             f"error: database operation failed: {describe_exception(exc)}",
