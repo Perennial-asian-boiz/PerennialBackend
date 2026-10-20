@@ -28,3 +28,18 @@ def test_market_cap_overrun_cannot_return_success(monkeypatch):
     monkeypatch.setattr(collectors, '_get_json', get)
     with pytest.raises(PublicationError, match='deadline'):
         runner.collect_market_caps(['ZZAA'], session=object(), api_key='synthetic', max_seconds=5)
+
+
+def test_profile_sector_and_industry_are_kept_and_bad_labels_become_null(monkeypatch):
+    profiles = {
+        'ZZAA': [{'symbol': 'ZZAA', 'marketCap': 5e9, 'sector': 'Energy', 'industry': 'Oil & Gas Integrated'}],
+        'ZZBB': [{'symbol': 'ZZBB', 'marketCap': 5e9, 'sector': 42, 'industry': 'x' * 129}],
+        'ZZCC': [],
+    }
+    def get(session, url, *, params, **kwargs):
+        return collectors._Response(True, data=profiles[params['symbol']])
+    monkeypatch.setattr(collectors, '_get_json', get)
+    result = runner.collect_market_caps(list(profiles), session=object(), api_key='synthetic')
+    assert (result['ZZAA']['sector'], result['ZZAA']['industry']) == ('Energy', 'Oil & Gas Integrated')
+    assert (result['ZZBB']['sector'], result['ZZBB']['industry']) == (None, None)
+    assert (result['ZZCC']['sector'], result['ZZCC']['industry']) == (None, None)
