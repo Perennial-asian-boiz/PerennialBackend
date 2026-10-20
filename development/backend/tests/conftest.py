@@ -50,6 +50,16 @@ def pytest_configure(config):
         raise pytest.UsageError("REQUIRE_DATABASE_TESTS=1 requires TEST_DATABASE_URL")
 
 
+@pytest.fixture(autouse=True)
+def synthetic_finnhub_key(monkeypatch):
+    """The real .env is never loaded, so give the insider fetcher a fake key."""
+    from src.ingestion import collectors
+
+    monkeypatch.setattr(
+        collectors._fetcher("insider"), "FINNHUB_API_KEY", "synthetic-finnhub-key"
+    )
+
+
 def check_test_server_url(url) -> None:
     """Raise ValueError unless the URL can only reach a loopback *test* database."""
     if url.host not in LOOPBACK or "test" not in (url.database or ""):

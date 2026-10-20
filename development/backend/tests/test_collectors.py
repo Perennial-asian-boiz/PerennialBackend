@@ -252,54 +252,138 @@ def upstream(tmp_path, monkeypatch):
 
 
 def purchase(**over):
+    """One Finnhub insider-transactions row: a $50,000 open-market share purchase."""
     from datetime import date
 
     txn = {
-        "type": "Purchase",
-        "insider": "Synthetic Insider",
-        "date": date.today().isoformat(),
-        "value": 50000,
-        "shares": 100,
+        "name": "Synthetic Insider",
+        "transactionCode": "P",
+        "transactionDate": date.today().isoformat(),
+        "change": 100,
+        "transactionPrice": 500.0,
+        "isDerivative": False,
     }
     txn.update(over)
     return txn
 
 
-def insider_session(per_ticker):
+def insider_session(per_symbol):
+    """Routes on the Finnhub `symbol` param; any other symbol answers with no rows."""
+
     def handler(url, params):
-        ticker = url.split("/")[-2]
-        return per_ticker.get(
-            ticker,
-            FakeResponse(body={"data": {"insider_transactions": {"recent": []}}}),
-        )
+        assert url == collectors._fetcher("insider").FINNHUB_URL
+        return per_symbol.get(params["symbol"], FakeResponse(body={"data": []}))
 
     return FakeSession(handler)
 
 
-def test_insider_404_is_no_data_and_zero_buys_is_success(upstream):
-    outcome = collectors.collect_insider(
-        insider_session({"ZZDD": FakeResponse(status=404)}), sleep=NO_SLEEP
-    )
+def test_insider_zero_buys_is_success(upstream):
+    outcome = collectors.collect_insider(insider_session({}), sleep=NO_SLEEP)
     assert outcome.succeeded and outcome.records == []
     assert outcome.diagnostics["completed"] == 3
 
 
 def test_insider_buys_collected(upstream):
-    ok = FakeResponse(body={"data": {"insider_transactions": {"recent": [purchase()]}}})
+    ok = FakeResponse(body={"data": [purchase()]})
     outcome = collectors.collect_insider(insider_session({"ZZEE": ok}), sleep=NO_SLEEP)
     assert outcome.succeeded and [b["ticker"] for b in outcome.records] == ["ZZEE"]
     assert outcome.records[0]["bucket"] == "affordable_growing"
+    assert outcome.records[0]["value"] == 50000.0
+    assert outcome.records[0]["data_source"] == "finnhub"
+
+
+def test_insider_key_travels_in_header_not_params(upstream):
+    seen = []
+
+    class HeaderSession(FakeSession):
+        def get(self, url, params=None, headers=None, timeout=None, stream=False):
+            seen.append((dict(params or {}), dict(headers or {})))
+            return super().get(url, params, headers, timeout, stream)
+
+    outcome = collectors.collect_insider(
+        HeaderSession(lambda u, p: FakeResponse(body={"data": []})), sleep=NO_SLEEP
+    )
+    assert outcome.succeeded
+    for params, headers in seen:
+        assert headers == {"X-Finnhub-Token": "synthetic-finnhub-key"}
+        assert "synthetic-finnhub-key" not in json.dumps(params)
+        assert set(params) == {"symbol", "from", "to"}
+
+
+@pytest.mark.parametrize("key", ["", "your_finnhub_key_here"])
+def test_insider_missing_key_fails_without_requests(upstream, monkeypatch, key):
+    monkeypatch.setattr(collectors._fetcher("insider"), "FINNHUB_API_KEY", key)
+    session = insider_session({})
+    outcome = collectors.collect_insider(session, sleep=NO_SLEEP)
+    assert outcome.error_code == "missing_credential" and session.calls == []
+
+
+def test_insider_key_comes_from_settings_before_module_default(upstream):
+    from pydantic import SecretStr
+
+    from src.settings import ProviderSettings
+
+    seen = []
+
+    class HeaderSession(FakeSession):
+        def get(self, url, params=None, headers=None, timeout=None, stream=False):
+            seen.append(dict(headers or {}))
+            return super().get(url, params, headers, timeout, stream)
+
+    settings = ProviderSettings(finnhub_api_key=SecretStr("settings-finnhub-key"))
+    outcome = collectors.collect_insider(
+        HeaderSession(lambda u, p: FakeResponse(body={"data": []})),
+        sleep=NO_SLEEP,
+        settings=settings,  # type: ignore[arg-type]
+    )
+    assert outcome.succeeded
+    assert {h["X-Finnhub-Token"] for h in seen} == {"settings-finnhub-key"}
+
+
+def test_insider_asks_provider_symbol_but_keeps_planned_ticker():
+    upstream = {
+        "trades": [],
+        "holdings": [
+            {"ticker": "RKLB UQ", "fund_count": 1},
+            {"ticker": "BRK.B", "fund_count": 1},
+            {"ticker": "GOOG", "fund_count": 1},
+        ],
+    }
+    ok = FakeResponse(body={"data": [purchase()]})
+    session = insider_session({"RKLB": ok})
+    outcome = collectors.collect_insider(session, sleep=NO_SLEEP, upstream=upstream)
+    assert [p["symbol"] for _url, p in session.calls] == ["RKLB", "BRK-B", "GOOGL"]
+    assert outcome.succeeded and [b["ticker"] for b in outcome.records] == ["RKLB UQ"]
+
+
+def test_insider_non_us_listing_is_skipped_without_request():
+    upstream = {
+        "trades": [],
+        "holdings": [
+            {"ticker": "ZZQQ/U", "fund_count": 1},
+            {"ticker": "ZZAA", "fund_count": 1},
+        ],
+    }
+    session = insider_session({})
+    outcome = collectors.collect_insider(session, sleep=NO_SLEEP, upstream=upstream)
+    assert [p["symbol"] for _url, p in session.calls] == ["ZZAA"]
+    assert outcome.succeeded and outcome.diagnostics["completed"] == 2
+    assert outcome.envelope["unsupported_tickers"] == ["ZZQQ/U"]
 
 
 @pytest.mark.parametrize(
     "body",
     [
+        {},
         {"data": {}},
-        {"data": {"insider_transactions": {}}},
-        {"data": {"insider_transactions": {"recent": [purchase(value="500000")]}}},
-        {"data": {"insider_transactions": {"recent": [purchase(date=None)]}}},
-        {"data": {"insider_transactions": {"recent": [purchase(date="09/01/2026")]}}},
-        {"data": {"insider_transactions": {"recent": [purchase(insider=None)]}}},
+        {"data": None},
+        {"data": ["not a row"]},
+        {"data": [purchase(change="100")]},
+        {"data": [purchase(transactionPrice="500")]},
+        {"data": [purchase(transactionDate=None)]},
+        {"data": [purchase(transactionDate="09/01/2026")]},
+        {"data": [purchase(name=None)]},
+        {"data": [purchase(isDerivative="no")]},
     ],
 )
 def test_insider_malformed_payload_fails_instead_of_dropping(upstream, body):
@@ -402,8 +486,8 @@ def test_oversized_plan_is_refused_without_requests(upstream, monkeypatch):
         assert outcome.error_code == "plan_too_large" and session.calls == []
 
 
-def test_insider_transaction_without_type_is_malformed(upstream):
-    body = {"data": {"insider_transactions": {"recent": [{}]}}}
+def test_insider_transaction_without_code_is_malformed(upstream):
+    body = {"data": [{}]}
     outcome = collectors.collect_insider(
         insider_session({"ZZAA": FakeResponse(body=body)}), sleep=NO_SLEEP
     )
