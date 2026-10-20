@@ -327,7 +327,12 @@ def test_cli_override_and_override_check_go_together(argv, capsys):
 
 # ── SEC-M1-01: override audit text is refused unless safe to retain ──
 
-SENTINELS = ("SYNTHETIC_ACTOR_SECRET", "SYNTHETIC_REASON_SECRET", "SYNTHETIC_BEARER")
+SENTINELS = (
+    "SYNTHETIC_ACTOR_SECRET",
+    "SYNTHETIC_REASON_SECRET",
+    "SYNTHETIC_BEARER",
+    "SYNTHETIC_SECRET",
+)
 
 
 def _database_text(engine):
@@ -340,27 +345,11 @@ def _database_text(engine):
         )
 
 
-@pytest.mark.parametrize(
-    "actor,reason",
-    [
-        ("operator password=SYNTHETIC_ACTOR_SECRET", "synthetic correction"),
-        ("synthetic-op", "see https://example.invalid/data?apikey=SYNTHETIC_REASON_SECRET"),
-        ("synthetic-op", "synthetic correction\nAuthorization: Bearer SYNTHETIC_BEARER"),
-        ("synthetic-op", "provider said apikey=SYNTHETIC_REASON_SECRET"),
-        ("synthetic-op", "retry with Bearer SYNTHETIC_BEARER"),
-        ("synthetic-op", "key 0123456789abcdef0123456789abcdef pasted"),
-        ("synthetic-op", "token: abc"),
-        ("synthetic-op", "tab\tseparated"),
-        ("synthetic-op", "escape \x1b[31m sequence"),
-        ("synthetic-op", "zero​width"),
-        ("synthetic-op", "www.example.invalid/path"),
-        ("synthetic op", "synthetic correction"),
-        ("-leading-dash", "synthetic correction"),
-        ("synthetic-op", "x" * 501),
-        ("x" * 201, "synthetic correction"),
-    ],
-)
-def test_unsafe_override_text_is_refused_before_the_database(actor, reason):
+VALID_ACTOR = "synthetic-op"
+VALID_REASON = "synthetic correction after provider switch"
+
+
+def _refused(actor, reason):
     from src.pipeline.publication import OverrideInputError
 
     with pytest.raises(OverrideInputError) as caught:
@@ -373,8 +362,77 @@ def test_unsafe_override_text_is_refused_before_the_database(actor, reason):
             override_checks=["insider_trades:row_count"],
         )
     assert caught.value.code == "override_input_rejected"
-    assert all(s not in str(caught.value) for s in SENTINELS)
-    assert reason not in str(caught.value) and actor not in str(caught.value)
+    message = str(caught.value)
+    assert all(s not in message for s in SENTINELS)
+    assert all(not text or text not in message for text in (reason, actor))
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        # URLs and header-style credentials
+        "see https://example.invalid/data?apikey=SYNTHETIC_REASON_SECRET",
+        "www.example.invalid/path",
+        "synthetic correction\nAuthorization: Bearer SYNTHETIC_BEARER",
+        "retry with Bearer SYNTHETIC_BEARER",
+        # quoted JSON / Python dict keys, short values (the 794e878 bypass)
+        'provider error: {"api_key": "SYNTHETIC_SECRET"}',
+        "provider error: {'password': 'pw1'}",
+        '"token":"t1"',
+        "'secret' : s1",
+        '"x_auth": "a1"',
+        "`key`: k1",
+        'key="k1"',
+        "sig: s1",
+        # credential vocabulary without any delimiter
+        "api_key SYNTHETIC_SECRET",
+        "apikey is SYNTHETIC_SECRET",
+        "the access token was t1",
+        "x_api_key t1",
+        "password pw1",
+        "pwd pw1",
+        "client secret c1",
+        "credentials c1",
+        "session cookie c1",
+        # assignment or dump syntax, short values
+        "provider said apikey=SYNTHETIC_REASON_SECRET",
+        "value = v1",
+        "dump <v1>",
+        "escaped \\u0041 text",
+        # key-shaped runs
+        "key 0123456789abcdef0123456789abcdef pasted",
+        "ref abcdefghij0123456789xyz",
+        # control and format characters, length
+        "tab\tseparated",
+        "escape \x1b[31m sequence",
+        "zero\u200bwidth",
+        "x" * 501,
+        "",
+    ],
+)
+def test_unsafe_override_reason_is_refused_with_a_valid_actor(reason):
+    from src.pipeline.publication import _check_override_text
+
+    _check_override_text(VALID_ACTOR, VALID_REASON)  # the actor alone is fine
+    _refused(VALID_ACTOR, reason)
+
+
+@pytest.mark.parametrize(
+    "actor",
+    [
+        "operator password=SYNTHETIC_ACTOR_SECRET",
+        "synthetic op",
+        "-leading-dash",
+        "op\nx",  # surrounding whitespace is stripped; an inner newline is not
+        "op\"x\"",
+        "x" * 201,
+    ],
+)
+def test_unsafe_override_actor_is_refused_with_a_valid_reason(actor):
+    from src.pipeline.publication import _check_override_text
+
+    _check_override_text(VALID_ACTOR, VALID_REASON)  # the reason alone is fine
+    _refused(actor, VALID_REASON)
 
 
 @pytest.mark.parametrize(
@@ -383,12 +441,34 @@ def test_unsafe_override_text_is_refused_before_the_database(actor, reason):
         ("brybry.o_o", "Finnhub replaced SecuritiesDB on 2026-10-20; first batch differs"),
         ("ops@perennial", "insider_trades:row_count expected after provider switch (ticket 42)"),
         ("synthetic-op", "Short interest settlement moved; NASDAQ confirmed. Résumé ok."),
+        ("synthetic-op", "The provider's first batch didn't match; row count is the key signal"),
     ],
 )
 def test_plain_override_text_is_accepted(actor, reason):
     from src.pipeline.publication import _check_override_text
 
     _check_override_text(actor, reason)
+
+
+@pytest.mark.db
+def test_publish_never_persists_quoted_json_credential_in_reason(engine, fixture_path):
+    """The SEC-M1-01 recheck reproduction: valid actor, quoted JSON key in the reason."""
+    from src.pipeline.publication import OverrideInputError
+
+    runs, batches = inputs(engine, fixture_path)
+    first = publish(engine, runs, caps(engine, batches))
+    replacement = {**runs, "insider_trades": _one_insider_row(engine, fixture_path, batches)}
+    with pytest.raises(OverrideInputError):
+        publish(
+            engine,
+            replacement,
+            caps(engine, batches),
+            override_checks=["insider_trades:row_count"],
+            override_actor=VALID_ACTOR,
+            override_reason='provider error: {"api_key": "SYNTHETIC_SECRET"}',
+        )
+    assert current(engine)["id"] == first
+    assert "SYNTHETIC_SECRET" not in _database_text(engine)
 
 
 @pytest.mark.db
@@ -448,3 +528,19 @@ def test_cli_rejects_credential_bearing_override_without_echo(
     assert all(s not in out.out + out.err for s in SENTINELS)
     assert current(engine)["id"] == first
     assert all(s not in _database_text(engine) for s in SENTINELS)
+    code = cli.main(
+        [
+            "publish",
+            "--override",
+            'provider error: {"api_key": "SYNTHETIC_SECRET"}',
+            "--actor",
+            VALID_ACTOR,
+            "--override-check",
+            "insider_trades:row_count",
+        ]
+    )
+    out = capsys.readouterr()
+    assert code == 2 and "override_input_rejected" in out.err
+    assert "SYNTHETIC_SECRET" not in out.out + out.err
+    assert current(engine)["id"] == first
+    assert "SYNTHETIC_SECRET" not in _database_text(engine)

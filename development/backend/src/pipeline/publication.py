@@ -34,11 +34,20 @@ PUBLICATION_LOCK = 170099
 _SAFE_ACTOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,199}")
 _UNSAFE_REASON = (
     re.compile(r"(?i)[a-z][a-z0-9+.-]*://|\bwww\."),  # URLs
+    # Credential vocabulary anywhere, whatever follows: quoting, spacing or
+    # separators cannot smuggle a value past a delimiter check. "_" counts as a
+    # boundary so x_api_key matches; plain "key" is too common and is below.
     re.compile(
-        r"(?i)\b(api[_-]?key|apikey|token|secret|password|passwd|pwd|"
-        r"authorization|signature|sig|key|bearer)\b\s*[=:]"
-    ),  # key=value / header-style credentials
-    re.compile(r"(?i)\bbearer\s+\S"),
+        r"(?i)(?<![a-z0-9])(api[\s_-]?keys?|(access|auth|refresh|session)[\s_-]?tokens?|"
+        r"tokens?|secrets?|client[\s_-]?secret|private[\s_-]?key|passwords?|passwd|pwd|"
+        r"passphrase|credentials?|authorization|bearer|cookies?)(?![a-z0-9])"
+    ),
+    # key/sig/signature used as a field name, quoted or not.
+    re.compile(r"(?i)(?<![a-z0-9])(key|sig|signature)[\"'`]?\s*[:=]"),
+    # Any quoted field name followed by a value separator: JSON or dict dumps.
+    re.compile(r"[\"'`]\s*[:=]"),
+    # Structured-dump and assignment syntax has no place in a one-line reason.
+    re.compile(r"[{}=<>`\\]"),
     # Key-shaped runs: 20+ token characters with a digit, or 32+ of any kind.
     re.compile(r"(?=[A-Za-z0-9_+/=-]*\d)[A-Za-z0-9_+/=-]{20,}|[A-Za-z0-9_+/=-]{32,}"),
 )
@@ -79,7 +88,7 @@ def _check_override_text(actor: str, reason: str) -> None:
     ):
         raise OverrideInputError(
             "override reason must be 1 to 500 characters of plain one-line text "
-            "without URLs, credentials, tokens or control characters"
+            "without URLs, credential words, field syntax, tokens or control characters"
         )
 
 
