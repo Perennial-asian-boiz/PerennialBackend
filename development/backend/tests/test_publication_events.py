@@ -323,3 +323,128 @@ def test_cli_override_and_override_check_go_together(argv, capsys):
         cli.main(argv)
     assert caught.value.code == 2
     assert "--override-check" in capsys.readouterr().err
+
+
+# ── SEC-M1-01: override audit text is refused unless safe to retain ──
+
+SENTINELS = ("SYNTHETIC_ACTOR_SECRET", "SYNTHETIC_REASON_SECRET", "SYNTHETIC_BEARER")
+
+
+def _database_text(engine):
+    """Every publication and event row rendered as text, for sentinel searches."""
+    with engine.connect() as conn:
+        return " ".join(
+            conn.execute(text(f"SELECT coalesce(string_agg(t::text, ' '), '') FROM {table} t"))
+            .scalar_one()
+            for table in ("perennial.publications", "perennial.publication_events")
+        )
+
+
+@pytest.mark.parametrize(
+    "actor,reason",
+    [
+        ("operator password=SYNTHETIC_ACTOR_SECRET", "synthetic correction"),
+        ("synthetic-op", "see https://example.invalid/data?apikey=SYNTHETIC_REASON_SECRET"),
+        ("synthetic-op", "synthetic correction\nAuthorization: Bearer SYNTHETIC_BEARER"),
+        ("synthetic-op", "provider said apikey=SYNTHETIC_REASON_SECRET"),
+        ("synthetic-op", "retry with Bearer SYNTHETIC_BEARER"),
+        ("synthetic-op", "key 0123456789abcdef0123456789abcdef pasted"),
+        ("synthetic-op", "token: abc"),
+        ("synthetic-op", "tab\tseparated"),
+        ("synthetic-op", "escape \x1b[31m sequence"),
+        ("synthetic-op", "zero​width"),
+        ("synthetic-op", "www.example.invalid/path"),
+        ("synthetic op", "synthetic correction"),
+        ("-leading-dash", "synthetic correction"),
+        ("synthetic-op", "x" * 501),
+        ("x" * 201, "synthetic correction"),
+    ],
+)
+def test_unsafe_override_text_is_refused_before_the_database(actor, reason):
+    from src.pipeline.publication import OverrideInputError
+
+    with pytest.raises(OverrideInputError) as caught:
+        publish(
+            None,  # type: ignore[arg-type]  # refused before any connection
+            {},
+            {},
+            override_reason=reason,
+            override_actor=actor,
+            override_checks=["insider_trades:row_count"],
+        )
+    assert caught.value.code == "override_input_rejected"
+    assert all(s not in str(caught.value) for s in SENTINELS)
+    assert reason not in str(caught.value) and actor not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "actor,reason",
+    [
+        ("brybry.o_o", "Finnhub replaced SecuritiesDB on 2026-10-20; first batch differs"),
+        ("ops@perennial", "insider_trades:row_count expected after provider switch (ticket 42)"),
+        ("synthetic-op", "Short interest settlement moved; NASDAQ confirmed. Résumé ok."),
+    ],
+)
+def test_plain_override_text_is_accepted(actor, reason):
+    from src.pipeline.publication import _check_override_text
+
+    _check_override_text(actor, reason)
+
+
+@pytest.mark.db
+def test_publish_never_persists_credential_bearing_override_text(engine, fixture_path):
+    """The auditor's SEC-M1-01 reproduction through the real publish path."""
+    from src.pipeline.publication import OverrideInputError
+
+    runs, batches = inputs(engine, fixture_path)
+    first = publish(engine, runs, caps(engine, batches))
+    replacement = {**runs, "insider_trades": _one_insider_row(engine, fixture_path, batches)}
+    with pytest.raises(OverrideInputError):
+        publish(
+            engine,
+            replacement,
+            caps(engine, batches),
+            override_checks=["insider_trades:row_count"],
+            override_actor="operator password=SYNTHETIC_ACTOR_SECRET",
+            override_reason="provider exception: https://example.invalid/data?apikey="
+            "SYNTHETIC_REASON_SECRET\nAuthorization: Bearer SYNTHETIC_BEARER",
+        )
+    assert current(engine)["id"] == first
+    assert len(events(engine, first)) == 1
+    stored = _database_text(engine)
+    assert all(s not in stored for s in SENTINELS)
+
+
+@pytest.mark.db
+def test_cli_rejects_credential_bearing_override_without_echo(
+    engine, db_url, fixture_path, monkeypatch, capsys
+):
+    from src.ingestion import cli
+    from src.pipeline import runner
+
+    runs, batches = inputs(engine, fixture_path)
+    first = publish(engine, runs, caps(engine, batches))
+    _one_insider_row(engine, fixture_path, batches)
+    monkeypatch.setenv("DATABASE_URL", db_url.render_as_string(hide_password=False))
+    monkeypatch.setenv("FMP_API_KEY", "synthetic-key")
+    # Fake provider: market caps come from the synthetic helper, never the network.
+    monkeypatch.setattr(
+        runner, "collect_market_caps", lambda symbols, **kwargs: caps(engine, batches)
+    )
+    code = cli.main(
+        [
+            "publish",
+            "--override",
+            "see https://example.invalid/x?apikey=SYNTHETIC_REASON_SECRET",
+            "--actor",
+            "operator password=SYNTHETIC_ACTOR_SECRET",
+            "--override-check",
+            "insider_trades:row_count",
+        ]
+    )
+    out = capsys.readouterr()
+    assert code == 2
+    assert "override_input_rejected" in out.err
+    assert all(s not in out.out + out.err for s in SENTINELS)
+    assert current(engine)["id"] == first
+    assert all(s not in _database_text(engine) for s in SENTINELS)

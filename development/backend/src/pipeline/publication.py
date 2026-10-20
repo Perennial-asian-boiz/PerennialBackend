@@ -4,6 +4,8 @@ Only this module changes the production pointer. Importing/backfilling remains
 independent. Defaults are deliberately visible policy, configurable by the caller.
 """
 
+import re
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence, cast
@@ -26,6 +28,21 @@ MAX_AGE = {
 QUALITY_CHECKS = ("row_count", "null_share", "source_as_of")
 PUBLICATION_LOCK = 170099
 
+# Override audit text is append-only and ends up in backups, so unsafe input is
+# refused rather than redacted: no redactor can prove free text holds no secret.
+# Actor is an identity handle; reason is one line of plain prose.
+_SAFE_ACTOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,199}")
+_UNSAFE_REASON = (
+    re.compile(r"(?i)[a-z][a-z0-9+.-]*://|\bwww\."),  # URLs
+    re.compile(
+        r"(?i)\b(api[_-]?key|apikey|token|secret|password|passwd|pwd|"
+        r"authorization|signature|sig|key|bearer)\b\s*[=:]"
+    ),  # key=value / header-style credentials
+    re.compile(r"(?i)\bbearer\s+\S"),
+    # Key-shaped runs: 20+ token characters with a digit, or 32+ of any kind.
+    re.compile(r"(?=[A-Za-z0-9_+/=-]*\d)[A-Za-z0-9_+/=-]{20,}|[A-Za-z0-9_+/=-]{32,}"),
+)
+
 
 class PublicationError(ValueError):
     """A fixed, safe publication eligibility error."""
@@ -41,6 +58,29 @@ class PublicationQualityError(PublicationError):
     def __init__(self, checks: Sequence[str]):
         self.checks = tuple(sorted(checks))
         super().__init__("publication quality checks failed: " + ", ".join(self.checks))
+
+
+class OverrideInputError(ValueError):
+    """Override actor or reason is not safe to retain; the input is never echoed."""
+
+    code = "override_input_rejected"
+
+
+def _check_override_text(actor: str, reason: str) -> None:
+    if not _SAFE_ACTOR.fullmatch(actor):
+        raise OverrideInputError(
+            "override actor must be 1 to 200 characters of letters, digits and ._@+-"
+        )
+    if (
+        not reason
+        or len(reason) > 500
+        or any(unicodedata.category(ch).startswith("C") for ch in reason)
+        or any(pattern.search(reason) for pattern in _UNSAFE_REASON)
+    ):
+        raise OverrideInputError(
+            "override reason must be 1 to 500 characters of plain one-line text "
+            "without URLs, credentials, tokens or control characters"
+        )
 
 
 class PublicationInProgressError(PublicationError):
@@ -321,10 +361,7 @@ def publish(
     if override_reason is not None:
         override_reason = override_reason.strip()
         override_actor = (override_actor or "").strip()
-        if not override_reason or len(override_reason) > 500:
-            raise ValueError("override reason must be 1 to 500 characters")
-        if not override_actor or len(override_actor) > 200:
-            raise ValueError("override actor must be 1 to 200 characters")
+        _check_override_text(override_actor, override_reason)
         valid = {f"{s}:{c}" for s in m.SOURCES for c in QUALITY_CHECKS}
         if not override_checks or not set(override_checks) <= valid:
             raise ValueError("override must name one or more known source:check names")

@@ -252,6 +252,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         result = import_collection(engine, outcome)
     except Exception as exc:
         from src.pipeline.publication import (
+            OverrideInputError,
             PublicationInProgressError,
             PublicationQualityError,
         )
@@ -262,6 +263,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         if isinstance(exc, PublicationInProgressError):
             _print({"error_code": exc.code})
             return 1
+        if isinstance(exc, OverrideInputError):
+            # Fixed text only: the rejected input may itself hold a secret.
+            print(f"error: {exc.code}: {exc}", file=sys.stderr)
+            return 2
         print(
             f"error: database operation failed: {describe_exception(exc)}",
             file=sys.stderr,
