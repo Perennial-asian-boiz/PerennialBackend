@@ -339,6 +339,9 @@ market_cap_observations = Table(
     Column("provider", String(32), nullable=False),
     Column("observed_at", DateTime(timezone=True)),
     Column("retrieved_at", DateTime(timezone=True), nullable=False),
+    # Classification from the same profile response, so publications replay it too.
+    Column("sector", String(64)),
+    Column("industry", String(128)),
     CheckConstraint("value IS NULL OR value > 0", name="positive_value"),
     CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency"),
     UniqueConstraint("id", "security_id"),
@@ -404,4 +407,46 @@ Index(
     ingestion_runs.c.source,
     ingestion_runs.c.started_at.desc(),
     ingestion_runs.c.id.desc(),
+)
+
+# GDELT macro events (src/services/gdelt). Independent of SOURCES and publications.
+gdelt_theme_days = Table(
+    "gdelt_theme_days",
+    metadata,
+    _id(),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("article_count", Integer, nullable=False),
+    Column("total_articles", BigInteger),
+    Column("avg_tone", Numeric(8, 4)),
+    Column("retrieved_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("theme", "day"),
+    CheckConstraint("article_count >= 0", name="article_count"),
+)
+
+gdelt_articles = Table(
+    "gdelt_articles",
+    metadata,
+    _id(),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("url", Text, nullable=False),
+    Column("title", Text),
+    Column("domain", String(255)),
+    Column("seen_at", DateTime(timezone=True)),
+    UniqueConstraint("theme", "day", "url"),
+)
+
+gdelt_spike_checks = Table(
+    "gdelt_spike_checks",
+    metadata,
+    _id(),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("article_count", Integer, nullable=False),
+    Column("baseline_median", Numeric(12, 2), nullable=False),
+    Column("ratio", Numeric(10, 2)),
+    Column("is_spike", Boolean, nullable=False),
+    Column("checked_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("theme", "day"),
 )

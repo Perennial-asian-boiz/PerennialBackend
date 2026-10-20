@@ -1,0 +1,14 @@
+{
+  "_note": "Starter list. Theme names must exist in GDELT's official list (http://data.gdeltproject.org/api/v2/guides/LOOKUP-GKGTHEMES.TXT). Sector names must match FMP's profile 'sector' values exactly. Each sector entry is {\"sector\": ..., \"direction\": \"+\" or \"-\", \"reason\": one beginner-readable line}.",
+  "themes": {
+    "ECON_OILPRICE": {"label": "Oil prices", "sectors": []},
+    "ECON_INTEREST_RATES": {"label": "Interest rates", "sectors": []},
+    "ECON_TRADE_DISPUTE": {"label": "Trade disputes", "sectors": []}
+  },
+  "evidence_domains": [
+    "reuters.com", "apnews.com", "bloomberg.com", "wsj.com", "ft.com",
+    "cnbc.com", "marketwatch.com", "barrons.com", "economist.com",
+    "nytimes.com", "bbc.com", "bbc.co.uk", "theguardian.com", "npr.org",
+    "aljazeera.com", "finance.yahoo.com"
+  ]
+}
