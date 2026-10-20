@@ -123,7 +123,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             _print(
                 {
                     "publication_id": run_pipeline(
-                        engine, quality_thresholds=settings.quality_thresholds
+                        engine,
+                        quality_thresholds=settings.quality_thresholds,
+                        settings=settings,
                     )
                 }
             )
