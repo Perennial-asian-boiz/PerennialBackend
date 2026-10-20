@@ -1,0 +1,28 @@
+[
+  {
+    "symbol": "ZZAA",
+    "transactionDate": "2026-10-01",
+    "disclosureDate": "2026-10-02",
+    "firstName": "Synthetic",
+    "lastName": "Person",
+    "assetDescription": "Synthetic Company",
+    "assetType": "Stock",
+    "type": "Purchase",
+    "amount": "$1,001 - $15,000",
+    "district": null,
+    "link": "https://example.invalid/filing"
+  },
+  {
+    "symbol": "ZZAA",
+    "transactionDate": "2026-10-01",
+    "disclosureDate": "2026-10-02",
+    "firstName": "Synthetic",
+    "lastName": "Person",
+    "assetDescription": "Synthetic Company",
+    "assetType": "Stock",
+    "type": "Purchase",
+    "amount": "$1,001 - $15,000",
+    "district": "ZZ-00",
+    "link": "https://example.invalid/filing"
+  }
+]

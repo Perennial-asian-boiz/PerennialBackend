@@ -1,0 +1,20 @@
+{
+  "data": {
+    "shortInterestTable": {
+      "rows": [
+        {
+          "settlementDate": "09/30/2026",
+          "interest": "1,000",
+          "avgDailyShareVolume": "500",
+          "daysToCover": "2.0"
+        },
+        {
+          "settlementDate": "09/15/2026",
+          "interest": null,
+          "avgDailyShareVolume": null,
+          "daysToCover": null
+        }
+      ]
+    }
+  }
+}
