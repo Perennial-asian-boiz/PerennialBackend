@@ -1,7 +1,7 @@
 # Perennial database: roadmap to completion
 
 **Owner:** Bryan (product owner, final approver)
-**Written:** 2026-10-13 · **Updated:** 2026-10-18, from `origin/main` at `12e4b1b`
+**Written:** 2026-10-13 · **Updated:** 2026-10-18, from `origin/main` at `12e4b1b` · **Rescoped:** 2026-10-20 for a pre-launch team (see "Sizing" below)
 **Replaces:** the 2026-10-08 production roadmap (archived at `docs/roadmap/production-roadmap.md`). The process rules in §2 of that document still apply and are not repeated here.
 **Purpose:** take the database from "a working watchlist pipeline that is currently stalled" to "finished": every product data domain modeled, in production, serving the app, and operating unattended. When the last milestone in this document closes, the database is done. Anything after that is a feature, not completion work.
 
@@ -20,7 +20,7 @@ The core pipeline merged in PR #4 and was hardened in PR #6. Keep these properti
 
 Since then, Phase 1/2 work has merged: typed settings (P2-B), database session timeouts and pools (P2-D), FMP pagination (P1-A), hashed lockfiles (P2-C), publication quality checks (P1-B), and Senate Stock Watcher removal. CI also fails on duplicate migration ids or a second Alembic head (#15).
 
-Alembic head is still `0003`.
+Alembic head is `0005` on `main`. GDELT (#17) merged on 2026-10-20 with `0004` (`sector`/`industry` columns on `market_cap_observations`) and `0005` (`gdelt_theme_days`, `gdelt_articles`, `gdelt_spike_checks`).
 
 ### What is wrong right now
 
@@ -30,7 +30,8 @@ Alembic head is still `0003`.
 | 2 | **The free FMP plan returns HTTP 402 on Senate page 1** (found in #18's live test). | Congress collection ends as `partial_collection`, which is rejected by design. Insider collection then has no upstream input. Blocked on decision D4. |
 | 3 | **The database insider collector still calls SecuritiesDB,** which has been down since 2026-10-07. | Fixed in #18 (Finnhub collector), which is open and needs a merge. |
 | 4 | All-or-nothing publishing | One provider outage freezes the whole watchlist (M2). |
-| 5 | The schema covers only the four watchlist sources. | User data and Confidence Score data are not modeled yet. Supabase Auth (Jaden) and GDELT (#17) are in progress on contributor branches. |
+| 5 | The schema covers the four watchlist sources plus GDELT, which merged outside the ingestion contract. | User data and Confidence Score data are not modeled yet. Supabase Auth is in PR #22. GDELT needs follow-up rework (M6). |
+| 6 | **CI fails on every branch, `main` included,** since PYSEC-2026-4320 was published against `certifi` 2026.6.17. | No PR can go green, including #18. Fix: `certifi` 2026.10.19 on `fix/certifi-cve` (locks recompiled on Linux per ADR 0001). |
 
 ### What "done" means
 
@@ -39,10 +40,24 @@ The database is finished when all of these hold:
 1. **Complete model.** Every product data domain has a reviewed schema, migrations with tested downgrades, and constraint tests: watchlist sources, market caps, security identity, fundamentals, news and sentiment, events, Confidence Scores, and user data.
 2. **In production.** It runs on a managed PostgreSQL 17 with point-in-time recovery, least-privilege roles, row-level security on user data, and secrets in a secret manager.
 3. **The only source of truth.** The app reads everything through the API from the database. The legacy JSON path and `cron.py` are deleted.
-4. **Unattended.** Daily scheduled runs, alerting, degraded publishing, rollback and retention all work without anyone watching.
-5. **Proven.** A restore drill has measured RPO and RTO, a capacity test with one simulated year of data passes, the security audit is signed, and the ERD, runbooks and ADRs are current.
+4. **Unattended.** Daily scheduled runs, alerting (pipeline *and* database health), degraded publishing and rollback all work without anyone watching.
+5. **Proven.** One restore drill has succeeded and been timed, a storage estimate for a year of data is recorded, user accounts can be deleted and exported, the security audit is signed, and the ERD, runbooks and ADRs are current.
 
 **Out of scope, deliberately:** a data warehouse, streaming, an analytics or BI stack, a feature store for model training, multi-region, and real-time quotes. Each would be a new project with its own justification.
+
+### Sizing: what this roadmap is built for
+
+Perennial is pre-launch: a small team, one daily batch of a few thousand rows, few or no users yet. The 2026-10-20 rescope keeps everything that protects users and data, and cuts the parts sized for a company with SLAs and an on-call rotation:
+
+| Kept as written | Made leaner | Added (production gaps) |
+|---|---|---|
+| Managed Postgres with point-in-time recovery; migrations with tested downgrades; least-privilege roles; `app` schema with RLS; API-only access | **M7 shadow:** a diff script over 3–5 trading days, not a fixed 2 weeks | **Account deletion and data export** (M5) |
+| Quality checks and audited overrides (M1) | **M8 capacity:** a written estimate, not a simulated year; measure only if a source grows 10× | **Database observability:** slow queries, connections, disk growth, with alerts (M3) |
+| Degraded publishing (M2) | **M8 recovery:** one timed restore drill before launch, then yearly, not quarterly | **Secret rotation runbook** for provider keys and the database password (M3) |
+| Byte-identical replay for publications and scores | **M4 identity:** a plain alias table; no time-ranged identifiers; `figi` stays optional | **A cost ceiling** (D14) that anchors D1, D4 and D8 |
+| Missed-run monitor and alerts (M3) | **Review:** the checker reviews every change; the auditor only migrations, roles, auth, secrets and logging | |
+
+Re-evaluate the "leaner" column at launch, or as soon as there are paying users.
 
 ---
 
@@ -66,14 +81,14 @@ These are the rules that make a nine-domain schema stay maintainable. Reviewers 
 
 ## 3. Milestones
 
-Each milestone ends at a gate that needs one build-side approval, one review-side approval and Bryan's sign-off, as before. Sizes are working days for the current rig at its current parallelism.
+Each milestone ends at a gate that needs the checker's verification and Bryan's sign-off. The security auditor also signs gates that touch migrations, roles, auth, secrets or logging. Sizes are working days for the current rig at its current parallelism.
 
 ```
 M0 Restore ──► M1 Correctness ──► M2 Resilient publishing ──► M3 Platform ──┬─► M5 App data + API ──► M7 Shadow and cutover ──► M8 Closeout
                                                                             └─► M4 Identity ──► M6 Score data ──────────────┘
 ```
 
-**Critical path:** M0 → M1 → M2 → M3 → M5 → M7 (including the fixed 2-week shadow period) → M8. M4 and M6 run beside it, and M6 has to land before M7's shadow period ends, or the Confidence Score cuts over in a second, smaller shadow.
+**Critical path:** M0 → M1 → M2 → M3 → M5 → M7 → M8. M4 and M6 run beside it. If M6 isn't ready when M7 cuts over the watchlist, the Confidence Score cuts over later with its own short diff run.
 
 ### M0: Restore publishing (now, 2–3 days)
 
@@ -84,8 +99,8 @@ M0 Restore ──► M1 Correctness ──► M2 Resilient publishing ──► 
 | Merge PR #7 (legacy Senate Watcher) and #8 (legacy Finnhub) | — | **Done** 2026-10-14 |
 | Remove Senate Stock Watcher from `collect_congress` and `fmp.py` (feature dropped) | — | **Done** (#16, landed via #19) |
 | Branch cleanup: stranded stack landed (#19), merged branches deleted, auto-delete of head branches turned on | — | **Done** 2026-10-18 |
-| **Merge #18: move `collect_insider` to Finnhub.** Includes the ticker mapping (`RKLB UQ` → `RKLB`, `BRK.B` → `BRK-B`, `GOOG` → `GOOGL`), skipping listings with no Form 4 filings, honoring Finnhub's rate-limit reset, and deleting the SecuritiesDB code | haohnguyen94-droid; Bryan reviews | Open; needs "Update branch" after #19. Tested combined with the stack: 402 passed |
-| **Fix the runner's missing settings.** `run_pipeline` and `collect_source` pass the startup `Settings` into every collector, so Congress gets its FMP key and insider its Finnhub key. Add a test that runs the pipeline through the CLI with keys present only in `Settings` | primary | Not started; first implementation task |
+| **Merge #18: move `collect_insider` to Finnhub.** Includes the ticker mapping (`RKLB UQ` → `RKLB`, `BRK.B` → `BRK-B`, `GOOG` → `GOOGL`), skipping listings with no Form 4 filings, honoring Finnhub's rate-limit reset, and deleting the SecuritiesDB code | haohnguyen94-droid; Bryan reviews | Open, updated with `main` 2026-10-20, merges cleanly. CI is red only on the `certifi` audit (problem 6); goes green once `fix/certifi-cve` lands and #18 is updated again. Needs Bryan's review |
+| **Fix the runner's missing settings.** `run_pipeline` and `collect_source` pass the startup `Settings` into every collector, so Congress gets its FMP key and insider its Finnhub key. Add a test that runs the pipeline through the CLI with keys present only in `Settings` | db-implementer | Assigned 2026-10-20 (`fix/runner-settings`) |
 | **D4: FMP plan tier.** Free plan returns 402 on page 1 | Bryan | Decision needed |
 | Record the provider switch: the first Finnhub batch will differ sharply from the last SecuritiesDB batch, so expect one recorded quality override when it first publishes | primary | When it goes live |
 
@@ -95,9 +110,9 @@ M0 Restore ──► M1 Correctness ──► M2 Resilient publishing ──► 
 
 The Phase 1/2 packets from `docs/work-items/phase-1-2-kickoff.md` that are **merged:** P2-B settings, P2-D session settings, P1-A FMP pagination, P1-B quality checks, P2-C lockfile.
 
-**Still open from those packets:** P2-A structured logging (no `print()` in `src/`), P1-C provider contract-test harness, P2-E `legacy_*` renames and `Protocol` interfaces.
+**Still open from those packets:** P2-A structured logging (no `print()` in `src/`; dev-ops, in progress), P1-C provider contract-test harness (dev-sources; **built, in review** on `test/provider-contracts`), P2-E `legacy_*` renames and `Protocol` interfaces.
 
-**Follow-ups to merged code. These must land before the first real publication:**
+**Follow-ups to merged code. These must land before the first real publication.** The first four are **built and in review** as packet M1-A (`feat/m1-publication-events`, commit `7ed26ee`, 390 tests passing; migration id `publication_events_v1` is a placeholder, renumbered at merge per §4):
 
 - **Move the quality audit out of `ranking_config`** (decision D12). P1-B merged storing its audit and override inside `publications.ranking_config`, which is a replay input. Add a `publication_audit` migration (the next free number at merge): one append-only `publication_events` table (`publication_id`, `kind` ∈ {`quality_passed`, `quality_override`, `degraded`, `rollback`}, `actor`, `reason`, `checks` JSONB, `created_at`). It also stores degraded markers (M2) and rollbacks (M3). `ranking_config` goes back to holding ranking inputs only. This is free until the first real publication and permanent after it.
 - **Narrow overrides.** An override skips only the named quality checks, not the observation-date regression guard. Going backwards in time needs a rollback.
@@ -136,9 +151,12 @@ Unchanged from old Phase 3 except for these points:
 - **Environments:** local (Docker PostgreSQL 17 for pipeline tests, plus the Supabase local stack for `app` and RLS tests), staging and prod.
 - **Roles** extend `provision_roles.py`: `perennial_migrator`, `perennial_pipeline`, `perennial_api` (read-only on `perennial`, row-level-security-bound on `app`) and `perennial_readonly` for ad-hoc operator queries.
 - **`cli.py rollback --to <publication_id>`** records a `rollback` event in `publication_events`. No new migration is needed.
-- **Scheduling:** a one-shot scheduled job replaces the APScheduler daemon, with a missed-run monitor, scheduled health checks, alerts linked to runbooks, and a point-in-time recovery plus logical-backup restore drill.
+- **Scheduling:** a one-shot scheduled job replaces the APScheduler daemon, with a missed-run monitor, scheduled health checks and alerts linked to runbooks.
+- **Database observability** (added in the rescope): `pg_stat_statements` on, and alerts for slow queries, connection count near the plan limit and disk growth. On Supabase these are mostly dashboard settings plus a few alert rules; write them down in `OPERATIONS.md`.
+- **Secret rotation runbook** (added): the steps to rotate each provider key and the database passwords without downtime, rehearsed once on staging.
+- **Restore drill:** one timed point-in-time recovery plus logical-backup restore on staging. This is the pre-launch drill M8 relies on.
 
-**Gate M3:** the old Gate 3 checklist in full, for the pipeline. Shadow comparison is the one exception; it moves to M7.
+**Gate M3:** the old Gate 3 checklist for the pipeline, plus the observability alerts firing in a test and one successful, timed restore drill. Shadow comparison moves to M7.
 
 ### M4: Security identity and reference data (1–1.5 weeks; old Phase 5 item 3, moved forward)
 
@@ -147,25 +165,27 @@ Unchanged from old Phase 3 except for these points:
 - ARK's suffixed tickers such as `RKLB UQ`
 - ADRs: TSM's Form 4 rows are priced per ordinary share, and one ADR is 5 shares
 
-#18 handles the ticker cases with a mapping function inside `insider.py`. That's the right fix for now, but it's per-provider code, not data. M4 replaces it with stored identifiers. GDELT (#17) also needs `company_profiles` for its sector data, which is another reason to do M4 early.
+#18 handles the ticker cases with a mapping function inside `insider.py`. That's the right fix for now, but it's per-provider code, not data. M4 replaces it with stored identifiers.
+
+GDELT's `0004` put `sector` and `industry` on `market_cap_observations`, which the final contract migration drops. M4 moves them, expand then contract: `company_profiles` gets the columns, a backfill copies them, GDELT reads from `company_profiles`, and the old columns go with `market_cap_observations` in the contract step.
 
 Migration (security identity; numbered at merge):
 
 | Table | Purpose |
 |---|---|
-| `securities` (existing) | Keeps `symbol` as the display ticker. Add `name`, `security_type` (common, ADR, ETF), `country`, `figi` (unique, nullable at first) and `is_active`. |
-| `security_identifiers` | `(security_id, scheme, value, valid_from, valid_to)` with scheme ∈ {`ticker`, `figi`, `cusip`, `cik`}. Records ticker renames and share-class aliases over time. |
+| `securities` (existing) | Keeps `symbol` as the display ticker. Add `name`, `security_type` (common, ADR, ETF), `country`, `figi` (unique, nullable) and `is_active`. |
+| `security_identifiers` | `(security_id, scheme, value)`, unique on `(scheme, value)`, with scheme ∈ {`ticker`, `figi`, `cusip`, `cik`}. Holds share-class and provider aliases. **Rescope:** no `valid_from`/`valid_to` yet. Add time ranges with an expand migration the first time a ticker rename actually matters. |
 | `company_profiles` | One row per issuer: legal name, sector, industry and alias names. These feed the GDELT name-to-ticker lookup. |
 | `market_caps` | Market caps become a tracked source with its own runs and batches (old Phase 5 item 2), replacing the side-table observations. Migrate `market_cap_observations` with expand then contract. |
 
 - **Resolution:** importers resolve provider tickers through `security_identifiers`. Unresolved symbols fail with a fixed `unresolved_security` code instead of silently creating a new security. ARK suffixes and share-class aliases are seeded once and covered by tests.
-- **Backfill:** fill `figi` and `cik` in batches, outside the migration transaction. Making `figi` mandatory is a separate contract migration after the backfill is verified.
+- **Backfill:** fill `figi` and `cik` where OpenFIGI returns them, in batches outside the migration transaction. **Rescope:** `figi` stays optional; there is no mandatory-FIGI contract migration.
 
-**Gate M4:** every symbol in the current publication resolves to exactly one security with a FIGI. The Finnhub alias cases are regression tests.
+**Gate M4:** every symbol in the current publication resolves to exactly one security. The #18 alias cases (`RKLB UQ`, `BRK.B`, `GOOG`) are regression tests, and the mapping code in `insider.py` is replaced by stored identifiers.
 
 ### M5: App data model and read API (1–1.5 weeks; issues #2 and #3; runs in parallel with M4 after M3)
 
-**Status:** Jaden is building on **Supabase Auth** (`codex/supabase-auth-resend`, no PR yet). That branch includes account, notification and OTP tables and four migrations. Reviewing it against this section is the M5 work. The requirements that matter most:
+**Status:** Jaden is building on **Supabase Auth** (`codex/supabase-auth-resend`, now **PR #22**). That branch includes account, notification and OTP tables and four migrations. Reviewing it against this section is the M5 work. The requirements that matter most:
 - user tables live in schema `app` with row-level security, not in `perennial`
 - the pipeline role gets **no** write or `DELETE` grants on user tables; only the API role writes them
 - migrations use the repo's numbering convention (see §4), not named revision ids such as `auth_supabase_v1`
@@ -185,21 +205,26 @@ Target shape, in schema `app`, with row-level security on every table:
   - `GET /v1/securities/{symbol}`
   - `/me`, preferences, and user-watchlist CRUD
   - The response schemas are versioned and documented in `docs/technical-specs/`.
+- **Account deletion and export** (added in the rescope):
+  - `DELETE /v1/me` removes the user's `app` rows and their Supabase Auth user in one flow. Foreign keys from `app` tables to the user are `ON DELETE CASCADE`. Pipeline data is never touched, because it holds nothing per user (design rule 4).
+  - `GET /v1/me/export` returns the user's profile, preferences and watchlists as JSON.
+  - Both are audited: who and when, never the exported content.
 - **Seeds:** two users and three companies, per issue #2.
 - **Tests:**
   - a cross-user isolation test for every table, run against the Supabase local stack
   - migration round-trip including the RLS policies
   - a test that `perennial_api` cannot write to `perennial`
+  - a test that deleting a user leaves no `app` rows behind and changes no pipeline rows
 
-**Gate M5:** the acceptance scenarios in issues #2 and #3 pass. The auditor signs off on RLS and the JWT trust boundary.
+**Gate M5:** the acceptance scenarios in issues #2 and #3 pass, and so do account deletion and export. The auditor signs off on RLS and the JWT trust boundary.
 
 ### M6: Confidence Score data (2–3 weeks; needs M4 and decision D10)
 
 These are the new sources and derivations from `DECISIONS.md`. Each source follows design rule 1, and each derivation follows rule 2.
 
-**GDELT is already largely built** (AalindCS, draft #17): daily theme volume, tone and evidence articles, plus spike detection. Its design note (`docs/work-items/gdelt-design-note.md` on the branch) proposes the rework this roadmap needs:
-- drop its `sector`/`industry` migration and fold that into M4's `company_profiles`
-- send GDELT through the ingestion contract
+**GDELT is merged** (AalindCS, #17, 2026-10-20) as built: daily theme volume, tone and evidence articles, plus spike detection, in tables that don't go through the ingestion contract. Its design note (`docs/work-items/gdelt-design-note.md`) proposes the rework, which is now **follow-up work on `main`**, not a condition for merging:
+- move `sector`/`industry` to M4's `company_profiles` (see M4)
+- send GDELT through the ingestion contract, with an expand migration that adds batch lineage to the GDELT tables
 - turn spike checks into a derivation run
 
 Recommended answers to the note's four questions:
@@ -225,19 +250,19 @@ The rules are the same as for the watchlist:
 - the breakdown endpoint `GET /v1/securities/{symbol}/score` returns the components, weights and version
 - the score validation from D10 (for example, rank correlation with the Piotroski F-Score) has run and is recorded
 
-### M7: Shadow, cutover and legacy retirement (2 weeks shadow, plus 1 week watch; old Phase 4)
+### M7: Shadow, cutover and legacy retirement (about 1.5 weeks; old Phase 4, rescoped)
 
-- **Shadow:** run both paths daily for at least 2 weeks. An automated job compares the legacy JSON watchlist against the API, and every difference becomes an issue that is either fixed or explained, such as an intentional v2 deduplication.
-- **Cutover:** switch the app to the API behind a config flag, then watch for one week.
+- **Shadow:** run both paths daily for **3–5 trading days**. A diff script compares the legacy JSON watchlist against the API, and every difference is fixed or explained, such as an intentional v2 deduplication. Extend the run only if differences keep appearing.
+- **Cutover:** switch the app to the API behind a config flag, then watch for a few days. The flag stays until retirement, so rolling back is a config change.
 - **Retirement:** delete the JSON writers, `scheduler/cron.py`, `legacy_*` functions, `market_cap_observations` (the contract step after M4), and the `paths.py` local-data plumbing. Fold the fetchers into one adapter per provider behind the `Protocol` interfaces from P2-E.
 
 **Gate M7:** the app is served from production, the shadow differences are resolved, and the legacy code is gone. A search for `json.dump` in `src/services` returns nothing.
 
-### M8: Hardening and closeout (about 1 week; the "done" gate)
+### M8: Hardening and closeout (about 3–4 days; the "done" gate)
 
 - **Retention (D5):** the recommendation is now to **keep all data** (Hong). Raw payloads stay. If storage grows past budget, unpinned payloads move to object storage behind a content-hash pointer (`payload_location`, a migration at that point), and a replay test proves pinned publications are untouched.
-- **Capacity:** simulate 1 year of daily batches for every source. Measure publish time, replay time, backup and restore time, and table and index sizes. Partition a table only if the measurements require it; at current volumes none should.
-- **Recovery:** a quarterly restore drill on staging, with measured RPO ≤ 15 min and RTO ≤ 1 h (D6).
+- **Capacity (rescoped):** a written estimate per source (rows per day × 365 × row and index size), checked against real table sizes after the first month in production. Run a load simulation only if a source grows 10× or the estimate nears the plan limit. Partition nothing unless measurements require it.
+- **Recovery (rescoped):** the M3 drill is the pre-launch proof. After launch, repeat it yearly and after any hosting change, against RPO ≤ 15 min and RTO ≤ 1 h (D6).
 - **Documentation:** a final ERD in `docs/technical-specs/`, every alert linked to a runbook, an ADR for each decision in §5, and the README rewritten for the finished system.
 - **Final audit:** checker and auditor review the whole schema and its roles, not just the diff.
 
@@ -247,7 +272,7 @@ The rules are the same as for the watchlist:
 
 ## 4. Migration plan
 
-**Numbers are assigned when a migration merges, not when it's written.** Three branches currently declare `0004`: ours, GDELT's and auth's. Whoever merges next takes the next free number and renumbers in their rebase. CI (`test_migration_guard.py`) fails any PR that would create a duplicate id or a second head. All revision ids are sequential four-digit numbers; named ids such as `auth_supabase_v1` get renumbered at merge. Each migration still needs its design note first (§2.4 of the 2026-10-08 roadmap).
+**Numbers are assigned when a migration merges, not when it's written.** GDELT merged first and took `0004` and `0005`. `publication_events` (placeholder `publication_events_v1`) and auth (#22) both still need renumbering. Whoever merges next takes the next free number, starting at `0006`, and rebases onto it. CI (`test_migration_guard.py`) fails any PR that would create a duplicate id or a second head. All revision ids are sequential four-digit numbers; named ids such as `auth_supabase_v1` get renumbered at merge. Each migration still needs its design note first (§2.4 of the 2026-10-08 roadmap).
 
 Expected order, by readiness:
 
@@ -256,10 +281,11 @@ Expected order, by readiness:
 | next | M1 | expand | `publication_events` audit table |
 | then | M5 | expand | Supabase Auth account tables from Jaden's branch, after review: `app` schema, RLS, no pipeline grants |
 | then | M4 | expand | security identity, `company_profiles` (takes GDELT's sector and industry), `market_caps` source |
-| then | M6 | expand | GDELT tables through the ingestion contract (#17, reworked) |
+| done | M6 | expand | `0004` GDELT `sector`/`industry` columns, `0005` GDELT tables (#17, merged 2026-10-20) |
+| then | M6 | expand | GDELT follow-up: batch lineage through the ingestion contract |
 | later | M6 | expand | fundamentals, news and sentiment, `publications.kind` and `company_scores` |
 | later | M8 | expand | payload storage pointer, only if storage needs it |
-| last | M7/M8 | **contract** | Make `securities.figi` NOT NULL, drop `market_cap_observations` and `publication_market_caps`, and switch the `current_publication` PK to `(kind, channel)` |
+| last | M7/M8 | **contract** | Drop `market_cap_observations` and `publication_market_caps`, and switch the `current_publication` PK to `(kind, channel)`. (`figi` stays nullable after the rescope.) |
 
 Only the last one removes anything, and it runs only after the code that used those objects has been gone for a full release.
 
@@ -279,6 +305,7 @@ Only the last one removes anything, and it runs only after the code that used th
 | D10 | Confidence Score weights and validation | M6 | Accept 60/25/15 as `score-v1` with the Piotroski check. **Blocks M6** |
 | D12 | Quality-check audit storage | before the first real publication | The `publication_events` table, not JSONB in `ranking_config` |
 | D13 | Congress history window | M1 | Store everything FMP serves, and apply the 2-year window in ranking |
+| **D14** | **Monthly cost ceiling** for hosting and data providers | M3 (before D1 is final) | Set one number. It decides the Supabase plan (point-in-time recovery is a paid add-on), the FMP tier (D4) and whether Finnhub's free terms (D8) are enough |
 
 **Settled:**
 
@@ -318,13 +345,12 @@ Re-baselined on 2026-10-18.
 |---|---|
 | 0–1 | M0: merge #18, runner settings fix, D4. M1 follow-ups start |
 | 1–2 | M1 follow-ups and logging; M2 |
-| 2–3 | M3; review Jaden's auth branch and GDELT #17 against M5 and M6 |
+| 2–3 | M3; review Jaden's auth PR #22 against M5; plan the GDELT follow-up rework |
 | 3–5 | M4 and M5 in parallel; GDELT rework lands after M4 |
-| 5–7 | Rest of M6; M7's shadow period starts as soon as M5 is serving |
-| 7–9 | M7 cutover and watch; M8 |
+| 5–6.5 | Rest of M6; M7's short shadow run starts as soon as M5 is serving |
+| 6.5–7 | M7 cutover; M8 |
 
-About **9 weeks to a finished database.** The things most likely to stretch it:
+About **7 weeks to a finished database** after the rescope, down from 9. The time saved comes mainly from M7's shorter shadow run and M8's lighter capacity and recovery work; the added items (account deletion, observability, secret rotation) cost a few days. The things most likely to stretch it:
 - D4, which blocks a live publication now
-- D3 and D10
-- the fixed 2-week shadow period
+- D3, D10 and D14
 - entity-resolution quality in M4 and M6
