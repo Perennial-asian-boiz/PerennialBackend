@@ -1,8 +1,8 @@
 """Safety and real PostgreSQL checks for operational tooling."""
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -35,7 +35,7 @@ def test_restore_rejects_unsafe_sources(url):
 
 
 def test_restore_pins_loopback_and_removes_libpq_defaults(monkeypatch):
-    from restore_drill import test_connection, clean_environment
+    from restore_drill import clean_environment, test_connection
     monkeypatch.setenv("PGSERVICE", "prod")
     monkeypatch.setenv("PGHOSTADDR", "8.8.8.8")
     assert not any(k.startswith("PG") for k in clean_environment())
@@ -45,9 +45,10 @@ def test_restore_pins_loopback_and_removes_libpq_defaults(monkeypatch):
 
 @pytest.mark.db
 def test_restore_round_trip(engine, fixture_path, tmp_path):
+    import json
+
     from restore_drill import run_drill
     from src.ingestion.importer import CollectionOutcome, import_collection
-    import json
     payload = json.loads(fixture_path("ark_holdings.json").read_text())
     assert import_collection(engine, CollectionOutcome.success(
         "ark_holdings", "fixture", payload["holdings"])).succeeded
@@ -62,13 +63,14 @@ def test_restore_round_trip(engine, fixture_path, tmp_path):
 @pytest.mark.db
 def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
     """Exercise SET ROLE, actual imports, reruns, and deny historical mutation."""
+    import json
+    import secrets
+
     from provision_roles import provision
     from sqlalchemy import event, text
     from sqlalchemy.exc import DBAPIError
     from src.db.session import make_engine
     from src.ingestion.importer import CollectionOutcome, import_collection
-    import json
-    import secrets
 
     suffix = secrets.token_hex(6)
     owner, importer, reader = [f"ops_test_{r}_{suffix}" for r in ("owner", "importer", "reader")]
@@ -80,6 +82,33 @@ def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
         conn.execute(text(f'GRANT UPDATE ON perennial.source_batches TO "{importer}"'))
         conn.execute(text(f'GRANT UPDATE (symbol) ON perennial.securities TO "{importer}"'))
         provision(conn.connection.driver_connection, roles, phase="grants")
+        for role in (importer, reader):
+            for table in (
+                "users",
+                "email_verification_codes",
+                "user_preferences",
+                "user_notification_settings",
+                "user_watchlist",
+                "auth_sessions",
+            ):
+                for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                    assert not conn.execute(
+                        text(
+                            "SELECT has_table_privilege(:role, :table, :privilege)"
+                        ),
+                        {
+                            "role": role,
+                            "table": f"perennial.{table}",
+                            "privilege": privilege,
+                        },
+                    ).scalar()
+            assert not conn.execute(
+                text(
+                    "SELECT has_column_privilege(:role, 'perennial.users', "
+                    "'password_hash', 'SELECT')"
+                ),
+                {"role": role},
+            ).scalar()
     try:
         restricted = make_engine(engine.url, connect_args={"hostaddr": "127.0.0.1"})
         @event.listens_for(restricted, "connect")
@@ -94,8 +123,8 @@ def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
         with restricted.begin() as conn:
             assert conn.execute(text("SELECT count(*) FROM perennial.ark_holdings")).scalar() > 0
             conn.execute(text("UPDATE perennial.securities SET exchange='NASDAQ' WHERE exchange IS NULL"))
-        from test_pipeline import inputs, caps
-        from src.pipeline.publication import publish, replay, current
+        from src.pipeline.publication import current, publish, replay
+        from test_pipeline import caps, inputs
         runs, batches = inputs(restricted, fixture_path)
         publication = publish(restricted, runs, caps(restricted, batches))
         assert replay(restricted, publication) == current(restricted)["output"]

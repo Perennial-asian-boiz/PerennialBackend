@@ -13,6 +13,8 @@ dependencies = [
     "alembic==1.20.0",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
+    "fastapi==0.143.1",
+    "uvicorn==0.34.0",
 ]
 
 [project.optional-dependencies]
@@ -23,19 +25,25 @@ dev = [
     "types-requests==2.33.0.20261006",
     "pip-audit==2.10.1",
     "pip-tools==7.6.2",
+    "httpx2==2.13.1",
 ]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-# Phase 0 gates the database production path. Legacy services and the separately
-# owned database contract test are not swept into a formatting-only rewrite.
+# Gate the database path and Supabase account surface. Legacy services and
+# separately owned contract tests are not swept into formatting-only rewrites.
 include = [
+    "development/backend/src/api/**/*.py",
     "development/backend/src/settings.py",
     "development/backend/src/db/**/*.py",
     "development/backend/src/ingestion/**/*.py",
     "development/backend/src/pipeline/**/*.py",
     "development/database/ops/quality_gate.py",
+    "development/database/ops/provision_api_role.py",
+    "development/backend/tests/test_supabase_accounts.py",
+    "development/database/migrations/versions/20261018_supabase_accounts.py",
+    "development/database/migrations/versions/20261018_registration_email_check.py",
 ]
 
 [tool.ruff.lint]
