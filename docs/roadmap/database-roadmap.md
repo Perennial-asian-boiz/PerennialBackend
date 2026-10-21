@@ -1,7 +1,7 @@
 # Perennial database: roadmap to completion
 
 **Owner:** Bryan (product owner, final approver)
-**Written:** 2026-10-13 · **Updated:** 2026-10-18, from `origin/main` at `12e4b1b` · **Rescoped:** 2026-10-20 for a pre-launch team (see "Sizing" below)
+**Written:** 2026-10-13 · **Updated:** 2026-10-21 (decisions recorded); 2026-10-18, from `origin/main` at `12e4b1b` · **Rescoped:** 2026-10-20 for a pre-launch team (see "Sizing" below)
 **Replaces:** the 2026-10-08 production roadmap (archived at `docs/roadmap/production-roadmap.md`). The process rules in §2 of that document still apply and are not repeated here.
 **Purpose:** take the database from "a working watchlist pipeline that is currently stalled" to "finished": every product data domain modeled, in production, serving the app, and operating unattended. When the last milestone in this document closes, the database is done. Anything after that is a feature, not completion work.
 
@@ -100,8 +100,8 @@ M0 Restore ──► M1 Correctness ──► M2 Resilient publishing ──► 
 | Remove Senate Stock Watcher from `collect_congress` and `fmp.py` (feature dropped) | — | **Done** (#16, landed via #19) |
 | Branch cleanup: stranded stack landed (#19), merged branches deleted, auto-delete of head branches turned on | — | **Done** 2026-10-18 |
 | **Merge #18: move `collect_insider` to Finnhub.** Includes the ticker mapping (`RKLB UQ` → `RKLB`, `BRK.B` → `BRK-B`, `GOOG` → `GOOGL`), skipping listings with no Form 4 filings, honoring Finnhub's rate-limit reset, and deleting the SecuritiesDB code | haohnguyen94-droid; Bryan reviews | Open, updated with `main` 2026-10-20, merges cleanly. CI is red only on the `certifi` audit (problem 6); goes green once `fix/certifi-cve` lands and #18 is updated again. Needs Bryan's review |
-| **Fix the runner's missing settings.** `run_pipeline` and `collect_source` pass the startup `Settings` into every collector, so Congress gets its FMP key and insider its Finnhub key. Add a test that runs the pipeline through the CLI with keys present only in `Settings` | db-implementer | Assigned 2026-10-20 (`fix/runner-settings`) |
-| **D4: FMP plan tier.** Free plan returns 402 on page 1 | Bryan | Decision needed |
+| **Fix the runner's missing settings.** `run_pipeline` and `collect_source` pass the startup `Settings` into every collector, so Congress gets its FMP key and insider its Finnhub key. Add a test that runs the pipeline through the CLI with keys present only in `Settings` | db-implementer | Built and checker-accepted: PR #24 |
+| **D4 = option B: bounded date-window queries on the free plan.** Then a probe run by Bryan (status codes and row counts only) | dev-sources; Bryan runs the probe | Decided 2026-10-21; code assigned |
 | Record the provider switch: the first Finnhub batch will differ sharply from the last SecuritiesDB batch, so expect one recorded quality override when it first publishes | primary | When it goes live |
 
 **Gate M0:** with synthetic fixtures, `run-pipeline` started through the CLI publishes with all four sources, using keys supplied only through `Settings`. No code path references SecuritiesDB.
@@ -118,10 +118,10 @@ The Phase 1/2 packets from `docs/work-items/phase-1-2-kickoff.md` that are **mer
 - **Narrow overrides.** An override skips only the named quality checks, not the observation-date regression guard. Going backwards in time needs a rollback.
 - **Fix the empty-baseline lockout.** When the previous batch had zero rows, the row-count check records `no_baseline` instead of failing every later batch.
 - **Make publishing fail fast.** The session-wide `lock_timeout=5s` from P2-D also applies to the blocking `pg_advisory_xact_lock(170099)` in `publish()`. Switch to `pg_try_advisory_xact_lock` with a fixed `publication_in_progress` code, plus a test with two concurrent publishers.
-- **Congress history window** (new decision D13). Both Congress paths drop trades older than 2 years before storage. If Hong's "keep all the data" is confirmed, store the full history FMP serves and apply the 2-year window in ranking, so the watchlist doesn't change.
+- **Congress history window** (decision D13, settled). Both Congress paths drop trades older than 2 years before storage. Store the full history FMP serves instead, and apply the 2-year window in ranking, so the watchlist doesn't change.
 
 **Gate M1** (old Gates 1 and 2 combined):
-- three consecutive successful staging runs against live providers, which needs D3
+- three consecutive successful staging runs against live providers, run by Bryan with the existing keys (D3)
 - quality checks on, with the measured row counts, run times and retry rates recorded in `OPERATIONS.md`
 - zero `print()` calls in `src/` outside `cron.py`
 - the four follow-ups above merged before any real publication
@@ -130,7 +130,7 @@ The Phase 1/2 packets from `docs/work-items/phase-1-2-kickoff.md` that are **mer
 
 **Goal:** one provider outage makes one source stale, not the whole watchlist.
 
-- **Per-source policy in settings:** `required`, `max_reuse_age` and `max_age`. The recommended defaults are in decision D7.
+- **Per-source policy in settings:** `required`, `max_reuse_age` and `max_age`. The defaults are in decision D7 (settled).
 - **The runner selects instead of aborting.** For each source, it uses the current run's batch if the collection succeeded. Otherwise it reuses the latest good batch, if that batch is within `max_reuse_age`. A required source with nothing usable still aborts the run.
 - **Downstream runs use the upstream batches that were selected.** If Congress fails and yesterday's batch is reused, the insider collection is planned from that same reused batch, and the existing lineage check (`publication.py:102-110`) passes unchanged. That check doesn't need to be relaxed.
 - **Degraded publications are marked.** A publication that reuses any batch gets a `degraded` event in `publication_events`, listing each reused source and its age. The ranking config records each source's as-of date, which it already does. The API (M5) exposes `degraded: true` and the per-source dates.
@@ -297,21 +297,21 @@ Only the last one removes anything, and it runs only after the code that used th
 
 | ID | Decision | Needed by | Recommendation |
 |---|---|---|---|
-| D3 | Staging provider keys: FMP, Finnhub, Nasdaq, ARK | M1 gate | Separate staging and prod keys |
-| **D4** | **FMP plan tier** | **M0, now** | The free plan returns 402 on Senate page 1, so Congress can't complete. Choose a paid tier, or a different Congress endpoint or date-window query, recorded in an ADR |
-| D6 | SLOs and on-call | M3 | As proposed: publish by 10:30 PT on 95% of trading days; RPO 15 min, RTO 1 h |
-| D7 | Reuse limits for degraded publishing | M2 | Short interest 15 days; insider, ARK and Congress 3 days; market caps 3 days. Nothing may be reused past its `max_age` |
-| D8 | Terms-of-service review | before M7 cutover | Finnhub's free tier (check redistribution), FMP, Nasdaq, Yahoo, GDELT |
-| D10 | Confidence Score weights and validation | M6 | Accept 60/25/15 as `score-v1` with the Piotroski check. **Blocks M6** |
-| D12 | Quality-check audit storage | before the first real publication | The `publication_events` table, not JSONB in `ranking_config` |
-| D13 | Congress history window | M1 | Store everything FMP serves, and apply the 2-year window in ranking |
-| **D14** | **Monthly cost ceiling** for hosting and data providers | M3 (before D1 is final) | Set one number. It decides the Supabase plan (point-in-time recovery is a paid add-on), the FMP tier (D4) and whether Finnhub's free terms (D8) are enough |
+| D8 | Terms-of-service review | before M7 cutover | Finnhub's free tier (check redistribution), FMP, Nasdaq, Yahoo, GDELT. Nasdaq short interest and ARK come from unofficial public endpoints (`api.nasdaq.com`, `arkfunds.io`), so check whether showing their data to users is allowed |
 
-**Settled:**
+**Settled** (D3, D4, D6, D7, D10, D13 and D14 by Bryan on 2026-10-21):
 
 | ID | Decision | Outcome |
 |---|---|---|
-| D1 | Hosting | Supabase Postgres 17, since auth is on Supabase. Still confirm session-mode connections and point-in-time recovery on the plan |
+| D1 | Hosting | Supabase Postgres 17, since auth is on Supabase. Start on the free plan (D14). Before production, confirm a direct or session-mode connection for the pipeline; point-in-time recovery is a launch-time upgrade, and until then the restore drill uses scheduled logical backups |
+| D3 | Staging provider keys | Only FMP and Finnhub need keys; Nasdaq and ARK need none. Use the existing FMP and Finnhub keys for staging for now, stored outside the repo; get separate production keys at launch. Agents never handle real keys: Bryan runs live probes and staging runs |
+| D4 | FMP plan tier | **Stay on the free plan; option B.** The Congress collector queries bounded date windows instead of deep pagination. Bryan verifies it with a probe that reports only status codes and row counts. If the free plan still returns 402, fall back to a paid tier or another provider, recorded in an ADR |
+| D6 | SLOs | Publish by 10:30 PT on 95% of trading days; RPO 15 min, RTO 1 h. Targets for alerts and the restore drill, not an on-call commitment |
+| D7 | Reuse limits for degraded publishing | Short interest 15 days; insider, ARK and Congress 3 days; market caps 3 days. Nothing may be reused past its `max_age` |
+| D10 | Confidence Score weights | 60/25/15 as `score-v1`, validated against the Piotroski F-Score. Weights are versioned, so retuning is cheap |
+| D12 | Quality-check audit storage | The `publication_events` table, not JSONB in `ranking_config` (#25) |
+| D13 | Congress history window | Store everything FMP serves, and apply the 2-year window in ranking, so the watchlist doesn't change |
+| D14 | Monthly cost ceiling | **Free tiers only for now;** revisit once there is a budget. Paid items (point-in-time recovery, any paid provider tier) are launch-time upgrades, not blockers |
 | D2 | Versions | Python 3.12, PostgreSQL 17 |
 | D5 | Retention | Keep all data (Hong). Move unpinned payloads to object storage only if storage requires it |
 | D11 | API data path | FastAPI is the only path to user data, with Supabase Auth JWTs and RLS as a second defense |
@@ -333,7 +333,7 @@ Only the last one removes anything, and it runs only after the code that used th
 | Coordination state in `/private/tmp` lost again | Mitigated | Durable state goes in GitHub issues and `docs/`; worktrees go outside `/private/tmp` |
 | Stacked PRs merged into a stack branch instead of `main` | Mitigated (happened 2026-10-14) | Head branches are deleted automatically on merge, so GitHub moves stacked PRs to `main` |
 | Parallel branches claim the same migration number | Mitigated | CI migration guard; numbers assigned at merge |
-| The free FMP tier blocks Congress collection | Happening now | D4 |
+| The free FMP tier blocks Congress collection | Happening now | D4 option B (date windows); paid tier or another provider if the probe still fails |
 
 ---
 
@@ -351,6 +351,6 @@ Re-baselined on 2026-10-18.
 | 6.5–7 | M7 cutover; M8 |
 
 About **7 weeks to a finished database** after the rescope, down from 9. The time saved comes mainly from M7's shorter shadow run and M8's lighter capacity and recovery work; the added items (account deletion, observability, secret rotation) cost a few days. The things most likely to stretch it:
-- D4, which blocks a live publication now
-- D3, D10 and D14
+- whether D4 option B works on the free FMP plan
+- free-tier limits under D14 (no point-in-time recovery until launch; Finnhub rate limits)
 - entity-resolution quality in M4 and M6
