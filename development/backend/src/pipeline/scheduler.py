@@ -41,7 +41,9 @@ def run_full_pipeline(settings: Settings | None = None) -> int | None:
         engine = make_engine(
             settings.database_url.get_secret_value(), workload="pipeline"
         )
-        return run_pipeline(engine, quality_thresholds=settings.quality_thresholds)
+        return run_pipeline(
+            engine, quality_thresholds=settings.quality_thresholds, settings=settings
+        )
     except Exception as exc:
         logger.error("pipeline failed: %s", describe_exception(exc))
         failed = True
