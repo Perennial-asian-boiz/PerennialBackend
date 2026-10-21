@@ -15,6 +15,7 @@ from src.pipeline.publication import PublicationQualityError, current, publish, 
 from src.settings import _quality_defaults
 from test_collectors import FakeResponse, FakeSession, fmp_item, purchase, si_rows
 from test_pipeline import caps, fixture_records
+from test_publication_quality import events
 
 SOURCES = ("congress_trades", "insider_trades", "short_interest")
 UPSTREAM = {"trades": [{"ticker": "ZZAA", "trade_type": "Purchase"}], "holdings": []}
@@ -229,7 +230,7 @@ def test_unknown_content_dates_are_not_filled_with_collection_time(dates):
 def test_empty_first_publication_and_identical_retry_keep_no_baseline(
     engine, fixture_path
 ):
-    day = date.today()
+    day = date.today() - timedelta(days=2)
     runs, batches = {}, {}
     for source in (
         "congress_trades",
@@ -265,10 +266,14 @@ def test_empty_first_publication_and_identical_retry_keep_no_baseline(
     saved = current(engine)["output"]
     assert all(
         item["status"] == "no_baseline"
-        for item in current(engine)["ranking_config"]["quality_audit"][
-            "sources"
-        ].values()
+        for item in events(engine, first)[0]["checks"]["sources"].values()
     )
     second = publish(engine, runs, caps(engine, batches))
     assert replay(engine, first) == saved
     assert replay(engine, second) == current(engine)["output"]
+
+    # With merged M1-A, a first dated nonempty batch after empty is eligible.
+    runs, batches = import_round(engine, fixture_path)
+    third = publish(engine, runs, caps(engine, batches))
+    assert replay(engine, third) == current(engine)["output"]
+    assert replay(engine, first) == saved
