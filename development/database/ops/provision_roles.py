@@ -38,7 +38,7 @@ MUTABLE = (
 )
 IMMUTABLE += ("gdelt_articles",)
 TABLES = (*IMMUTABLE, *MUTABLE, "securities")
-USER_TABLES = {
+LEGACY_AUTH_TABLES = {
     "users",
     "email_verification_codes",
     "user_preferences",
@@ -181,6 +181,29 @@ def provision(conn, roles, *, phase):
                 sql.Identifier(reader),
             )
         )
+        if table in LEGACY_AUTH_TABLES:
+            # Supabase Auth replaced this unused custom-auth schema. In
+            # particular, never grant pipeline roles access to password_hash.
+            sequences = conn.execute(
+                "SELECT pg_get_serial_sequence(%s, attname) FROM pg_attribute "
+                "WHERE attrelid=%s::regclass AND NOT attisdropped",
+                (f"perennial.{table}", f"perennial.{table}"),
+            ).fetchall()
+            for (sequence,) in sequences:
+                if sequence is None:
+                    continue
+                seq_schema, seq_name = conn.execute(
+                    "SELECT n.nspname,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
+                    "WHERE c.oid=%s::regclass",
+                    (sequence,),
+                ).fetchone()
+                seq_ident = sql.Identifier(seq_schema, seq_name)
+                conn.execute(
+                    sql.SQL("REVOKE ALL ON SEQUENCE {} FROM PUBLIC, {}, {}").format(
+                        seq_ident, sql.Identifier(importer), sql.Identifier(reader)
+                    )
+                )
+            continue
         conn.execute(
             sql.SQL("GRANT SELECT, INSERT ON TABLE {} TO {}").format(
                 ident, sql.Identifier(importer)
@@ -197,13 +220,7 @@ def provision(conn, roles, *, phase):
                     ident, sql.Identifier(importer)
                 )
             )
-        if table in USER_TABLES:
-            conn.execute(
-                sql.SQL("GRANT DELETE ON TABLE {} TO {}").format(
-                    ident, sql.Identifier(importer)
-                )
-            )
-        elif table == "securities":
+        if table == "securities":
             conn.execute(
                 sql.SQL("GRANT UPDATE (exchange, currency) ON TABLE {} TO {}").format(
                     ident, sql.Identifier(importer)
@@ -211,10 +228,12 @@ def provision(conn, roles, *, phase):
             )
         sequences = conn.execute(
             "SELECT pg_get_serial_sequence(%s, attname) FROM pg_attribute "
-            "WHERE attrelid=%s::regclass AND attidentity <> '' AND NOT attisdropped",
+            "WHERE attrelid=%s::regclass AND NOT attisdropped",
             (f"perennial.{table}", f"perennial.{table}"),
         ).fetchall()
         for (sequence,) in sequences:
+            if sequence is None:
+                continue
             seq_schema, seq_name = conn.execute(
                 "SELECT n.nspname,c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace "
                 "WHERE c.oid=%s::regclass",
