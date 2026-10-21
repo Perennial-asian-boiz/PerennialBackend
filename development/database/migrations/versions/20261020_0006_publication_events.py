@@ -4,13 +4,13 @@ Expand only. Publications written before this revision keep their legacy
 ranking_config.quality_audit key; they are immutable, replay ignores it, and no
 backfill is attempted. Downgrade drops the table and with it any event history.
 
-The descriptive id is a placeholder; the merge assigns the next number (0006).
+Numbered 0006 per roadmap §4 (it was the placeholder publication_events_v1).
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-revision = 'publication_events_v1'
+revision = '0006'
 down_revision = '0005'
 branch_labels = None
 depends_on = None
