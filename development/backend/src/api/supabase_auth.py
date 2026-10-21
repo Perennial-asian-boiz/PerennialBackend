@@ -46,6 +46,9 @@ class AuthProviderError(Exception):
             self.field_errors = {"email": self.message}
         elif code == "email_exists":
             self.field_errors = {"email": self.message}
+        elif code == "same_password":
+            self.message = "Choose a password different from your current password."
+            self.field_errors = {"new_password": self.message}
         elif code == "email_not_confirmed":
             self.message = "Please confirm your email using the link in your inbox before signing in."
         elif code == "email_address_not_authorized":
@@ -135,6 +138,8 @@ class SupabaseAuth:
                             reasons=reasons if isinstance(reasons, list) else (),
                         )
                     if code in {"email_address_invalid", "validation_failed"}:
+                        raise AuthProviderError(422, code)
+                    if code == "same_password":
                         raise AuthProviderError(422, code)
                     if code in {
                         "email_address_not_authorized",

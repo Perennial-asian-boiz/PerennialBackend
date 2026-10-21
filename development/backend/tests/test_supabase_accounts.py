@@ -877,6 +877,12 @@ def test_provider_field_errors_reach_the_client(api):
         ("signup_disabled", 503, None, "registration is currently unavailable"),
         ("over_email_send_rate_limit", 429, None, "can't send another email"),
         ("validation_failed", 422, None, "couldn't validate"),
+        (
+            "same_password",
+            422,
+            "new_password",
+            "different from your current password",
+        ),
         ("unknown-secret-sentinel", 401, None, "Invalid email, password, or session"),
         ({"secret": "sentinel"}, 401, None, "Invalid email, password, or session"),
     ],
