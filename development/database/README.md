@@ -95,6 +95,10 @@ so neither an empty list nor an empty `errors[]` proves success.
   transaction date is not ISO fail the collection instead of being dropped
   by the fetcher's two-year filter. Database insider and short-interest ticker plans
   come from pinned Congress/ARK batches, recorded in `run_dependencies`.
+  Insider tickers are requested from Finnhub under their provider symbol
+  ("RKLB UQ" as RKLB, BRK.B as BRK-B, GOOG as GOOGL); listings with no SEC
+  Form 4 filings (e.g. "ETHQ/U") are not requested and are listed in the
+  batch envelope's `unsupported_tickers`.
   Supplied database rows never fall back to files. Standalone collector usage
   may read legacy upstream files with bounded, validated input. A missing or
   malformed upstream plan fails with `missing_upstream`. A plan
@@ -155,7 +159,7 @@ policy is implemented; only failed-run diagnostics currently expire.
 | `ark_holdings`, `short_interest` | Rows keyed by `(batch_id, security_id)`. |
 | `run_dependencies` | Exact upstream batches used by each downstream run. |
 | `publications`, `publication_sources` | Saved ranking/output and its four source runs/batches. |
-| `market_cap_observations`, `publication_market_caps` | Immutable cap values and the observations used by each publication. |
+| `market_cap_observations`, `publication_market_caps` | Immutable cap values, with the FMP `sector` and `industry` from the same profile response, and the observations used by each publication. |
 | `current_publication` | One atomic production pointer; imports alone never move it. |
 
 Rules worth knowing:

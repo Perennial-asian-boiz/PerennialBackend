@@ -223,6 +223,7 @@ def _absent_insider_meta(reason: str) -> Dict[str, Any]:
         "data_as_of": None,
         "scanned": set(),
         "failed": set(),
+        "unsupported": set(),
         "last_attempt_status": None,
         "retained_previous_data": False,
         "errors_by_code": {},
@@ -256,6 +257,8 @@ def load_insider_signals(
             "data_as_of": data.get("data_as_of") or data.get("fetched_at"),
             "scanned": set(coverage.get("scanned_tickers") or []),
             "failed": set(coverage.get("failed_tickers") or []),
+            # Listings with no SEC Form 4 filings, never requested.
+            "unsupported": set(coverage.get("unsupported_tickers") or []),
             "last_attempt_status": attempt.get("run_status"),
             "retained_previous_data": bool(attempt.get("retained_previous_data")),
             # Why collection degraded, grouped by cause — carried through so a
@@ -428,7 +431,8 @@ def resolve_insider_signal(
         has_buys           — qualifying purchases found
         no_qualifying_buys — scanned and answered; nothing met the filters
         unknown            — scanned but we never got an answer
-        not_evaluated      — outside insider.py's scan scope
+        not_evaluated      — outside insider.py's scan scope, or a listing
+                             with no SEC Form 4 filings to check
 
     Only `no_qualifying_buys` licenses the claim "no insider buying". The
     other two absences are missing data and must not read as a negative.
@@ -459,6 +463,13 @@ def resolve_insider_signal(
             "most_recent_buy": None,
             "data_as_of": meta["data_as_of"],
         }, None
+
+    if ticker in meta["unsupported"]:
+        return {
+            "status": "not_evaluated",
+            "reason": "no_sec_form4_listing",
+            "data_as_of": meta["data_as_of"],
+        }, "insider_data_unavailable"
 
     # Not in the scanned set — either outside scan scope, or the file predates
     # the coverage contract so the scope is unknowable.

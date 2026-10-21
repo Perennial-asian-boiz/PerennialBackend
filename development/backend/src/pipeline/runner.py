@@ -105,6 +105,14 @@ def collect_source(
         return result
 
 
+def _classification(raw: Any, max_length: int) -> str | None:
+    """Sector and industry are optional labels: bad values become null, never abort."""
+    if not isinstance(raw, str):
+        return None
+    label = raw.strip()
+    return label if 0 < len(label) <= max_length else None
+
+
 def collect_market_caps(
     symbols: Sequence[str],
     *,
@@ -141,7 +149,7 @@ def collect_market_caps(
             payload = response.data
             if not isinstance(payload, list) or len(payload) > 1:
                 raise PublicationError("market-cap response is malformed")
-            value = None
+            value = sector = industry = None
             if payload:
                 item = payload[0]
                 if not isinstance(item, dict) or item.get("symbol") != symbol:
@@ -162,12 +170,16 @@ def collect_market_caps(
                         raise PublicationError(
                             "market-cap value is malformed"
                         ) from None
+                sector = _classification(item.get("sector"), 64)
+                industry = _classification(item.get("industry"), 128)
             observations[symbol] = {
                 "value": value,
                 "currency": "USD",
                 "provider": "fmp",
                 "retrieved_at": datetime.now(timezone.utc),
                 "observed_at": None,
+                "sector": sector,
+                "industry": industry,
             }
         return observations
     finally:

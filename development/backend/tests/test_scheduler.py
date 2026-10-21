@@ -55,7 +55,7 @@ def test_database_schedule_runs_all_stages_at_startup_and_daily(monkeypatch):
     monkeypatch.setattr(scheduler, 'run_full_pipeline', lambda _settings: called.append('run'))
     scheduler.main()
     assert called == ['run', 'started']
-    assert set(jobs) == {'daily_pipeline'}
+    assert set(jobs) == {'daily_pipeline', 'gdelt_daily'}
     _, trigger, options = jobs['daily_pipeline']
     assert str(trigger.timezone) == 'America/Los_Angeles'
     assert options['max_instances'] == 1 and options['coalesce'] is True

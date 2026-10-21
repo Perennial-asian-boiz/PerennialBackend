@@ -33,9 +33,19 @@ MUTABLE = (
     "user_notification_settings",
     "user_watchlist",
     "auth_sessions",
+    "gdelt_theme_days",
+    "gdelt_spike_checks",
 )
+IMMUTABLE += ("gdelt_articles",)
 TABLES = (*IMMUTABLE, *MUTABLE, "securities")
-USER_TABLES = set(MUTABLE[2:])
+USER_TABLES = {
+    "users",
+    "email_verification_codes",
+    "user_preferences",
+    "user_notification_settings",
+    "user_watchlist",
+    "auth_sessions",
+}
 
 
 def provision(conn, roles, *, phase):

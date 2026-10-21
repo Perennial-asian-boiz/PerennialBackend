@@ -25,8 +25,25 @@ USAGE:
         from paths import ENV_PATH, LOCAL_DATA_DIR
 """
 
+import sys
 from pathlib import Path
 from typing import Optional
+
+
+def use_utf8_console() -> None:
+    """
+    The pipeline's progress output uses emoji and arrows. When output is
+    captured rather than shown in a real terminal (VS Code "Run Code", a log
+    file, the scheduler), Windows falls back to cp1252, which cannot encode
+    them — the first one crashes the run before its JSON is saved. Called at
+    import below, so every module that imports paths gets it for free.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+use_utf8_console()
 
 # consensus_watchlist/ — found by name, so fetchers/ and scheduler/ resolve
 # to the same anchor as consensus.py itself.
