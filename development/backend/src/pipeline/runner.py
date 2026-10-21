@@ -1,9 +1,11 @@
 """Database-first collection and publication. No source JSON files required."""
 
+import inspect
 import logging
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from functools import partial
 from typing import Any, Callable, Mapping, Sequence
 
 import requests
@@ -21,7 +23,7 @@ from src.pipeline.lifecycle import (
 )
 from src.pipeline.publication import PublicationError, publish
 from src.pipeline.ranking import candidate_symbols
-from src.settings import QualityThreshold
+from src.settings import QualityThreshold, Settings
 
 logger = logging.getLogger(__name__)
 UPSTREAM = ("congress_trades", "ark_holdings")
@@ -37,16 +39,34 @@ def _upstream(
     return result
 
 
+def _accepts_settings(collector: Callable[..., CollectionOutcome]) -> bool:
+    try:
+        params = inspect.signature(collector).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(p.name == "settings" or p.kind is p.VAR_KEYWORD for p in params)
+
+
 def collect_source(
     engine: Engine,
     source: str,
     *,
     upstream_batches: Mapping[str, int] | None = None,
     collector: Callable[..., CollectionOutcome] | None = None,
+    settings: Settings | None = None,
 ) -> ImportResult:
+    """Collect and import one source; settings reach collectors that declare them.
+
+    Collectors that need no credential (ARK, short interest) do not take
+    settings, so they are not passed. Fetcher module keys are only a fallback
+    for collectors called without settings.
+    """
     from src.ingestion.collectors import COLLECTORS
 
     collector = COLLECTORS[source] if collector is None else collector
+    kwargs: dict[str, Any] = {}
+    if settings is not None and _accepts_settings(collector):
+        kwargs["settings"] = settings
     with source_lock(engine, source):
         dependencies = {}
         missing = False
@@ -74,9 +94,9 @@ def collect_source(
                 outcome = CollectionOutcome.failure(source, "live", "missing_upstream")
             else:
                 try:
-                    outcome = (
-                        collector(upstream=upstream) if downstream else collector()
-                    )
+                    if downstream:
+                        kwargs["upstream"] = upstream
+                    outcome = collector(**kwargs)
                     if (
                         not isinstance(outcome, CollectionOutcome)
                         or outcome.source != source
@@ -194,6 +214,7 @@ def run_pipeline(
     market_cap_collector: Callable[[Sequence[str]], Mapping[str, dict[str, Any]]]
     | None = None,
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
+    settings: Settings | None = None,
 ) -> int:
     """Stop on a failed stage; all publication writes commit together at the end."""
     with source_lock(engine, "pipeline"):
@@ -202,6 +223,7 @@ def run_pipeline(
             collectors=collectors,
             market_cap_collector=market_cap_collector,
             quality_thresholds=quality_thresholds,
+            settings=settings,
         )
 
 
@@ -212,20 +234,26 @@ def _run_pipeline(
     market_cap_collector: Callable[[Sequence[str]], Mapping[str, dict[str, Any]]]
     | None = None,
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
+    settings: Settings | None = None,
 ) -> int:
     from src.ingestion.collectors import COLLECTORS
 
     collectors = COLLECTORS if collectors is None else collectors
-    market_cap_collector = (
-        collect_market_caps if market_cap_collector is None else market_cap_collector
-    )
+    if market_cap_collector is None:
+        fmp_key = settings.fmp_api_key if settings is not None else None
+        api_key = fmp_key.get_secret_value() if fmp_key is not None else None
+        market_cap_collector = partial(collect_market_caps, api_key=api_key)
     abandon_stale_runs(engine)
     run_ids: dict[str, int] = {}
     batches: dict[str, int] = {}
     for source in m.SOURCES:
         upstream = {s: batches[s] for s in UPSTREAM} if source not in UPSTREAM else None
         result = collect_source(
-            engine, source, upstream_batches=upstream, collector=collectors[source]
+            engine,
+            source,
+            upstream_batches=upstream,
+            collector=collectors[source],
+            settings=settings,
         )
         if not result.succeeded:
             raise RuntimeError(f"collection failed for {source}: {result.error_code}")
