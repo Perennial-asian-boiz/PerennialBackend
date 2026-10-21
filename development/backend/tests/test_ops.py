@@ -118,7 +118,7 @@ def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
             with pytest.raises(DBAPIError):
                 conn.execute(text("INSERT INTO perennial.securities(symbol) VALUES ('READER')"))
         with engine.connect() as conn:
-            for table in ("run_dependencies", "publications", "publication_sources", "market_cap_observations", "publication_market_caps"):
+            for table in ("run_dependencies", "publications", "publication_events", "publication_sources", "market_cap_observations", "publication_market_caps"):
                 assert conn.execute(text("SELECT has_table_privilege(:role,:table,'INSERT')"),
                                     {"role": importer, "table": "perennial." + table}).scalar()
                 assert not conn.execute(text("SELECT has_table_privilege(:role,:table,'UPDATE')"),
