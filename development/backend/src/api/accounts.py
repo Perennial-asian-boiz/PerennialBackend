@@ -23,6 +23,7 @@ from src.db.session import make_engine
 
 router = APIRouter()
 OTP_MINUTES = 15
+RESEND_COOLDOWN_SECONDS = 60
 MAX_ATTEMPTS = 5
 MAX_EMAILS_PER_HOUR = 60
 
@@ -97,6 +98,12 @@ class ChallengeResponse(BaseModel):
     verification_required: bool = True
     resend_after_seconds: int = 0
     verification_method: Literal["email_link", "email_otp"] = "email_otp"
+
+
+class PasswordResetRequestResponse(BaseModel):
+    message: str = (
+        "If an account exists for this email, password reset instructions will be sent."
+    )
 
 
 class UserResponse(BaseModel):
@@ -214,11 +221,22 @@ def check_email_limit(connection, email):
         .mappings()
         .all()
     )
-    # Do not add an app-level resend cooldown. Supabase may still enforce its
-    # own provider-level email rate limits; keep an hourly app cap as well.
     if sum(row.send_count for row in rows) >= MAX_EMAILS_PER_HOUR:
         raise HTTPException(
             429, "Too many verification emails. Please try again later."
+        )
+
+
+def check_resend_cooldown(row):
+    if row.last_sent_at is None:
+        return
+    elapsed = int((now() - row.last_sent_at).total_seconds())
+    remaining = RESEND_COOLDOWN_SECONDS - elapsed
+    if remaining > 0:
+        raise HTTPException(
+            429,
+            f"Please wait {remaining} seconds before requesting another code.",
+            headers={"Retry-After": str(remaining)},
         )
 
 
@@ -243,12 +261,14 @@ def start_challenge(connection, email, flow):
             token_hash=digest(token),
             email=email,
             flow=flow,
+            last_sent_at=now(),
             expires_at=now() + timedelta(minutes=OTP_MINUTES),
         )
     )
     return ChallengeResponse(
         challenge_id=token,
         flow=flow,
+        resend_after_seconds=RESEND_COOLDOWN_SECONDS,
         verification_method="email_otp" if flow == "login" else "email_link",
     )
 
@@ -450,18 +470,26 @@ def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
         return start_challenge(connection, payload.email, flow)
 
 
-@router.post("/auth/forgot-password", response_model=ChallengeResponse)
+@router.post("/auth/forgot-password", response_model=PasswordResetRequestResponse)
 def forgot_password(payload: EmailRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         lock_email(connection, payload.email)
-        if not email_is_registered(connection, payload.email):
-            raise HTTPException(
-                404,
-                "No account has been created with this email address yet. Please create an account first.",
-            )
-        check_email_limit(connection, payload.email)
-        provider.send_code(payload.email, "recovery")
-        return start_challenge(connection, payload.email, "recovery")
+        if email_is_registered(connection, payload.email):
+            try:
+                check_email_limit(connection, payload.email)
+                provider.send_code(payload.email, "recovery")
+            except HTTPException as error:
+                if error.status_code != 429:
+                    raise
+                # Keep rate-limit outcomes indistinguishable from unknown emails.
+                return PasswordResetRequestResponse()
+            except AuthProviderError as error:
+                if error.status != 429:
+                    raise
+                # Provider email limits must not reveal whether an account exists.
+                return PasswordResetRequestResponse()
+            start_challenge(connection, payload.email, "recovery")
+    return PasswordResetRequestResponse()
 
 
 @router.post("/auth/accept-recovery-link")
@@ -524,6 +552,7 @@ def resend_otp(payload: ChallengeRequest, engine: EngineDep, provider: ProviderD
         row = pending_challenge(connection, payload)
         if row.flow != "login":
             raise HTTPException(400, "Request a new email link to continue.")
+        check_resend_cooldown(row)
         check_email_limit(connection, payload.email)
         provider.send_code(payload.email, row.flow)
         connection.execute(
@@ -535,7 +564,11 @@ def resend_otp(payload: ChallengeRequest, engine: EngineDep, provider: ProviderD
                 expires_at=now() + timedelta(minutes=OTP_MINUTES),
             )
         )
-    return ChallengeResponse(challenge_id=payload.challenge_id, flow=row.flow)
+    return ChallengeResponse(
+        challenge_id=payload.challenge_id,
+        flow=row.flow,
+        resend_after_seconds=RESEND_COOLDOWN_SECONDS,
+    )
 
 
 @router.post("/auth/resend-confirmation", response_model=ChallengeResponse)
@@ -546,6 +579,7 @@ def resend_confirmation(
         row = pending_challenge(connection, payload)
         if row.flow != "signup":
             raise HTTPException(400, "An email confirmation request is required.")
+        check_resend_cooldown(row)
         check_email_limit(connection, payload.email)
         provider.send_code(payload.email, "signup")
         connection.execute(
@@ -560,6 +594,7 @@ def resend_confirmation(
     return ChallengeResponse(
         challenge_id=payload.challenge_id,
         flow="signup",
+        resend_after_seconds=RESEND_COOLDOWN_SECONDS,
         verification_method="email_link",
     )
 

@@ -296,17 +296,41 @@ def test_five_failed_attempts_persist_and_block_even_correct_code(api):
     assert client.post("/auth/verify-otp", json=payload).status_code == 400
 
 
-def test_resend_has_no_cooldown_but_hourly_limit_and_expiry(api):
+def test_resend_enforces_sixty_second_cooldown_and_hourly_limit(api):
     client, provider, engine = api
     provider.signup("one@example.com", "password123", "One")
     provider.users["one@example.com"]["email_confirmed_at"] = "2026-10-18T00:00:00Z"
     challenge = client.post(
         "/auth/login", json={"email": "one@example.com", "password": "password123"}
     ).json()
+    assert challenge["resend_after_seconds"] == 60
     payload = {"email": "one@example.com", "challenge_id": challenge["challenge_id"]}
-    assert client.post("/auth/resend-otp", json=payload).status_code == 200
+    blocked = client.post("/auth/resend-otp", json=payload)
+    assert blocked.status_code == 429
+    assert blocked.headers["retry-after"] == "60"
+    with engine.begin() as conn:
+        conn.execute(
+            update(tables.auth_challenges).values(
+                last_sent_at=accounts.now() - timedelta(seconds=61)
+            )
+        )
+    resent = client.post("/auth/resend-otp", json=payload)
+    assert resent.status_code == 200
+    assert resent.json()["resend_after_seconds"] == 60
     for _ in range(accounts.MAX_EMAILS_PER_HOUR - 2):
+        with engine.begin() as conn:
+            conn.execute(
+                update(tables.auth_challenges).values(
+                    last_sent_at=accounts.now() - timedelta(seconds=61)
+                )
+            )
         assert client.post("/auth/resend-otp", json=payload).status_code == 200
+    with engine.begin() as conn:
+        conn.execute(
+            update(tables.auth_challenges).values(
+                last_sent_at=accounts.now() - timedelta(seconds=61)
+            )
+        )
     assert client.post("/auth/resend-otp", json=payload).status_code == 429
     with engine.begin() as conn:
         conn.execute(
@@ -441,10 +465,17 @@ def test_resend_confirmation_keeps_link_flow(api):
         },
     ).json()
     payload = {"email": "one@example.com", "challenge_id": body["challenge_id"]}
+    with _engine.begin() as conn:
+        conn.execute(
+            update(tables.auth_challenges).values(
+                last_sent_at=accounts.now() - timedelta(seconds=61)
+            )
+        )
     response = client.post("/auth/resend-confirmation", json=payload)
     assert (
         response.status_code == 200
         and response.json()["verification_method"] == "email_link"
+        and response.json()["resend_after_seconds"] == 60
     )
     assert provider.sent[-1] == ("one@example.com", "signup")
 
@@ -596,21 +627,15 @@ def test_recovery_session_cannot_read_data_and_resets_password(api):
         ).status_code
         == 403
     )
-    challenge = client.post(
+    provider.sent.clear()
+    request = client.post(
         "/auth/forgot-password", json={"email": body["user"]["email"]}
-    ).json()
-    assert challenge["verification_method"] == "email_link"
-    assert (
-        client.post(
-            "/auth/verify-otp",
-            json={
-                "email": body["user"]["email"],
-                "challenge_id": challenge["challenge_id"],
-                "code": "123456",
-            },
-        ).status_code
-        == 400
     )
+    assert request.status_code == 200
+    assert request.json() == {
+        "message": "If an account exists for this email, password reset instructions will be sent."
+    }
+    assert provider.sent == [(body["user"]["email"], "recovery")]
     assert (
         client.post(
             "/auth/accept-recovery-link", json={"access_token": body["access_token"]}
@@ -651,6 +676,24 @@ def test_recovery_session_cannot_read_data_and_resets_password(api):
         == 200
     )
     assert client.get("/me", headers=normal).status_code == 401
+
+
+def test_forgot_password_does_not_disclose_unknown_email_or_send_email(api):
+    client, provider, _engine = api
+    body, _headers = register(api)
+    provider.sent.clear()
+    known = client.post(
+        "/auth/forgot-password", json={"email": body["user"]["email"]}
+    )
+    unknown = client.post(
+        "/auth/forgot-password", json={"email": "not-registered@example.com"}
+    )
+    expected = {
+        "message": "If an account exists for this email, password reset instructions will be sent."
+    }
+    assert known.status_code == unknown.status_code == 200
+    assert known.json() == unknown.json() == expected
+    assert provider.sent == [(body["user"]["email"], "recovery")]
 
 
 def test_rls_for_non_owner_even_without_where_clause(api):
