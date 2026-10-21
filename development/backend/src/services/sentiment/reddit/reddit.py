@@ -12,6 +12,13 @@ Design
   not real old-Reddit HTML) stops the run early; everything collected is saved.
 * Data is checkpointed periodically, on early stop, on Ctrl+C and at the end.
 * The first few unexpected responses are saved to output/debug_response_N.html.
+* Collection modes: crawl every subreddit's /new, search per ticker, or both
+  (auto = search when the ticker list is small). /hot and /rising are also read,
+  so stickied daily threads and older posts with fresh comments are not missed.
+  Daily / very large threads get their comments fetched under two sorts.
+* After scraping, process_data() drops noise, finds which tickers each post /
+  comment is about (reddit_processing.py), scores the relevant text with
+  score_items() and writes per-ticker rows plus daily / summary aggregates.
 
 Cookie file (required)
 ----------------------
@@ -20,12 +27,18 @@ cookie file from a logged-in browser session and refuses to start without it
 
 Run
 ---
-  python reddit_scraper.py --max-posts 3
-  python reddit_scraper.py --days 7
-  python reddit_scraper.py --backend playwright --headed --max-posts 3
-  python reddit_scraper.py --no-comments
+  python reddit.py --max-posts 3
+  python reddit.py --days 7
+  python reddit.py --backend playwright --headed --max-posts 3
+  python reddit.py --no-comments
+  python reddit.py --tickers-file backend/data/tickers.json
+  python reddit.py --mode search --search-pages 3
+  python reddit.py --no-sentiment
 
-Output (./output): posts.csv, comments.csv, reddit_data.json, run_summary.json
+Output (./output): posts.csv, comments.csv, reddit_data.json, run_summary.json,
+                   sentiment_item_scores.jsonl (raw model output, resumable),
+                   sentiment_rows.csv (one row per post/comment x ticker),
+                   ticker_sentiment_daily.csv, ticker_sentiment_summary.csv
 """
 
 from __future__ import annotations
@@ -36,14 +49,30 @@ import csv
 import json
 import os
 import random
+import re
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlencode, urlparse
 
 from bs4 import BeautifulSoup
+
+try:
+    from ..sentiment_scorer import load_score_records, score_items   # as a package
+    from .reddit_processing import (
+        DAILY_FIELDS, ROW_FIELDS, SUMMARY_FIELDS, TickerMatcher, aggregate_rows,
+        build_scoring_items, is_discussion_title, load_json_file, load_tickers,
+        write_csv_atomic)
+except ImportError:                                                  # run as a script
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from sentiment_scorer import load_score_records, score_items
+    from reddit_processing import (
+        DAILY_FIELDS, ROW_FIELDS, SUMMARY_FIELDS, TickerMatcher, aggregate_rows,
+        build_scoring_items, is_discussion_title, load_json_file, load_tickers,
+        write_csv_atomic)
 
 SUBREDDITS = [
     "stocks",
@@ -323,6 +352,7 @@ class Ctx:
     max_posts: int | None
     no_comments: bool
     retries: int = 6
+    stale_min_comments: int = 50   # older posts (from /hot) need this many comments
 
     backend: Any = None
     sem: asyncio.Semaphore = None
@@ -338,6 +368,8 @@ class Ctx:
     empty_comment_posts: int = 0    # posts that report comments but parsed 0
     parsed_comment_posts: int = 0   # posts where at least one comment parsed
     debug_comment_dumps: int = 0
+    debug_search_dumps: int = 0
+    seen_ids: set = field(default_factory=set)   # post ids already registered
 
     posts: list = field(default_factory=list)
     comments: list = field(default_factory=list)
@@ -498,8 +530,14 @@ def ts_to_dt(ms):
     return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
 
 
-def parse_listing(soup, subreddit, cutoff):
-    """Return (posts, reached_cutoff, next_url)."""
+def parse_listing(soup, subreddit, cutoff, keep_stale=False):
+    """
+    Return (posts, reached_cutoff, next_url).
+
+    keep_stale=False (/new): stop at the first post older than the cutoff.
+    keep_stale=True (/hot, /rising): keep older posts too, flagged stale=True,
+    because an old or stickied thread can still hold fresh comments.
+    """
     posts, reached_cutoff = [], False
     for t in soup.select("div#siteTable > div.thing.link"):
         classes = t.get("class", [])
@@ -509,8 +547,10 @@ def parse_listing(soup, subreddit, cutoff):
             created = ts_to_dt(t["data-timestamp"])
         except (KeyError, ValueError):
             continue
-        if created < cutoff:
-            if "stickied" in classes or t.get("data-stickied") == "true":
+        stickied = "stickied" in classes or t.get("data-stickied") == "true"
+        stale = created < cutoff
+        if stale and not keep_stale:
+            if stickied:
                 continue
             reached_cutoff = True  # /new is newest-first: the rest is older
             break
@@ -531,6 +571,61 @@ def parse_listing(soup, subreddit, cutoff):
             "permalink": BASE + t.get("data-permalink", ""),
             "selftext": "",
             "comments_scraped": False,
+            "stickied": stickied,
+            "stale": stale,
+        })
+
+    nxt = soup.select_one("span.next-button a")
+    return posts, reached_cutoff, (nxt["href"] if nxt else None)
+
+
+_POST_HREF_RE = re.compile(r"/r/([^/]+)/comments/([a-z0-9]+)", re.I)
+
+
+def _first_int(tag):
+    if tag is None:
+        return ""
+    m = re.search(r"-?\d[\d,]*", tag.get_text(" ", strip=True))
+    return m.group().replace(",", "") if m else ""
+
+
+def parse_search(soup, cutoff):
+    """
+    Parse an old.reddit search-results page (sorted by new).
+    Return (posts, reached_cutoff, next_url). Search results carry no selftext;
+    it is filled in from the post page when the comments are fetched.
+    """
+    posts, reached_cutoff = [], False
+    for t in soup.select("div.search-result-link"):
+        a = t.select_one("a.search-title")
+        m = _POST_HREF_RE.search(a["href"]) if a is not None and a.get("href") else None
+        if not m:
+            continue
+        tm = t.select_one("time[datetime]")
+        created = _parse_iso(tm["datetime"]) if tm is not None else None
+        if created is None:
+            continue
+        if created < cutoff:
+            reached_cutoff = True       # sort=new: everything after this is older
+            break
+        author = t.select_one("a.author, span.author")
+        flair = t.select_one("span.linkflairlabel")
+        posts.append({
+            "subreddit": m.group(1),
+            "post_id": m.group(2),
+            "title": a.get_text(strip=True),
+            "author": author.get_text(strip=True) if author is not None else "",
+            "created_utc": created.isoformat(),
+            "score": _first_int(t.select_one("span.search-score")),
+            "num_comments": _first_int(t.select_one("a.search-comments")),
+            "flair": flair.get_text(strip=True) if flair is not None else "",
+            "domain": "",
+            "url": "",
+            "permalink": BASE + urlparse(a["href"]).path,
+            "selftext": "",
+            "comments_scraped": False,
+            "stickied": False,
+            "stale": False,
         })
 
     nxt = soup.select_one("span.next-button a")
@@ -613,10 +708,52 @@ def parse_post_page(soup, post, cutoff):
 # --------------------------------------------------------------------------- #
 # Tasks
 # --------------------------------------------------------------------------- #
+BIG_THREAD = 400   # posts with at least this many comments get a second sort
+
+
+def register_post(ctx: Ctx, p: dict, queue: asyncio.Queue, discussion_only=False) -> bool:
+    """
+    Add a post to the run (and the comment queue) unless it is a duplicate or
+    not worth fetching. One shared `seen_ids` set keeps the crawl, the search and
+    the /hot listing from fetching the same thread twice.
+    """
+    pid = p["post_id"]
+    if not pid or pid in ctx.seen_ids:
+        return False
+    discussion = is_discussion_title(p["title"])
+    if discussion_only and not (p.get("stickied") or discussion):
+        return False
+    if p.get("stale"):
+        # an old post is only worth a request if it is a pinned/daily thread or busy
+        try:
+            n = int(p.get("num_comments") or 0)
+        except ValueError:
+            n = 0
+        if not (p.get("stickied") or discussion or n >= ctx.stale_min_comments):
+            return False
+    ctx.seen_ids.add(pid)
+    ctx.posts.append(p)
+    if not ctx.no_comments:
+        ctx.posts_queued += 1
+        queue.put_nowait(p)
+    return True
+
+
+def comment_sorts(post: dict) -> list[str]:
+    """Daily threads and huge threads exceed one page of comments: also take the top ones."""
+    try:
+        n = int(post.get("num_comments") or 0)
+    except ValueError:
+        n = 0
+    if post.get("stickied") or is_discussion_title(post.get("title", "")) or n >= BIG_THREAD:
+        return ["new", "top"]
+    return ["new"]
+
+
 async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
     """Crawl /r/<sub>/new/ until the cutoff; feed posts to the comment queue."""
     url, params = f"{BASE}/r/{sub}/new/", {"limit": 100}
-    seen, page = set(), 1
+    n, page = 0, 1
     ctx.sub_status[sub] = "interrupted"
 
     while url and not ctx.stop.is_set():
@@ -626,20 +763,91 @@ async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
         posts, reached_cutoff, nxt = parse_listing(soup, sub, ctx.cutoff)
 
         for p in posts:
-            if p["post_id"] in seen:
-                continue
-            if ctx.max_posts and len(seen) >= ctx.max_posts:
+            if ctx.max_posts and n >= ctx.max_posts:
                 reached_cutoff = True
                 break
-            seen.add(p["post_id"])
-            ctx.posts.append(p)
-            if not ctx.no_comments:
-                ctx.posts_queued += 1
-                queue.put_nowait(p)
+            if register_post(ctx, p, queue):
+                n += 1
 
-        print(f"  [r/{sub}] page {page}: {len(seen)} posts so far")
+        print(f"  [r/{sub}] page {page}: {n} posts so far")
         if reached_cutoff or not nxt:
             ctx.sub_status[sub] = "complete"
+            return
+        url, params = nxt, None
+        page += 1
+
+
+async def produce_listing(ctx: Ctx, sub: str, kind: str, pages: int,
+                          queue: asyncio.Queue, discussion_only: bool):
+    """
+    Read /r/<sub>/hot or /rising. Unlike /new this keeps posts older than the
+    cutoff (pinned daily threads, long-running discussions): their comments are
+    filtered by their own timestamps later, so only fresh ones survive.
+    """
+    url, params = f"{BASE}/r/{sub}/{kind}/", {"limit": 100}
+    n, page = 0, 1
+    while url and page <= pages and not ctx.stop.is_set():
+        soup = await fetch(ctx, url, params)
+        if soup is None:
+            return
+        posts, _, nxt = parse_listing(soup, sub, ctx.cutoff, keep_stale=True)
+        for p in posts:
+            if ctx.max_posts and n >= ctx.max_posts:
+                nxt = None
+                break
+            if register_post(ctx, p, queue, discussion_only):
+                n += 1
+        print(f"  [r/{sub}/{kind}] page {page}: {n} new posts")
+        if not nxt:
+            return
+        url, params = nxt, None
+        page += 1
+
+
+def search_time_filter(cutoff: datetime) -> str:
+    days = (datetime.now(timezone.utc) - cutoff).days + 1
+    for limit, name in ((1, "day"), (7, "week"), (31, "month"), (365, "year")):
+        if days <= limit:
+            return name
+    return "all"
+
+
+def dump_search_debug(ctx: Ctx, query: str, soup):
+    """A search page that parsed to zero posts: save it so the selectors can be checked."""
+    if ctx.debug_search_dumps >= 2:
+        return
+    ctx.debug_search_dumps += 1
+    os.makedirs(ctx.out_dir, exist_ok=True)
+    path = os.path.join(ctx.out_dir, f"debug_search_{ctx.debug_search_dumps}.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"<!-- query={query} -->\n{soup}")
+    print(f"    search {query!r}: 0 posts parsed (normal for a quiet ticker; page saved "
+          f"to {path} in case the result selectors need checking)")
+
+
+async def produce_search(ctx: Ctx, query: str, queue: asyncio.Queue, pages: int):
+    """Search the tracked subreddits for one ticker/company query, newest first."""
+    url = f"{BASE}/r/{'+'.join(SUBREDDITS)}/search"
+    params = {"q": query, "restrict_sr": "on", "sort": "new",
+              "t": search_time_filter(ctx.cutoff), "limit": 100}
+    n, page = 0, 1
+    while url and page <= pages and not ctx.stop.is_set():
+        # "#header" exists on every real old.reddit page, including zero-result
+        # searches, so a ticker nobody mentions is not mistaken for a block
+        soup = await fetch(ctx, url, params, expect="#header")
+        if soup is None:
+            return
+        posts, reached_cutoff, nxt = parse_search(soup, ctx.cutoff)
+        if not posts and page == 1:
+            dump_search_debug(ctx, query, soup)
+        for p in posts:
+            if ctx.max_posts and n >= ctx.max_posts:
+                reached_cutoff = True
+                break
+            if register_post(ctx, p, queue):
+                n += 1
+        print(f"  [search {query}] page {page}: {n} new posts")
+        if reached_cutoff or not nxt:
             return
         url, params = nxt, None
         page += 1
@@ -665,12 +873,28 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
         try:
             if ctx.stop.is_set():
                 continue  # drain the queue so queue.join() can finish
-            soup = await fetch(ctx, post["permalink"], {"limit": 500, "sort": "new"})
-            if soup is None:
+
+            comments, seen_cids = [], set()
+            first_soup = first_diag = None
+            stubs = 0
+            for sort in comment_sorts(post):
+                soup = await fetch(ctx, post["permalink"], {"limit": 500, "sort": sort})
+                if soup is None:
+                    if ctx.stop.is_set():
+                        break
+                    continue
+                selftext, found, n_stubs, diag = parse_post_page(soup, post, ctx.cutoff)
+                if first_soup is None:
+                    first_soup, first_diag, stubs = soup, diag, n_stubs
+                    post["selftext"] = selftext
+                    post["comments_scraped"] = True
+                for c in found:                      # merge the sorts, no duplicates
+                    if c["comment_id"] not in seen_cids:
+                        seen_cids.add(c["comment_id"])
+                        comments.append(c)
+            if first_soup is None:
                 continue
-            selftext, comments, stubs, diag = parse_post_page(soup, post, ctx.cutoff)
-            post["selftext"] = selftext
-            post["comments_scraped"] = True
+
             ctx.comments.extend(comments)
             ctx.posts_done += 1
             if stubs:
@@ -688,8 +912,8 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
                 ctx.empty_comment_posts += 1
                 if ctx.empty_comment_posts <= 5:
                     print(f"    warning: post {post['post_id']} reports {expected} "
-                          f"comments but 0 were parsed {diag}")
-                dump_comment_debug(ctx, post, soup, diag)
+                          f"comments but 0 were parsed {first_diag}")
+                dump_comment_debug(ctx, post, first_soup, first_diag)
                 if ctx.empty_comment_posts >= 10 and ctx.parsed_comment_posts == 0:
                     trip(ctx, f"comment pages load, but no comments could be parsed from "
                               f"{ctx.empty_comment_posts} posts that have comments. The "
@@ -739,8 +963,9 @@ def save_all(ctx: Ctx):
     )
 
 
-def write_summary(ctx: Ctx):
+def write_summary(ctx: Ctx, mode: str = "crawl"):
     summary = {
+        "mode": mode,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "window_start": ctx.cutoff.isoformat(),
         "stopped_early": ctx.stop.is_set(),
@@ -759,6 +984,72 @@ def write_summary(ctx: Ctx):
 
 
 # --------------------------------------------------------------------------- #
+# Filtering + sentiment scoring
+# --------------------------------------------------------------------------- #
+def process_data(posts: list, comments: list,
+                 tickers_file: str = "tickers.json",
+                 out_dir: str = "output",
+                 scores_file: str | None = None,
+                 cutoff: datetime | None = None,
+                 matcher: TickerMatcher | None = None,
+                 aliases_file: str | None = None,
+                 ambiguous_file: str | None = None,
+                 min_items: int = 20):
+    """
+    1. Load {company name: ticker} from tickers_file (unless a matcher is given).
+    2. Drop noise: deleted/removed, bots, link-only, too short/long, duplicates.
+    3. Attribute each post/comment to the tickers it is about (its own text; a
+       comment with none inherits the tickers in its post's title, except in
+       daily threads) and cut multi-ticker / long texts down to the relevant
+       sentences. Short replies get their parent comment / post title as context.
+    4. Score every (post|comment, ticker) item with score_items().
+    5. Write one row per item plus per-ticker daily and summary aggregates.
+    Returns the file name of the per-item rows CSV (None if nothing was kept).
+    """
+    if matcher is None:
+        matcher = TickerMatcher(load_tickers(tickers_file),
+                                aliases=load_json_file(aliases_file, {}),
+                                extra_ambiguous=load_json_file(ambiguous_file, []))
+
+    items, stats = build_scoring_items(posts, comments, matcher, cutoff=cutoff)
+    dropped = {k[8:]: v for k, v in stats.items() if k.startswith("dropped_")}
+    print(f"Kept {len(items)} (post|comment, ticker) items "
+          f"from {stats['posts_in']} posts / {stats['comments_in']} comments")
+    if dropped:
+        print("  dropped: " + ", ".join(f"{k}={v}" for k, v in sorted(dropped.items())))
+    if not items:
+        return None
+
+    scores_file = scores_file or os.path.join(out_dir, "sentiment_item_scores.jsonl")
+    score_items(items, scores_file)
+    records = load_score_records(scores_file)
+
+    rows = []
+    for it in items:
+        rec = records.get(it["id"])
+        if rec is None:                      # scoring was interrupted for this item
+            continue
+        rows.append({**it, "score": rec["score"], "bullish": rec["bullish"],
+                     "bearish": rec["bearish"], "neutral": rec["neutral"]})
+
+    rows_file = os.path.join(out_dir, "sentiment_rows.csv")
+    write_csv_atomic(rows_file, ROW_FIELDS, rows)
+
+    daily, summary = aggregate_rows(rows, min_items=min_items)
+    write_csv_atomic(os.path.join(out_dir, "ticker_sentiment_daily.csv"), DAILY_FIELDS, daily)
+    write_csv_atomic(os.path.join(out_dir, "ticker_sentiment_summary.csv"),
+                     SUMMARY_FIELDS, summary)
+
+    print(f"Scored {len(rows)} items across {len(summary)} tickers "
+          f"({sum(1 for r in summary if r['reliable'])} with >= {min_items} voters)")
+    for r in summary[:10]:
+        shown = r["reported_score"] if r["reliable"] else f"({r['mean_score_weighted']}, low n)"
+        print(f"  {r['ticker']:8s} voters={r['n_voters']:<5d} items={r['n_items']:<5d} "
+              f"score={shown}  bullish={r['pct_bullish']:.0%} bearish={r['pct_bearish']:.0%}")
+    return rows_file
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 async def run(ctx: Ctx, args) -> None:
@@ -769,7 +1060,11 @@ async def run(ctx: Ctx, args) -> None:
         print(f"Using {n_cookies} reddit.com cookies from the cookie file (values not shown)")
     print(f"backend={args.backend}  concurrency={args.concurrency}  "
           f"delay~{args.delay}s  stop after {args.max_blocks} consecutive "
-          f"blocked responses (403/429/non-Reddit page)\n")
+          f"blocked responses (403/429/non-Reddit page)")
+    print(f"mode={args.mode}"
+          + (f"  search queries={len(args.search_queries)}" if args.search_queries else "")
+          + (f"  extra listings={','.join(args.listings)}" if args.listings else "")
+          + "\n")
 
     backend = make_backend(args)
     ctx.backend = backend
@@ -782,7 +1077,18 @@ async def run(ctx: Ctx, args) -> None:
         ckpt = asyncio.create_task(checkpoint_loop(ctx, args.checkpoint_secs))
 
         async def crawl():
-            await asyncio.gather(*(produce_posts(ctx, s, queue) for s in SUBREDDITS))
+            jobs = []
+            if args.mode in ("crawl", "both"):
+                jobs += [produce_posts(ctx, s, queue) for s in SUBREDDITS]
+            if args.mode in ("search", "both"):
+                jobs += [produce_search(ctx, q, queue, args.search_pages)
+                         for q in args.search_queries]
+            for s in SUBREDDITS:                 # pinned daily threads, old-but-active posts
+                for kind in args.listings:
+                    pages = args.hot_pages if kind == "hot" else 1
+                    jobs.append(produce_listing(ctx, s, kind, pages, queue,
+                                                discussion_only=(args.mode == "search")))
+            await asyncio.gather(*jobs)
             await queue.join()
 
         work = asyncio.create_task(crawl())
@@ -840,7 +1146,43 @@ def main():
                     help="start even if no reddit_session/token_v2 cookie is present")
     ap.add_argument("--proxy", default=None,
                     help="proxy URL, e.g. http://user:pass@host:port")
+    ap.add_argument("--tickers-file", default="tickers.json",
+                    help="JSON dict of {company name: ticker}")
+    ap.add_argument("--aliases-file", default=None,
+                    help="optional JSON {alias: ticker or [tickers]}, e.g. "
+                         '{"the big tech": ["AAPL", "MSFT"]}')
+    ap.add_argument("--ambiguous-file", default=None,
+                    help="optional JSON list of extra symbols/names that need a finance "
+                         "word nearby to count as a ticker mention")
+    ap.add_argument("--scores-file", default=None,
+                    help="raw model output, resumable "
+                         "(default: <out>/sentiment_item_scores.jsonl)")
+    ap.add_argument("--min-items", type=int, default=20,
+                    help="distinct voters needed before a ticker's score counts as "
+                         "reliable (default 20)")
+    ap.add_argument("--no-sentiment", action="store_true",
+                    help="scrape only; skip filtering and scoring")
+    ap.add_argument("--mode", choices=["auto", "crawl", "search", "both"], default="auto",
+                    help="crawl = every subreddit's /new; search = one search per ticker; "
+                         "auto = search if the ticker list is small, else crawl (default)")
+    ap.add_argument("--search-threshold", type=int, default=40,
+                    help="auto mode: search when there are at most this many tickers")
+    ap.add_argument("--search-pages", type=int, default=2,
+                    help="result pages per search query (default 2)")
+    ap.add_argument("--extra-listings", default="hot,rising",
+                    help="comma list of extra listings to read for pinned/old-but-active "
+                         "threads: hot, rising (default both; empty to disable)")
+    ap.add_argument("--hot-pages", type=int, default=2,
+                    help="pages of /hot to read per subreddit (default 2)")
+    ap.add_argument("--stale-min-comments", type=int, default=50,
+                    help="posts older than the window are only fetched if pinned, a "
+                         "daily thread, or at least this many comments (default 50)")
     args = ap.parse_args()
+
+    args.listings = [x.strip() for x in args.extra_listings.split(",") if x.strip()]
+    bad = set(args.listings) - {"hot", "rising"}
+    if bad:
+        sys.exit(f"ERROR: unknown --extra-listings value(s): {', '.join(sorted(bad))}")
 
     # Mandatory: refuse to start without a usable cookie file
     try:
@@ -879,7 +1221,28 @@ def main():
         else:
             sys.exit(f"ERROR: {msg}")
 
+    # Load the tickers BEFORE scraping, so a bad path fails now, not after an hour
+    matcher = None
+    try:
+        matcher = TickerMatcher(load_tickers(args.tickers_file),
+                                aliases=load_json_file(args.aliases_file, {}),
+                                extra_ambiguous=load_json_file(args.ambiguous_file, []))
+    except (OSError, ValueError) as e:
+        if args.no_sentiment and args.mode in ("auto", "crawl"):
+            print(f"note: tickers not loaded ({e}); crawling without ticker search")
+        else:
+            sys.exit(f"ERROR: could not load tickers/aliases: {e}")
+    if args.mode == "auto":
+        args.mode = ("search" if matcher and matcher.n_tickers <= args.search_threshold
+                     else "crawl")
+        why = (f"{matcher.n_tickers} tickers" if matcher else "no tickers")
+        print(f"auto mode -> {args.mode} ({why}, search threshold "
+              f"{args.search_threshold})")
+    args.search_queries = (matcher.search_queries()
+                           if matcher and args.mode in ("search", "both") else [])
+
     ctx = Ctx(
+        stale_min_comments=args.stale_min_comments,
         cutoff=datetime.now(timezone.utc) - timedelta(days=args.days),
         out_dir=args.out,
         delay=args.delay,
@@ -892,10 +1255,18 @@ def main():
     except KeyboardInterrupt:
         trip(ctx, "interrupted by user (Ctrl+C)")
 
-    s = write_summary(ctx)
+    s = write_summary(ctx, args.mode)
     print(f"\nDone. {s['posts']} posts "
           f"({s['posts_with_comments_scraped']} with comments scraped), "
           f"{s['comments']} comments -> {args.out}/")
+
+    if not args.no_sentiment and not args.no_comments and ctx.posts:
+        rows_path = process_data(
+            ctx.posts, ctx.comments, args.tickers_file, out_dir=args.out,
+            scores_file=args.scores_file, cutoff=ctx.cutoff, matcher=matcher,
+            min_items=args.min_items)
+        print(f"Sentiment rows: {rows_path}")
+
     if s["stopped_early"]:
         incomplete = [k for k, v in s["subreddit_listing_status"].items()
                       if v != "complete"]

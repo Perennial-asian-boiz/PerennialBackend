@@ -1,4 +1,4 @@
-# sentiment.py
+# sentiment_scorer.py
 from functools import lru_cache
 import json
 import os
@@ -7,7 +7,7 @@ import warnings
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-__all__ = ["score_texts", "load_scores"]
+__all__ = ["score_texts", "score_items", "load_scores", "load_score_records"]
 
 MODEL_ID = "StephanAkkerman/FinTwitBERT-sentiment"
 BATCH_SIZE = 32
@@ -27,8 +27,9 @@ def _load_model():
     by_name = {name: i for i, name in labels.items()}
     bullish_idx = by_name.get("bullish", 1)
     bearish_idx = by_name.get("bearish", 2)
+    neutral_idx = by_name.get("neutral", 0)
 
-    return tokenizer, model, device, bullish_idx, bearish_idx
+    return tokenizer, model, device, bullish_idx, bearish_idx, neutral_idx
 
 
 def _clean(text):
@@ -53,24 +54,55 @@ def _repair_tail(filename):
             f.truncate(keep)
 
 
-def _score_batch(batch, tokenizer, model, device, bullish_idx, bearish_idx):
+def _forward(args, tokenizer, model, device):
     inputs = tokenizer(
-        batch,
+        *args,
         return_tensors="pt",
         padding=True,
-        truncation=True,
+        truncation=True,          # pairs: trims the longer sequence first
         max_length=MAX_LENGTH,
     )
     inputs = {k: v.to(device) for k, v in inputs.items()}
-
     with torch.inference_mode():
-        probs = model(**inputs).logits.softmax(dim=-1).cpu()
+        return model(**inputs).logits.softmax(dim=-1).cpu()
 
-    results = []
-    for p in probs:
-        net = p[bullish_idx].item() - p[bearish_idx].item()  # -1 .. 1
-        results.append(round(5.5 + 4.5 * net, 2))             # 1 .. 10
-    return results
+
+def _batch_probs(texts, contexts, tokenizer, model, device):
+    """Class probabilities for each text, in input order.
+
+    Items with a non-empty context are encoded as a (context, text) pair so the
+    model sees the parent comment / post title first and the text being scored
+    last; items without context are encoded alone.
+    """
+    out = [None] * len(texts)
+    single = [i for i, c in enumerate(contexts) if not c]
+    paired = [i for i, c in enumerate(contexts) if c]
+    if single:
+        probs = _forward(([texts[i] for i in single],), tokenizer, model, device)
+        for i, p in zip(single, probs):
+            out[i] = p
+    if paired:
+        probs = _forward(([contexts[i] for i in paired], [texts[i] for i in paired]),
+                         tokenizer, model, device)
+        for i, p in zip(paired, probs):
+            out[i] = p
+    return out
+
+
+def _summarize(p, bullish_idx, bearish_idx, neutral_idx):
+    pb, pr, pn = p[bullish_idx].item(), p[bearish_idx].item(), p[neutral_idx].item()
+    net = pb - pr                                   # -1 .. 1
+    return round(5.5 + 4.5 * net, 2), pb, pr, pn    # score 1 .. 10
+
+
+def _handle_oom(device, batch_size):
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    if batch_size == 1:
+        raise
+    new_size = max(1, batch_size // 2)
+    warnings.warn(f"GPU out of memory; retrying with batch_size={new_size}.")
+    return new_size
 
 
 def score_texts(texts, filename, batch_size=BATCH_SIZE, resume=True):
@@ -89,7 +121,9 @@ def score_texts(texts, filename, batch_size=BATCH_SIZE, resume=True):
             overwritten.
 
     Returns:
-        None
+        The filename.
+
+    For per-item metadata, context and class probabilities, use score_items().
     """
     if isinstance(texts, str):
         raise TypeError("Expected a list of strings, not a single string.")
@@ -97,7 +131,7 @@ def score_texts(texts, filename, batch_size=BATCH_SIZE, resume=True):
         raise ValueError("batch_size must be >= 1.")
 
     # Load the model first so a load failure can't touch the output file.
-    tokenizer, model, device, bullish_idx, bearish_idx = _load_model()
+    tokenizer, model, device, bullish_idx, bearish_idx, neutral_idx = _load_model()
 
     # Deduplicate while preserving order.
     unique = list(dict.fromkeys(_clean(t) for t in texts))
@@ -120,17 +154,13 @@ def score_texts(texts, filename, batch_size=BATCH_SIZE, resume=True):
             batch = todo[pos:pos + batch_size]
 
             try:
-                scores = _score_batch(batch, tokenizer, model, device,
-                                      bullish_idx, bearish_idx)
+                probs = _batch_probs(batch, [""] * len(batch), tokenizer, model, device)
             except torch.cuda.OutOfMemoryError:
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
-                if batch_size == 1:
-                    raise
-                batch_size = max(1, batch_size // 2)
-                warnings.warn(f"GPU out of memory; retrying with "
-                              f"batch_size={batch_size}.")
+                batch_size = _handle_oom(device, batch_size)
                 continue  # retry the same position with a smaller batch
+
+            scores = [_summarize(p, bullish_idx, bearish_idx, neutral_idx)[0]
+                      for p in probs]
 
             # One write call per batch, then force it to disk.
             lines = "".join(
@@ -142,6 +172,83 @@ def score_texts(texts, filename, batch_size=BATCH_SIZE, resume=True):
             os.fsync(f.fileno())
 
             pos += len(batch)
+
+    return filename
+
+
+def score_items(items, filename, batch_size=BATCH_SIZE, resume=True):
+    """Score items keyed by an id, optionally with context, and keep the
+    class probabilities.
+
+    Each item is a dict:
+        {"id": <unique key>, "text": <text to score>, "context": <optional>}
+    `context` (e.g. the parent comment) is shown to the model before `text`
+    as a sentence pair; it is trimmed first if the input is too long.
+
+    Unlike score_texts(), results are keyed by `id` rather than by text, so
+    identical texts under different ids are kept as separate records.
+
+    Output is JSON Lines, one record per item, appended after every batch:
+        {"id": ..., "score": 1..10, "bullish": p, "bearish": p, "neutral": p}
+    Read it back with load_score_records(filename).
+
+    Texts are scored shortest-first to minimise padding; the file order
+    therefore differs from the input order (use the id).
+
+    Returns:
+        The filename.
+    """
+    if isinstance(items, (str, dict)):
+        raise TypeError("Expected a list of dicts.")
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1.")
+
+    tokenizer, model, device, bullish_idx, bearish_idx, neutral_idx = _load_model()
+
+    unique = {}
+    for it in items:
+        key = str(it["id"])
+        if key not in unique:
+            unique[key] = (_clean(it.get("text")), _clean(it.get("context")))
+
+    os.makedirs(os.path.dirname(os.path.abspath(filename)), exist_ok=True)
+
+    if resume:
+        _repair_tail(filename)
+        done = load_score_records(filename) if os.path.exists(filename) else {}
+        mode = "a"
+    else:
+        done = {}
+        mode = "w"
+
+    todo = [(k, t, c) for k, (t, c) in unique.items() if k not in done]
+    todo.sort(key=lambda x: len(x[1]) + len(x[2]))
+
+    with open(filename, mode, encoding="utf-8") as f:
+        pos = 0
+        while pos < len(todo):
+            batch = todo[pos:pos + batch_size]
+
+            try:
+                probs = _batch_probs([b[1] for b in batch], [b[2] for b in batch],
+                                     tokenizer, model, device)
+            except torch.cuda.OutOfMemoryError:
+                batch_size = _handle_oom(device, batch_size)
+                continue
+
+            lines = []
+            for (key, _t, _c), p in zip(batch, probs):
+                score, pb, pr, pn = _summarize(p, bullish_idx, bearish_idx, neutral_idx)
+                lines.append(json.dumps(
+                    {"id": key, "score": score, "bullish": round(pb, 4),
+                     "bearish": round(pr, 4), "neutral": round(pn, 4)}) + "\n")
+            f.write("".join(lines))
+            f.flush()
+            os.fsync(f.fileno())
+
+            pos += len(batch)
+
+    return filename
 
 
 def load_scores(filename):
@@ -164,3 +271,24 @@ def load_scores(filename):
     if skipped:
         warnings.warn(f"Skipped {skipped} malformed line(s) in {filename}.")
     return scores
+
+
+def load_score_records(filename):
+    """Read a file written by score_items back into {id: record}.
+
+    Malformed lines are skipped with a warning instead of raising.
+    """
+    records = {}
+    skipped = 0
+    with open(filename, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                records[str(record["id"])] = record
+            except (json.JSONDecodeError, KeyError, TypeError):
+                skipped += 1
+    if skipped:
+        warnings.warn(f"Skipped {skipped} malformed line(s) in {filename}.")
+    return records
