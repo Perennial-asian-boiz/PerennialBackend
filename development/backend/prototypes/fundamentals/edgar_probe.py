@@ -28,6 +28,9 @@ CONCEPTS = {  # metric -> (us-gaap names, ifrs-full names), first match per fisc
     "gross_profit": (["GrossProfit"], ["GrossProfit"]),
     "cost_of_revenue": (["CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold"], ["CostOfSales"]),
     "operating_income": (["OperatingIncomeLoss"], ["ProfitLossFromOperatingActivities"]),
+    "pretax_income": (["IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+                       "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments"],
+                      ["ProfitLossBeforeTax"]),
     "net_income": (["NetIncomeLoss", "ProfitLoss"], ["ProfitLossAttributableToOwnersOfParent", "ProfitLoss"]),
     "operating_cash_flow": (["NetCashProvidedByUsedInOperatingActivities"], ["CashFlowsFromUsedInOperatingActivities"]),
     "assets": (["Assets"], ["Assets"]),
@@ -41,7 +44,7 @@ CONCEPTS = {  # metric -> (us-gaap names, ifrs-full names), first match per fisc
     "noninterest_expense": (["NoninterestExpense"], []),
     "revenue_net_of_interest": (["RevenuesNetOfInterestExpense", "Revenues"], []),
 }
-FLOW = {"revenue", "gross_profit", "cost_of_revenue", "operating_income", "net_income", "operating_cash_flow",
+FLOW = {"revenue", "gross_profit", "cost_of_revenue", "operating_income", "pretax_income", "net_income", "operating_cash_flow",
         "diluted_shares", "noninterest_expense", "revenue_net_of_interest"}
 PIOTROSKI = ["net_income", "operating_cash_flow", "assets", "current_assets", "current_liabilities",
              "long_term_debt", "diluted_shares", "revenue"]

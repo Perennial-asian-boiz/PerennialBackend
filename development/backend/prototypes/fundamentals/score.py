@@ -17,7 +17,9 @@ import requests
 
 from edgar_probe import HERE, UA, currency, series
 
-SCORE_VERSION = "fundamentals-v1-prototype"
+SCORE_VERSION = "fundamentals-v1.1-prototype"
+MIN_MEASURES = 2  # fewer present measures than this: not scored ("not_enough_data")
+MAX_MARGIN = 1.0  # operating margins beyond +/-100% are not meaningful for the rules below
 # measure: (weight, value scoring 0 points, value scoring 100 points). Lower-is-better when lo > hi.
 GENERAL = {
     "revenue_growth_3y": (0.50, 0.00, 0.40),
@@ -31,7 +33,7 @@ BANK = {
 }
 # Tickers whose SEC ticker map points at a successor entity without history (M4 identity work).
 IDENTITY_UNRESOLVED = {"XOM"}
-ALL_METRICS = ["revenue", "gross_profit", "cost_of_revenue", "operating_income", "net_income",
+ALL_METRICS = ["revenue", "gross_profit", "cost_of_revenue", "operating_income", "pretax_income", "net_income",
                "operating_cash_flow", "assets", "current_assets", "current_liabilities", "long_term_debt",
                "liabilities", "diluted_shares", "equity", "noninterest_expense", "revenue_net_of_interest"]
 
@@ -73,12 +75,29 @@ def cagr(values, end, years=3):
     return (values[end] / values[start]) ** (1 / years) - 1
 
 
+def profit_series(d, end):
+    """Operating income, or pre-tax income from continuing operations when operating income isn't
+    reported for the latest year. One source for all years, so the trend compares like with like."""
+    if end in d["operating_income"]:
+        return d["operating_income"], "operating_income"
+    if end in d["pretax_income"]:
+        return d["pretax_income"], "pretax_income"
+    return {}, None
+
+
 def general_measures(d, end):
-    rev, op = d["revenue"], d["operating_income"]
+    rev = d["revenue"]
+    op, _ = profit_series(d, end)
     prev = year_before(sorted(rev), end, 1)
     margin = op[end] / rev[end] if end in op and rev[end] > 0 else None
     prev_margin = op[prev] / rev[prev] if prev and prev in op and rev[prev] > 0 else None
-    trend = margin - prev_margin if margin is not None and prev_margin is not None else None
+    # A trend from a margin beyond +/-100% (revenue near zero) is noise; a margin above +100% means
+    # non-operating gains were booked as income, so it isn't a real operating margin.
+    trend = None
+    if margin is not None and prev_margin is not None and max(abs(margin), abs(prev_margin)) <= MAX_MARGIN:
+        trend = margin - prev_margin
+    if margin is not None and margin > MAX_MARGIN:
+        margin = None
     return {"revenue_growth_3y": cagr(rev, end), "operating_margin": margin, "operating_margin_trend": trend}
 
 
@@ -138,7 +157,7 @@ def piotroski(d, end):
     return sum(known), len(known)
 
 
-def key_reasons(model, parts, gross_margin):
+def key_reasons(model, parts, gross_margin, profit_source=None):
     reasons = []
     p = {k: v["value"] for k, v in parts.items()}
     if "revenue_growth_3y" in p:
@@ -146,8 +165,9 @@ def key_reasons(model, parts, gross_margin):
         reasons.append(f"Revenue {'grew' if g >= 0 else 'shrank'} {abs(g) * 100:.0f}% a year over the last 3 years.")
     if "operating_margin" in p:
         m = p["operating_margin"]
-        reasons.append(f"Keeps {m * 100:.0f} cents of every sales dollar as operating profit." if m >= 0
-                       else f"Spends more than it earns: operating loss of {abs(m) * 100:.0f} cents per sales dollar.")
+        kind = "pre-tax profit" if profit_source == "pretax_income" else "operating profit"
+        reasons.append(f"Keeps {m * 100:.0f} cents of every sales dollar as {kind}." if m >= 0
+                       else f"Spends more than it earns: {kind.replace('profit', 'loss')} of {abs(m) * 100:.0f} cents per sales dollar.")
     if "operating_margin_trend" in p:
         t = p["operating_margin_trend"] * 100
         reasons.append(f"Profitability {'improved' if t >= 0 else 'worsened'} {abs(t):.0f} points from last year.")
@@ -196,10 +216,13 @@ def evaluate(d, money_currency):
     if rev[end] <= 0:
         return {"model": model, "score": None, "missing": ["no_revenue"], "fiscal_year_end": end}
     measures = bank_measures(d, end) if is_bank else general_measures(d, end)
-    score, parts = combine(measures, BANK if is_bank else GENERAL)
     missing = []
     if measures["revenue_growth_3y"] is None:
         missing.append("insufficient_history")
+    if sum(v is not None for v in measures.values()) < MIN_MEASURES:
+        return {"model": model, "score": None, "fiscal_year_end": end, "missing": ["not_enough_data"] + missing}
+    score, parts = combine(measures, BANK if is_bank else GENERAL)
+    profit_source = None if is_bank else profit_series(d, end)[1]
     rv, gp, cost = rev[end], d["gross_profit"].get(end), d["cost_of_revenue"].get(end)
     gross_margin = gp / rv if gp is not None else ((rv - cost) / rv if cost is not None else None)
     f_score, f_known = (None, 0) if is_bank else piotroski(d, end)
@@ -207,7 +230,8 @@ def evaluate(d, money_currency):
     return {
         "model": model, "score": score, "fiscal_year_end": end, "currency": money_currency,
         "parts": parts, "missing": missing, "gross_margin": round(gross_margin, 4) if gross_margin is not None else None,
-        "key_reasons": key_reasons(model, parts, gross_margin), "revenue_history": history,
+        "key_reasons": key_reasons(model, parts, gross_margin, profit_source), "revenue_history": history,
+        "profit_source": profit_source,
         "piotroski": {"score": f_score, "signals_known": f_known},
     }
 

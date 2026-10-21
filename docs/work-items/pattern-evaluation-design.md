@@ -1,6 +1,6 @@
 # Pattern evaluation: design note
 
-**Branch:** `Pattern-Evaluation` · **Author:** @Zura16 · **Co-owner:** @haohnguyen94-droid · **Status:** proposal, prototypes only, no migration · **Implements:** DECISIONS.md, "Confidence Score composition" (fundamentals, 60%)
+**Branch:** `Pattern-Evaluation` · **Author:** @Zura16 · **Co-owner:** @haohnguyen94-droid · **Status:** prototype built (`score.py`, rules v1.1), no migration · **Implements:** DECISIONS.md, "Confidence Score composition" (fundamentals, 60%)
 
 ## Summary
 
@@ -64,6 +64,8 @@ Where the two disagree, the cause is known:
 - **Why fixed limits instead of percentiles.** A percentile score changes whenever the candidate list changes. DECISIONS.md requires a stable score that doesn't move without a visible reason. A fixed limit can be explained to a user: "growing 25% a year".
 - **Why 3-year growth only.** This was a decision. One year of growth is noisy for small caps, and three years shows a pattern.
 - **Gross margin** is reported in the explanation text but not scored. Only 71 of 98 companies have it, and definitions vary.
+- **Pre-tax fallback.** When a company doesn't report operating income for its latest year (Eli Lilly, Robinhood, Deere), the margin and trend use pre-tax income from continuing operations. One source is used for all years, so the trend compares like with like, and the explanation text says "pre-tax profit".
+- **Margins beyond ±100%.** The trend is dropped when either year's margin is beyond ±100%, because revenue near zero makes it noise (Joby's trend computed to +437,443 points). A margin above +100% is dropped, because it means non-operating gains were booked as income (BitMine: 7,288%). Large negative margins are real and stay, and they score 0.
 
 ## 3. Bank model
 
@@ -77,7 +79,9 @@ Where the two disagree, the cause is known:
 
 ## 4. Missing data
 
-This follows DECISIONS.md. A missing measure is dropped and its weight is spread over the remaining measures. A missing measure never counts as neutral. If every measure is missing, the component is missing, and the Confidence Score renormalizes. Every missing result carries a fixed reason code that the app can show:
+This follows DECISIONS.md. A missing measure is dropped and its weight is spread over the remaining measures. A missing measure never counts as neutral.
+
+A company needs **at least 2 of its model's 3 measures** to be scored. Without that rule, one measure becomes the whole score: Robinhood scored 100 on growth alone, and Deere scored 0. With fewer than 2, the component is missing and the Confidence Score renormalizes. Every missing result carries a fixed reason code that the app can show:
 
 | Code | Shown to the user | Example |
 |---|---|---|
@@ -85,6 +89,7 @@ This follows DECISIONS.md. A missing measure is dropped and its weight is spread
 | `no_annual_report` | "No annual report yet (recently listed)." | CBRS |
 | `no_revenue` | "No revenue yet." | OKLO |
 | `insufficient_history` | "Less than 3 years of reports, so growth isn't scored yet." | CRWV, for growth only |
+| `not_enough_data` | "Not enough reported figures to score yet." | JOBY |
 | `identity_unresolved` | Internal only. Blocked until M4 identity work lands. | XOM |
 
 ## 5. Choices
@@ -110,7 +115,24 @@ The score is checked by rank correlation (Spearman) against the Piotroski F-Scor
 
 - Piotroski inputs: 44 of 98 companies have every input. The main gap is long-term debt, which debt-free filers don't report. **Proposed rule:** if long-term debt is absent but total liabilities are reported, treat it as 0.
 - Banks are excluded from the Piotroski check, because the F-Score is not defined for banks.
-- The correlation and the companies with the largest disagreement will be recorded in this note.
+- **Result (rules v1.1):** Spearman ρ = **0.40** across 61 general-model companies with all 9 signals. That is a moderate positive agreement. Piotroski measures financial health (debt, liquidity, cash flow, dilution), while this score rewards growth and operating profitability, so only partial agreement is expected. The value didn't change between v1 (0.40, 63 companies) and v1.1.
+
+## 7a. Prototype results
+
+From `score_output.txt` (rules v1.1, 110 tickers):
+
+| Result | Count |
+|---|---|
+| Scored | 90 (85 general, 5 bank: JPM, SOFI, MS, GS, BAC) |
+| `no_annual_report` | 6 |
+| `no_revenue` | 3 |
+| `not_enough_data` | 8 |
+| `not_sec_filer` | 2 |
+| `identity_unresolved` | 1 |
+
+The highest scores are HOOD 100, PLTR 91, LLY 90 and NVDA 88. Large, slower-growing companies sit mid-table (MSFT 61, AAPL 43), because the weights favor growth, as designed.
+
+**Known weakness: growth from a tiny revenue base.** CRSP scores 62.5 on 43% annual growth of small, irregular collaboration revenue, while its operating margin is −18,934%. Options are a minimum revenue level before growth is scored, or capping growth points when the operating margin is below −100%. To be decided.
 
 ## 8. Fit with the roadmap
 
@@ -125,3 +147,4 @@ The score is checked by rank correlation (Spearman) against the Piotroski F-Scor
 3. Is the data-based bank rule (`NoninterestExpense` plus `RevenuesNetOfInterestExpense`) acceptable, rather than SIC codes?
 4. Is treating absent long-term debt as 0 acceptable for Piotroski?
 5. SEC fair-access rules: the production collector needs a team contact address in the User-Agent. Whose address should it use?
+6. How should growth from a tiny revenue base be handled (see 7a)?

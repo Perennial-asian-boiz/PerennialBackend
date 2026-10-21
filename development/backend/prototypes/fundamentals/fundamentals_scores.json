@@ -1,6 +1,6 @@
 {
- "score_version": "fundamentals-v1-prototype",
- "generated_at": "2026-10-21T06:32:38+00:00",
+ "score_version": "fundamentals-v1.1-prototype",
+ "generated_at": "2026-10-21T06:37:55+00:00",
  "limits": {
   "general": {
    "revenue_growth_3y": [
@@ -90,6 +90,7 @@
      "revenue": 94827000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -149,6 +150,7 @@
      "revenue": 1271789000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -193,6 +195,7 @@
      "revenue": 2746642000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -249,6 +252,7 @@
      "revenue": 7181325000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 8
@@ -256,32 +260,26 @@
   },
   "CRSP": {
    "model": "general",
-   "score": 50.0,
+   "score": 62.5,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.4309,
      "points": 100.0,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -189.3365,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": -176.8327,
-     "points": 0.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
    "gross_margin": null,
    "key_reasons": [
     "Revenue grew 43% a year over the last 3 years.",
-    "Spends more than it earns: operating loss of 18934 cents per sales dollar.",
-    "Profitability worsened 17683 points from last year."
+    "Spends more than it earns: operating loss of 18934 cents per sales dollar."
    ],
    "revenue_history": [
     {
@@ -305,6 +303,7 @@
      "revenue": 3510000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 1,
     "signals_known": 8
@@ -362,6 +361,7 @@
      "revenue": 11556000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 8
@@ -419,6 +419,7 @@
      "revenue": 376572000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -433,13 +434,25 @@
     "revenue_growth_3y": {
      "value": 0.4879,
      "points": 100.0,
-     "weight": 1.0
+     "weight": 0.5
+    },
+    "operating_margin": {
+     "value": 0.4713,
+     "points": 100.0,
+     "weight": 0.3
+    },
+    "operating_margin_trend": {
+     "value": 0.1107,
+     "points": 100.0,
+     "weight": 0.2
     }
    },
    "missing": [],
    "gross_margin": null,
    "key_reasons": [
-    "Revenue grew 49% a year over the last 3 years."
+    "Revenue grew 49% a year over the last 3 years.",
+    "Keeps 47 cents of every sales dollar as pre-tax profit.",
+    "Profitability improved 11 points from last year."
    ],
    "revenue_history": [
     {
@@ -463,6 +476,7 @@
      "revenue": 4473000000
     }
    ],
+   "profit_source": "pretax_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -520,6 +534,7 @@
      "revenue": 215938000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -577,6 +592,7 @@
      "revenue": 4475446000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
@@ -634,6 +650,7 @@
      "revenue": 642823000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -679,6 +696,7 @@
      "revenue": 5131000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -736,6 +754,7 @@
      "revenue": 716924000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -793,6 +812,7 @@
      "revenue": 24193683000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -800,32 +820,26 @@
   },
   "BEAM": {
    "model": "general",
-   "score": 59.9,
+   "score": 49.8,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.3188,
      "points": 79.7,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -2.7457,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": 3.7968,
-     "points": 100.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
    "gross_margin": null,
    "key_reasons": [
     "Revenue grew 32% a year over the last 3 years.",
-    "Spends more than it earns: operating loss of 275 cents per sales dollar.",
-    "Profitability improved 380 points from last year."
+    "Spends more than it earns: operating loss of 275 cents per sales dollar."
    ],
    "revenue_history": [
     {
@@ -849,6 +863,7 @@
      "revenue": 139743000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -906,6 +921,7 @@
      "revenue": 200966000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -970,6 +986,7 @@
      "revenue": 63887000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 8,
     "signals_known": 9
@@ -977,32 +994,26 @@
   },
   "NTLA": {
    "model": "general",
-   "score": 31.4,
+   "score": 14.2,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.0909,
      "points": 22.7,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -6.5167,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": 2.7143,
-     "points": 100.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
    "gross_margin": null,
    "key_reasons": [
     "Revenue grew 9% a year over the last 3 years.",
-    "Spends more than it earns: operating loss of 652 cents per sales dollar.",
-    "Profitability improved 271 points from last year."
+    "Spends more than it earns: operating loss of 652 cents per sales dollar."
    ],
    "revenue_history": [
     {
@@ -1026,6 +1037,7 @@
      "revenue": 67671000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 2,
     "signals_known": 8
@@ -1083,6 +1095,7 @@
      "revenue": 34639000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 8,
     "signals_known": 9
@@ -1090,15 +1103,28 @@
   },
   "BLSH": {
    "model": "general",
-   "score": null,
+   "score": 42.9,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
-   "parts": {},
+   "parts": {
+    "operating_margin": {
+     "value": -0.0032,
+     "points": 39.4,
+     "weight": 0.6
+    },
+    "operating_margin_trend": {
+     "value": -0.0036,
+     "points": 48.2,
+     "weight": 0.4
+    }
+   },
    "missing": [
     "insufficient_history"
    ],
    "gross_margin": 0.0003,
    "key_reasons": [
+    "Spends more than it earns: pre-tax loss of 0 cents per sales dollar.",
+    "Profitability worsened 0 points from last year.",
     "Gross margin: 0%."
    ],
    "revenue_history": [
@@ -1115,6 +1141,7 @@
      "revenue": 244811387000
     }
    ],
+   "profit_source": "pretax_income",
    "piotroski": {
     "score": 2,
     "signals_known": 9
@@ -1122,60 +1149,11 @@
   },
   "BMNR": {
    "model": "general",
-   "score": 100.0,
+   "score": null,
    "fiscal_year_end": "2025-08-31",
-   "currency": "USD",
-   "parts": {
-    "revenue_growth_3y": {
-     "value": 1.4245,
-     "points": 100.0,
-     "weight": 0.5
-    },
-    "operating_margin": {
-     "value": 72.8812,
-     "points": 100.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": 73.6207,
-     "points": 100.0,
-     "weight": 0.2
-    }
-   },
-   "missing": [],
-   "gross_margin": 0.0509,
-   "key_reasons": [
-    "Revenue grew 142% a year over the last 3 years.",
-    "Keeps 7288 cents of every sales dollar as operating profit.",
-    "Profitability improved 7362 points from last year.",
-    "Gross margin: 5%."
-   ],
-   "revenue_history": [
-    {
-     "fiscal_year_end": "2021-08-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2022-08-31",
-     "revenue": 427669
-    },
-    {
-     "fiscal_year_end": "2023-08-31",
-     "revenue": 645278
-    },
-    {
-     "fiscal_year_end": "2024-08-31",
-     "revenue": 3310348
-    },
-    {
-     "fiscal_year_end": "2025-08-31",
-     "revenue": 6095000
-    }
-   ],
-   "piotroski": {
-    "score": 3,
-    "signals_known": 9
-   }
+   "missing": [
+    "not_enough_data"
+   ]
   },
   "GOOG": {
    "model": "general",
@@ -1229,6 +1207,7 @@
      "revenue": 402836000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -1236,24 +1215,19 @@
   },
   "RXRX": {
    "model": "general",
-   "score": 29.1,
+   "score": 36.4,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.233,
      "points": 58.2,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -8.6787,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": -0.5377,
-     "points": 0.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
@@ -1261,7 +1235,6 @@
    "key_reasons": [
     "Revenue grew 23% a year over the last 3 years.",
     "Spends more than it earns: operating loss of 868 cents per sales dollar.",
-    "Profitability worsened 54 points from last year.",
     "Gross margin: 5%."
    ],
    "revenue_history": [
@@ -1286,6 +1259,7 @@
      "revenue": 74681000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -1343,6 +1317,7 @@
      "revenue": 2167937000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 9
@@ -1400,6 +1375,7 @@
      "revenue": 601799000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -1456,6 +1432,7 @@
      "revenue": 2306113000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -1513,6 +1490,7 @@
      "revenue": 1346800000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -1570,6 +1548,7 @@
      "revenue": 3198425000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -1627,6 +1606,7 @@
      "revenue": 517145000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
@@ -1684,6 +1664,7 @@
      "revenue": 88268000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
@@ -1691,42 +1672,12 @@
   },
   "ACHR": {
    "model": "general",
-   "score": 0.0,
+   "score": null,
    "fiscal_year_end": "2025-12-31",
-   "currency": "USD",
-   "parts": {
-    "operating_margin": {
-     "value": -2431.0,
-     "points": 0.0,
-     "weight": 1.0
-    }
-   },
    "missing": [
+    "not_enough_data",
     "insufficient_history"
-   ],
-   "gross_margin": 0.3333,
-   "key_reasons": [
-    "Spends more than it earns: operating loss of 243100 cents per sales dollar.",
-    "Gross margin: 33%."
-   ],
-   "revenue_history": [
-    {
-     "fiscal_year_end": "2023-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2024-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2025-12-31",
-     "revenue": 300000
-    }
-   ],
-   "piotroski": {
-    "score": 5,
-    "signals_known": 8
-   }
+   ]
   },
   "WGS": {
    "model": "general",
@@ -1780,6 +1731,7 @@
      "revenue": 427539000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -1837,6 +1789,7 @@
      "revenue": 4343000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 8
@@ -1894,6 +1847,7 @@
      "revenue": 3190024000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -1908,20 +1862,32 @@
   },
   "LLY": {
    "model": "general",
-   "score": 79.2,
+   "score": 89.6,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.3169,
      "points": 79.2,
-     "weight": 1.0
+     "weight": 0.5
+    },
+    "operating_margin": {
+     "value": 0.3948,
+     "points": 100.0,
+     "weight": 0.3
+    },
+    "operating_margin_trend": {
+     "value": 0.1133,
+     "points": 100.0,
+     "weight": 0.2
     }
    },
    "missing": [],
    "gross_margin": 0.8304,
    "key_reasons": [
     "Revenue grew 32% a year over the last 3 years.",
+    "Keeps 39 cents of every sales dollar as pre-tax profit.",
+    "Profitability improved 11 points from last year.",
     "Gross margin: 83%."
    ],
    "revenue_history": [
@@ -1946,6 +1912,7 @@
      "revenue": 65179000000
     }
    ],
+   "profit_source": "pretax_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
@@ -2002,6 +1969,7 @@
      "revenue": 3613354000
     }
    ],
+   "profit_source": null,
    "piotroski": {
     "score": null,
     "signals_known": 0
@@ -2009,24 +1977,19 @@
   },
   "PACB": {
    "model": "general",
-   "score": 9.6,
+   "score": 11.9,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.0764,
      "points": 19.1,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -3.4615,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": -0.3818,
-     "points": 0.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
@@ -2034,7 +1997,6 @@
    "key_reasons": [
     "Revenue grew 8% a year over the last 3 years.",
     "Spends more than it earns: operating loss of 346 cents per sales dollar.",
-    "Profitability worsened 38 points from last year.",
     "Gross margin: 29%."
    ],
    "revenue_history": [
@@ -2059,6 +2021,7 @@
      "revenue": 160005000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 9
@@ -2066,20 +2029,32 @@
   },
   "DE": {
    "model": "general",
-   "score": 0.0,
+   "score": 26.1,
    "fiscal_year_end": "2025-11-02",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": -0.0458,
      "points": 0.0,
-     "weight": 1.0
+     "weight": 0.5
+    },
+    "operating_margin": {
+     "value": 0.137,
+     "points": 67.4,
+     "weight": 0.3
+    },
+    "operating_margin_trend": {
+     "value": -0.041,
+     "points": 29.5,
+     "weight": 0.2
     }
    },
    "missing": [],
    "gross_margin": null,
    "key_reasons": [
-    "Revenue shrank 5% a year over the last 3 years."
+    "Revenue shrank 5% a year over the last 3 years.",
+    "Keeps 14 cents of every sales dollar as pre-tax profit.",
+    "Profitability worsened 4 points from last year."
    ],
    "revenue_history": [
     {
@@ -2103,6 +2078,7 @@
      "revenue": 45684000000
     }
    ],
+   "profit_source": "pretax_income",
    "piotroski": {
     "score": 4,
     "signals_known": 7
@@ -2160,6 +2136,7 @@
      "revenue": 21325000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
@@ -2217,6 +2194,7 @@
      "revenue": 1976845000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 2,
     "signals_known": 9
@@ -2274,6 +2252,7 @@
      "revenue": 3587300000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -2338,6 +2317,7 @@
      "revenue": 2246922000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -2390,6 +2370,7 @@
      "revenue": 210059000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -2441,6 +2422,7 @@
      "revenue": 3000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -2498,6 +2480,7 @@
      "revenue": 10064700000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -2554,6 +2537,7 @@
      "revenue": 13717000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 8
@@ -2611,6 +2595,7 @@
      "revenue": 3481933000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 9,
     "signals_known": 9
@@ -2668,6 +2653,7 @@
      "revenue": 67589000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -2725,6 +2711,7 @@
      "revenue": 7938627000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 8,
     "signals_known": 9
@@ -2782,6 +2769,7 @@
      "revenue": 7054178000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 9
@@ -2789,100 +2777,21 @@
   },
   "JOBY": {
    "model": "general",
-   "score": 40.0,
+   "score": null,
    "fiscal_year_end": "2025-12-31",
-   "currency": "USD",
-   "parts": {
-    "operating_margin": {
-     "value": -13.4692,
-     "points": 0.0,
-     "weight": 0.6
-    },
-    "operating_margin_trend": {
-     "value": 4374.4279,
-     "points": 100.0,
-     "weight": 0.4
-    }
-   },
    "missing": [
+    "not_enough_data",
     "insufficient_history"
-   ],
-   "gross_margin": null,
-   "key_reasons": [
-    "Spends more than it earns: operating loss of 1347 cents per sales dollar.",
-    "Profitability improved 437443 points from last year."
-   ],
-   "revenue_history": [
-    {
-     "fiscal_year_end": "2021-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2022-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2023-12-31",
-     "revenue": 1032000
-    },
-    {
-     "fiscal_year_end": "2024-12-31",
-     "revenue": 136000
-    },
-    {
-     "fiscal_year_end": "2025-12-31",
-     "revenue": 53425000
-    }
-   ],
-   "piotroski": {
-    "score": 3,
-    "signals_known": 8
-   }
+   ]
   },
   "WRD": {
    "model": "general",
-   "score": 0.0,
+   "score": null,
    "fiscal_year_end": "2024-12-31",
-   "currency": "CNY",
-   "parts": {
-    "operating_margin": {
-     "value": -6.0509,
-     "points": 0.0,
-     "weight": 0.6
-    },
-    "operating_margin_trend": {
-     "value": -2.1534,
-     "points": 0.0,
-     "weight": 0.4
-    }
-   },
    "missing": [
+    "not_enough_data",
     "insufficient_history"
-   ],
-   "gross_margin": 0.3066,
-   "key_reasons": [
-    "Spends more than it earns: operating loss of 605 cents per sales dollar.",
-    "Profitability worsened 215 points from last year.",
-    "Gross margin: 31%."
-   ],
-   "revenue_history": [
-    {
-     "fiscal_year_end": "2022-12-31",
-     "revenue": 527543000
-    },
-    {
-     "fiscal_year_end": "2023-12-31",
-     "revenue": 401844000
-    },
-    {
-     "fiscal_year_end": "2024-12-31",
-     "revenue": 361134000
-    }
-   ],
-   "piotroski": {
-    "score": 3,
-    "signals_known": 8
-   }
+   ]
   },
   "BIDU": {
    "model": "general",
@@ -2936,6 +2845,7 @@
      "revenue": 18458000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 1,
     "signals_known": 8
@@ -2943,24 +2853,19 @@
   },
   "PONY": {
    "model": "general",
-   "score": 32.0,
+   "score": 15.0,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.0959,
      "points": 24.0,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -2.8984,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": 0.9073,
-     "points": 100.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
@@ -2968,7 +2873,6 @@
    "key_reasons": [
     "Revenue grew 10% a year over the last 3 years.",
     "Spends more than it earns: operating loss of 290 cents per sales dollar.",
-    "Profitability improved 91 points from last year.",
     "Gross margin: 16%."
    ],
    "revenue_history": [
@@ -2989,6 +2893,7 @@
      "revenue": 90001000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 9
@@ -3010,47 +2915,12 @@
   },
   "KDK": {
    "model": "general",
-   "score": 0.0,
+   "score": null,
    "fiscal_year_end": "2025-12-31",
-   "currency": "USD",
-   "parts": {
-    "operating_margin": {
-     "value": -29.6616,
-     "points": 0.0,
-     "weight": 0.6
-    },
-    "operating_margin_trend": {
-     "value": -25.5285,
-     "points": 0.0,
-     "weight": 0.4
-    }
-   },
    "missing": [
+    "not_enough_data",
     "insufficient_history"
-   ],
-   "gross_margin": null,
-   "key_reasons": [
-    "Spends more than it earns: operating loss of 2966 cents per sales dollar.",
-    "Profitability worsened 2553 points from last year."
-   ],
-   "revenue_history": [
-    {
-     "fiscal_year_end": "2023-12-31",
-     "revenue": 16946000
-    },
-    {
-     "fiscal_year_end": "2024-12-31",
-     "revenue": 14933000
-    },
-    {
-     "fiscal_year_end": "2025-12-31",
-     "revenue": 3797000
-    }
-   ],
-   "piotroski": {
-    "score": 3,
-    "signals_known": 8
-   }
+   ]
   },
   "GH": {
    "model": "general",
@@ -3104,6 +2974,7 @@
      "revenue": 982021000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -3160,6 +3031,7 @@
      "revenue": 379805000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 8
@@ -3167,24 +3039,19 @@
   },
   "SDGR": {
    "model": "general",
-   "score": 35.3,
+   "score": 19.1,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.1224,
      "points": 30.6,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -0.6523,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": 0.3562,
-     "points": 100.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
@@ -3192,7 +3059,6 @@
    "key_reasons": [
     "Revenue grew 12% a year over the last 3 years.",
     "Spends more than it earns: operating loss of 65 cents per sales dollar.",
-    "Profitability improved 36 points from last year.",
     "Gross margin: 56%."
    ],
    "revenue_history": [
@@ -3217,6 +3083,7 @@
      "revenue": 255869000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -3231,32 +3098,26 @@
   },
   "NRIX": {
    "model": "general",
-   "score": 57.0,
+   "score": 46.2,
    "fiscal_year_end": "2025-11-30",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.2955,
      "points": 73.9,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -3.4016,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": 0.5036,
-     "points": 100.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
    "gross_margin": null,
    "key_reasons": [
     "Revenue grew 30% a year over the last 3 years.",
-    "Spends more than it earns: operating loss of 340 cents per sales dollar.",
-    "Profitability improved 50 points from last year."
+    "Spends more than it earns: operating loss of 340 cents per sales dollar."
    ],
    "revenue_history": [
     {
@@ -3280,6 +3141,7 @@
      "revenue": 83980000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -3336,6 +3198,7 @@
      "revenue": 233798000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 8
@@ -3350,25 +3213,19 @@
     "revenue_growth_3y": {
      "value": -0.2131,
      "points": 0.0,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -42.9704,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": -18.9545,
-     "points": 0.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
    "gross_margin": null,
    "key_reasons": [
     "Revenue shrank 21% a year over the last 3 years.",
-    "Spends more than it earns: operating loss of 4297 cents per sales dollar.",
-    "Profitability worsened 1895 points from last year."
+    "Spends more than it earns: operating loss of 4297 cents per sales dollar."
    ],
    "revenue_history": [
     {
@@ -3392,6 +3249,7 @@
      "revenue": 2800000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 8
@@ -3449,6 +3307,7 @@
      "revenue": 276976000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -3456,24 +3315,19 @@
   },
   "PSNL": {
    "model": "general",
-   "score": 2.9,
+   "score": 3.6,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.023,
      "points": 5.8,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -1.2643,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": -0.4575,
-     "points": 0.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
@@ -3481,7 +3335,6 @@
    "key_reasons": [
     "Revenue grew 2% a year over the last 3 years.",
     "Spends more than it earns: operating loss of 126 cents per sales dollar.",
-    "Profitability worsened 46 points from last year.",
     "Gross margin: 23%."
    ],
    "revenue_history": [
@@ -3506,6 +3359,7 @@
      "revenue": 69648000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 9
@@ -3563,6 +3417,7 @@
      "revenue": 97610000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 9
@@ -3620,6 +3475,7 @@
      "revenue": 943711000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -3676,6 +3532,7 @@
      "revenue": 82031000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 1,
     "signals_known": 8
@@ -3690,76 +3547,28 @@
   },
   "PRME": {
    "model": "general",
-   "score": 40.0,
+   "score": null,
    "fiscal_year_end": "2025-12-31",
-   "currency": "USD",
-   "parts": {
-    "operating_margin": {
-     "value": -44.9806,
-     "points": 0.0,
-     "weight": 0.6
-    },
-    "operating_margin_trend": {
-     "value": 22.893,
-     "points": 100.0,
-     "weight": 0.4
-    }
-   },
    "missing": [
+    "not_enough_data",
     "insufficient_history"
-   ],
-   "gross_margin": null,
-   "key_reasons": [
-    "Spends more than it earns: operating loss of 4498 cents per sales dollar.",
-    "Profitability improved 2289 points from last year."
-   ],
-   "revenue_history": [
-    {
-     "fiscal_year_end": "2021-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2022-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2023-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2024-12-31",
-     "revenue": 2983000
-    },
-    {
-     "fiscal_year_end": "2025-12-31",
-     "revenue": 4632000
-    }
-   ],
-   "piotroski": {
-    "score": 3,
-    "signals_known": 8
-   }
+   ]
   },
   "MASS": {
    "model": "general",
-   "score": 27.8,
+   "score": 9.8,
    "fiscal_year_end": "2025-12-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.0625,
      "points": 15.6,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -0.7015,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": 0.5006,
-     "points": 100.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
@@ -3767,7 +3576,6 @@
    "key_reasons": [
     "Revenue grew 6% a year over the last 3 years.",
     "Spends more than it earns: operating loss of 70 cents per sales dollar.",
-    "Profitability improved 50 points from last year.",
     "Gross margin: 51%."
    ],
    "revenue_history": [
@@ -3792,6 +3600,7 @@
      "revenue": 56197000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 9
@@ -3827,17 +3636,12 @@
     "revenue_growth_3y": {
      "value": -0.0574,
      "points": 0.0,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -8.9107,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": -3.3526,
-     "points": 0.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
@@ -3845,7 +3649,6 @@
    "key_reasons": [
     "Revenue shrank 6% a year over the last 3 years.",
     "Spends more than it earns: operating loss of 891 cents per sales dollar.",
-    "Profitability worsened 335 points from last year.",
     "Gross margin: 0%."
    ],
    "revenue_history": [
@@ -3870,6 +3673,7 @@
      "revenue": 39211000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 3,
     "signals_known": 9
@@ -3877,56 +3681,12 @@
   },
   "QSI": {
    "model": "general",
-   "score": 0.0,
+   "score": null,
    "fiscal_year_end": "2025-12-31",
-   "currency": "USD",
-   "parts": {
-    "operating_margin": {
-     "value": -47.6597,
-     "points": 0.0,
-     "weight": 0.6
-    },
-    "operating_margin_trend": {
-     "value": -12.1541,
-     "points": 0.0,
-     "weight": 0.4
-    }
-   },
    "missing": [
+    "not_enough_data",
     "insufficient_history"
-   ],
-   "gross_margin": 0.4733,
-   "key_reasons": [
-    "Spends more than it earns: operating loss of 4766 cents per sales dollar.",
-    "Profitability worsened 1215 points from last year.",
-    "Gross margin: 47%."
-   ],
-   "revenue_history": [
-    {
-     "fiscal_year_end": "2021-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2022-12-31",
-     "revenue": 0
-    },
-    {
-     "fiscal_year_end": "2023-12-31",
-     "revenue": 1082000
-    },
-    {
-     "fiscal_year_end": "2024-12-31",
-     "revenue": 3058000
-    },
-    {
-     "fiscal_year_end": "2025-12-31",
-     "revenue": 2436000
-    }
-   ],
-   "piotroski": {
-    "score": 1,
-    "signals_known": 9
-   }
+   ]
   },
   "DDOG": {
    "model": "general",
@@ -3980,6 +3740,7 @@
      "revenue": 3427158000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -4037,6 +3798,7 @@
      "revenue": 4812005000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -4044,24 +3806,19 @@
   },
   "RBRK": {
    "model": "general",
-   "score": 57.5,
+   "score": 46.8,
    "fiscal_year_end": "2026-01-31",
    "currency": "USD",
    "parts": {
     "revenue_growth_3y": {
      "value": 0.2995,
      "points": 74.9,
-     "weight": 0.5
+     "weight": 0.625
     },
     "operating_margin": {
      "value": -0.2624,
      "points": 0.0,
-     "weight": 0.3
-    },
-    "operating_margin_trend": {
-     "value": 1.0167,
-     "points": 100.0,
-     "weight": 0.2
+     "weight": 0.375
     }
    },
    "missing": [],
@@ -4069,7 +3826,6 @@
    "key_reasons": [
     "Revenue grew 30% a year over the last 3 years.",
     "Spends more than it earns: operating loss of 26 cents per sales dollar.",
-    "Profitability improved 102 points from last year.",
     "Gross margin: 80%."
    ],
    "revenue_history": [
@@ -4090,6 +3846,7 @@
      "revenue": 1316191000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -4147,6 +3904,7 @@
      "revenue": 4890551000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -4204,6 +3962,7 @@
      "revenue": 955224000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -4261,6 +4020,7 @@
      "revenue": 6153000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -4318,6 +4078,7 @@
      "revenue": 28893000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 5,
     "signals_known": 9
@@ -4375,6 +4136,7 @@
      "revenue": 17186000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -4432,6 +4194,7 @@
      "revenue": 4683946000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -4489,6 +4252,7 @@
      "revenue": 45183036000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
@@ -4496,48 +4260,12 @@
   },
   "FIG": {
    "model": "general",
-   "score": 9.8,
+   "score": null,
    "fiscal_year_end": "2025-12-31",
-   "currency": "USD",
-   "parts": {
-    "operating_margin": {
-     "value": -1.2223,
-     "points": 0.0,
-     "weight": 0.6
-    },
-    "operating_margin_trend": {
-     "value": -0.0508,
-     "points": 24.6,
-     "weight": 0.4
-    }
-   },
    "missing": [
+    "not_enough_data",
     "insufficient_history"
-   ],
-   "gross_margin": 0.8243,
-   "key_reasons": [
-    "Spends more than it earns: operating loss of 122 cents per sales dollar.",
-    "Profitability worsened 5 points from last year.",
-    "Gross margin: 82%."
-   ],
-   "revenue_history": [
-    {
-     "fiscal_year_end": "2023-12-31",
-     "revenue": 504874000
-    },
-    {
-     "fiscal_year_end": "2024-12-31",
-     "revenue": 749011000
-    },
-    {
-     "fiscal_year_end": "2025-12-31",
-     "revenue": 1055788000
-    }
-   ],
-   "piotroski": {
-    "score": 3,
-    "signals_known": 9
-   }
+   ]
   },
   "ABNB": {
    "model": "general",
@@ -4591,6 +4319,7 @@
      "revenue": 12241000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -4648,6 +4377,7 @@
      "revenue": 669489000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 9
@@ -4705,6 +4435,7 @@
      "revenue": 6054525000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
@@ -4762,6 +4493,7 @@
      "revenue": 416161000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 8,
     "signals_known": 9
@@ -4819,6 +4551,7 @@
      "revenue": 331839000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -4875,6 +4608,7 @@
      "revenue": 182447000000
     }
    ],
+   "profit_source": null,
    "piotroski": {
     "score": null,
     "signals_known": 0
@@ -4931,6 +4665,7 @@
      "revenue": 58283000000
     }
    ],
+   "profit_source": null,
    "piotroski": {
     "score": null,
     "signals_known": 0
@@ -4987,6 +4722,7 @@
      "revenue": 70645000000
     }
    ],
+   "profit_source": null,
    "piotroski": {
     "score": null,
     "signals_known": 0
@@ -5039,6 +4775,7 @@
      "revenue": 24216000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 7
@@ -5103,6 +4840,7 @@
      "revenue": 713163000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
@@ -5159,6 +4897,7 @@
      "revenue": 94425000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 8
@@ -5215,6 +4954,7 @@
      "revenue": 37296000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 8
@@ -5272,6 +5012,7 @@
      "revenue": 89463000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -5329,6 +5070,7 @@
      "revenue": 52853000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 6,
     "signals_known": 9
@@ -5385,6 +5127,7 @@
      "revenue": 67357000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 4,
     "signals_known": 7
@@ -5441,6 +5184,7 @@
      "revenue": 113097000000
     }
    ],
+   "profit_source": null,
    "piotroski": {
     "score": null,
     "signals_known": 0
@@ -5498,6 +5242,7 @@
      "revenue": 447567000000
     }
    ],
+   "profit_source": "operating_income",
    "piotroski": {
     "score": 7,
     "signals_known": 9
