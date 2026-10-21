@@ -325,6 +325,17 @@ def _single_iso_date(values: List[Any]) -> Optional[date]:
     return date.fromisoformat(values[0])
 
 
+def _latest_iso_date(values: List[Any]) -> Optional[date]:
+    """Latest retained content date; empty or incomplete dates stay unknown.
+
+    Never substitute collection time: the date participates in batch identity.
+    Mixed settlement dates use the latest, retaining each row's own date.
+    """
+    if not values or not all(_is_iso_date(value) for value in values):
+        return None
+    return max(date.fromisoformat(value) for value in values)
+
+
 def _read_upstream(
     source: str, data_dir: Path
 ) -> Tuple[Optional[UpstreamRows], Optional[CollectionOutcome]]:
@@ -594,6 +605,7 @@ def collect_congress(
         trades,
         envelope=envelope,
         coverage={"complete": True, "scope": "recent_window"},
+        source_as_of=_latest_iso_date([t.get("disclosure_date") for t in trades]),
     )
 
 
@@ -673,6 +685,7 @@ def collect_insider(
     session = session or requests.Session()
     tracker = _Tracker("insider tickers", planned=len(plan))
     buys: List[Dict[str, Any]] = []
+    filing_dates: List[Any] = []
     unsupported: List[str] = []
     cutoff = insider.lookback_cutoff().isoformat()
     today = datetime.now(timezone.utc).date().isoformat()
@@ -698,17 +711,22 @@ def collect_insider(
             tracker.fail(ticker, "malformed_response")
             break
         else:
-            # insider.py returns (buys, error_code, error_detail). Its detail
-            # can contain provider data; only the fixed code crosses this
-            # boundary. A parser failure leaves the ticker unknown. Records
-            # keep the planned ticker, not the provider symbol.
-            parsed_buys, parse_code, _parse_detail = insider.parse_finnhub_buys(
-                ticker, resp.data, bucket
-            )
-            if parse_code is not None or not isinstance(parsed_buys, list):
-                tracker.fail(ticker, "parse_error")
+            # Parse each transaction with the existing parser so its filing
+            # date is retained only when that transaction contributes a buy.
+            # No duplicate filtering policy or fetcher/schema change is needed.
+            # Empty payloads still pass through the parser/error contract.
+            for txn in resp.data["data"] or [None]:
+                parsed_buys, parse_code, _parse_detail = insider.parse_finnhub_buys(
+                    ticker, {"data": [] if txn is None else [txn]}, bucket
+                )
+                if parse_code is not None or not isinstance(parsed_buys, list):
+                    tracker.fail(ticker, "parse_error")
+                    break
+                if parsed_buys:
+                    filing_dates.append(txn.get("filingDate") if txn else None)
+                    buys.extend(parsed_buys)
+            if tracker.failure_count:
                 break
-            buys.extend(parsed_buys)
             tracker.ok()
         sleep(insider.REQUEST_DELAY)
     envelope = {
@@ -724,6 +742,7 @@ def collect_insider(
         "insider_trades",
         buys,
         envelope=envelope,
+        source_as_of=_latest_iso_date(filing_dates),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 
@@ -818,6 +837,7 @@ def collect_short_interest(
         "short_interest",
         records,
         envelope=envelope,
+        source_as_of=_latest_iso_date([r.get("settlement_date") for r in records]),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 
