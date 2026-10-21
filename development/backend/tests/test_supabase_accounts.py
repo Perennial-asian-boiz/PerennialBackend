@@ -394,7 +394,7 @@ def test_duplicate_signup_rejected_without_replacing_password(api, confirm):
         json={
             "email": " ONE@EXAMPLE.COM ",
             "full_name": "Replacement",
-            "password": "different-password",
+            "password": "Different123",
         },
     )
     assert response.status_code == 409
