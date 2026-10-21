@@ -33,7 +33,88 @@ development/
 requirements.txt
 ```
 
-## Quick start
+## Quick start: Sprint 1 app
+
+After the Sprint 1 pull requests are merged, clone the default `main` branch of
+both repositories. Use Python 3.12 and Node.js/npm. The steps below run the
+FastAPI app and its matching frontend locally; they do not deploy either app.
+
+```bash
+git clone https://github.com/Perennial-asian-boiz/PerennialBackend.git
+git clone https://github.com/Perennial-asian-boiz/PerennialFrontEnd.git
+cd PerennialBackend
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+cp development/backend/.env.example development/backend/.env
+```
+
+On Windows PowerShell, use these equivalents for the virtual environment and
+copy step:
+
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
+Copy-Item development/backend/.env.example development/backend/.env
+```
+
+Ask the project maintainer for the required local Supabase and database
+configuration through an approved private channel. Do not commit or post
+`.env` files, database URLs/passwords, SMTP credentials, or provider keys.
+Provider keys for the separate company-data pipeline are not needed just to
+run the authentication app.
+
+The database migration updates the database schema. For the team's shared
+Supabase project, coordinate with the maintainer: an authorized person applies
+pending migrations once, after checking the target project. Do not have every
+teammate run migrations against the shared project. For an isolated local
+database, use the separate [database setup guide](development/database/README.md).
+
+If the maintainer confirms that the shared database needs a migration, run it
+from the backend repository root. The local setting tells the migration tool
+to read `development/backend/.env`:
+
+```bash
+export PERENNIAL_ENV=local
+cd development/database
+python -m alembic upgrade head
+cd ../backend
+python -m uvicorn src.api.app:app --reload --port 8000
+```
+
+In Windows PowerShell, set the same setting with
+`$env:PERENNIAL_ENV = "local"` before running Alembic.
+
+If migrations have already been applied, start the API from
+`PerennialBackend/development/backend` instead:
+
+```bash
+python -m uvicorn src.api.app:app --reload --port 8000
+```
+
+In a second terminal, start the frontend:
+
+```bash
+cd PerennialFrontEnd
+cp .env.example .env
+npm ci
+npm run dev
+```
+
+On Windows PowerShell, replace `cp .env.example .env` with
+`Copy-Item .env.example .env`.
+
+Open `http://localhost:5173`. FastAPI runs at `http://127.0.0.1:8000` and its
+API reference is `http://127.0.0.1:8000/docs`. The frontend's `.env.example`
+already points to that local API URL. The dashboard still uses development
+fixture data until the company-data integration is complete.
+
+If the pull requests have not been merged, clone the matching
+`codex/supabase-auth-resend` branch in **both** repositories instead of the
+default branch.
+
+## Other backend workflows
 
 ```bash
 pip install -r requirements.txt
