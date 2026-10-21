@@ -149,3 +149,52 @@ def test_scheduler_passes_startup_settings_to_the_pipeline(monkeypatch):
     monkeypatch.setattr(scheduler, "run_pipeline", fake_run_pipeline)
     assert scheduler.run_full_pipeline(settings) == 7
     assert received["settings"] is settings
+
+
+# Sources whose collector needs a provider key, and which key. ARK and short
+# interest are keyless public endpoints.
+KEYED_SOURCES = {"congress_trades": "fmp", "insider_trades": "finnhub"}
+
+
+def test_every_keyed_collector_declares_settings():
+    import inspect
+
+    from src.ingestion.collectors import COLLECTORS
+    from src.pipeline.runner import _accepts_settings
+
+    for source in KEYED_SOURCES:
+        assert "settings" in inspect.signature(COLLECTORS[source]).parameters, source
+        assert _accepts_settings(COLLECTORS[source]), source
+
+
+@pytest.mark.db
+def test_cli_fetch_uses_keys_only_in_settings(
+    engine, db_url, keyed_provider, monkeypatch, capsys
+):
+    """L5: `fetch <source>` passes startup Settings, like run-pipeline."""
+    from src.ingestion import cli
+
+    monkeypatch.setenv("DATABASE_URL", db_url.render_as_string(hide_password=False))
+    monkeypatch.setenv("FMP_API_KEY", FMP_KEY)
+    monkeypatch.setenv("FINNHUB_API_KEY", FINNHUB_KEY)
+
+    # insider_trades plans from the latest live Congress and ARK batches.
+    for source in ("congress_trades", "ark_holdings", "insider_trades"):
+        assert cli.main(["fetch", source]) == 0, source
+    capsys.readouterr()
+
+    assert keyed_provider.unrouted == []
+    assert keyed_provider.keys["fmp"] and set(keyed_provider.keys["fmp"]) == {FMP_KEY}
+    assert keyed_provider.keys["finnhub"]
+    assert set(keyed_provider.keys["finnhub"]) == {FINNHUB_KEY}
+    with engine.connect() as conn:
+        statuses = dict(
+            conn.execute(
+                select(models.ingestion_runs.c.source, models.ingestion_runs.c.status)
+            ).all()
+        )
+    assert statuses == {
+        "congress_trades": "succeeded",
+        "ark_holdings": "succeeded",
+        "insider_trades": "succeeded",
+    }
