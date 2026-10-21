@@ -36,8 +36,13 @@ CONCEPTS = {  # metric -> (us-gaap names, ifrs-full names), first match per fisc
     "long_term_debt": (["LongTermDebtNoncurrent", "LongTermDebt", "LongTermDebtAndCapitalLeaseObligations"],
                        ["NoncurrentPortionOfNoncurrentBorrowings", "LongtermBorrowings"]),
     "diluted_shares": (["WeightedAverageNumberOfDilutedSharesOutstanding"], ["AdjustedWeightedAverageShares"]),
+    "liabilities": (["Liabilities"], ["Liabilities"]),
+    "equity": (["StockholdersEquity"], ["EquityAttributableToOwnersOfParent", "Equity"]),
+    "noninterest_expense": (["NoninterestExpense"], []),
+    "revenue_net_of_interest": (["RevenuesNetOfInterestExpense", "Revenues"], []),
 }
-FLOW = {"revenue", "gross_profit", "cost_of_revenue", "operating_income", "net_income", "operating_cash_flow", "diluted_shares"}
+FLOW = {"revenue", "gross_profit", "cost_of_revenue", "operating_income", "net_income", "operating_cash_flow",
+        "diluted_shares", "noninterest_expense", "revenue_net_of_interest"}
 PIOTROSKI = ["net_income", "operating_cash_flow", "assets", "current_assets", "current_liabilities",
              "long_term_debt", "diluted_shares", "revenue"]
 
@@ -72,6 +77,17 @@ def series(facts, metric):
                 merged.setdefault(end, v)
             taxonomy = taxonomy or tax
     return merged, taxonomy
+
+
+def currency(facts, metric):
+    """The unit `series` reads for a money metric: USD when reported, otherwise the filing currency."""
+    gaap, ifrs = CONCEPTS[metric]
+    for tax, names in (("us-gaap", gaap), ("ifrs-full", ifrs)):
+        for name in names:
+            units = facts.get(tax, {}).get(name, {}).get("units", {})
+            if units:
+                return "USD" if "USD" in units else next(iter(units))
+    return None
 
 
 def main():
