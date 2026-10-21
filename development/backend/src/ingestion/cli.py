@@ -133,7 +133,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             _print(
                 {
                     "publication_id": run_pipeline(
-                        engine, quality_thresholds=settings.quality_thresholds
+                        engine,
+                        quality_thresholds=settings.quality_thresholds,
+                        settings=settings,
                     )
                 }
             )
@@ -246,7 +248,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             from src.pipeline.runner import collect_source
 
-            result = collect_source(engine, args.source)
+            result = collect_source(engine, args.source, settings=settings)
             _print(asdict(result))
             return 0 if result.succeeded else 1
         result = import_collection(engine, outcome)
