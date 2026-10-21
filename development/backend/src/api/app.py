@@ -84,6 +84,9 @@ async def invalid_input(_request: Request, error: RequestValidationError):
                     else "Use at least 8 characters for your password."
                 ),
                 "string_too_long": "Use no more than 200 characters for your password.",
+                "value_error": (
+                    "Include an uppercase letter, a lowercase letter, and a number."
+                ),
             }.get(kind, "Enter your password.")
         elif name == "code":
             fields[name] = "Enter the 6-digit verification code from your email."

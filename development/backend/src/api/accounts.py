@@ -26,6 +26,10 @@ OTP_MINUTES = 15
 RESEND_COOLDOWN_SECONDS = 60
 MAX_ATTEMPTS = 5
 MAX_EMAILS_PER_HOUR = 60
+PASSWORD_REQUIREMENTS_MESSAGE = (
+    "Use 8–200 characters, including an uppercase letter, a lowercase letter, "
+    "and a number."
+)
 
 
 def now():
@@ -70,6 +74,11 @@ class EmailRequest(BaseModel):
 class SignupRequest(EmailRequest):
     full_name: str = Field(min_length=1, max_length=200)
     password: str = Field(min_length=8, max_length=200)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_requirements(cls, value):
+        return validate_password(value)
 
     @field_validator("full_name")
     @classmethod
@@ -145,9 +154,23 @@ class RecoveryLinkRequest(BaseModel):
 class NewPassword(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
+    @field_validator("new_password")
+    @classmethod
+    def validate_password_requirements(cls, value):
+        return validate_password(value)
+
 
 class ChangePassword(NewPassword):
     old_password: str = Field(min_length=1, max_length=200)
+
+
+def validate_password(value):
+    has_uppercase = re.search(r"[A-Z]", value)
+    has_lowercase = re.search(r"[a-z]", value)
+    has_number = re.search(r"\d", value)
+    if not (has_uppercase and has_lowercase and has_number):
+        raise ValueError(PASSWORD_REQUIREMENTS_MESSAGE)
+    return value
 
 
 class Preferences(BaseModel):

@@ -9,7 +9,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision = "auth_supabase_v1"
-down_revision = "0005"
+down_revision = "auth_settings_v1"
 branch_labels = None
 depends_on = None
 

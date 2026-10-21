@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import select, text, update
 from src.api import account_models as tables
 from src.api import accounts
@@ -127,7 +128,7 @@ def register(api, email="one@example.com"):
     client, provider, _engine = api
     response = client.post(
         "/auth/signup",
-        json={"email": email, "full_name": "Test Person", "password": "password123"},
+        json={"email": email, "full_name": "Test Person", "password": "Password123"},
     )
     assert response.status_code == 201, response.text
     assert response.json()["verification_method"] == "email_link"
@@ -139,7 +140,7 @@ def register(api, email="one@example.com"):
     assert confirmed.status_code == 200, confirmed.text
     assert "access_token" not in confirmed.json()
     response = client.post(
-        "/auth/login", json={"email": email, "password": "password123"}
+        "/auth/login", json={"email": email, "password": "Password123"}
     )
     challenge = response.json()
     verified = client.post(
@@ -174,7 +175,7 @@ def test_first_login_after_email_confirmation_does_not_wait_for_signup_cooldown(
     email = "first-login@example.com"
     signup = client.post(
         "/auth/signup",
-        json={"email": email, "full_name": "First Login", "password": "password123"},
+        json={"email": email, "full_name": "First Login", "password": "Password123"},
     )
     assert signup.status_code == 201
     link = provider.verify_code(email, "123456", "signup")
@@ -185,13 +186,13 @@ def test_first_login_after_email_confirmation_does_not_wait_for_signup_cooldown(
         == 200
     )
 
-    login = client.post("/auth/login", json={"email": email, "password": "password123"})
+    login = client.post("/auth/login", json={"email": email, "password": "Password123"})
     assert login.status_code == 200, login.text
     assert login.json()["flow"] == "login"
     assert provider.sent == [(email, "login")]
 
     repeated = client.post(
-        "/auth/login", json={"email": email, "password": "password123"}
+        "/auth/login", json={"email": email, "password": "Password123"}
     )
     assert repeated.status_code == 200
     assert provider.sent == [(email, "login"), (email, "login")]
@@ -240,7 +241,7 @@ def test_existing_user_still_needs_otp_then_keeps_onboarding(api):
         "/me/preferences", headers=headers, json={"sectors": [], "risk_level": None}
     ).raise_for_status()
     challenge = client.post(
-        "/auth/login", json={"email": body["user"]["email"], "password": "password123"}
+        "/auth/login", json={"email": body["user"]["email"], "password": "Password123"}
     ).json()
     assert challenge["flow"] == "login" and "access_token" not in challenge
     payload = {
@@ -255,9 +256,9 @@ def test_existing_user_still_needs_otp_then_keeps_onboarding(api):
 
 def test_unconfirmed_login_explains_email_confirmation(api):
     client, provider, _ = api
-    provider.signup("pending@example.com", "password123", "Pending")
+    provider.signup("pending@example.com", "Password123", "Pending")
     response = client.post(
-        "/auth/login", json={"email": "pending@example.com", "password": "password123"}
+        "/auth/login", json={"email": "pending@example.com", "password": "Password123"}
     )
     assert response.status_code == 403
     assert "hasn’t been confirmed" in response.json()["detail"]
@@ -272,7 +273,7 @@ def test_five_failed_attempts_persist_and_block_even_correct_code(api):
         json={
             "email": "one@example.com",
             "full_name": "One",
-            "password": "password123",
+            "password": "Password123",
         },
     ).json()
     payload = {
@@ -298,10 +299,10 @@ def test_five_failed_attempts_persist_and_block_even_correct_code(api):
 
 def test_resend_enforces_sixty_second_cooldown_and_hourly_limit(api):
     client, provider, engine = api
-    provider.signup("one@example.com", "password123", "One")
+    provider.signup("one@example.com", "Password123", "One")
     provider.users["one@example.com"]["email_confirmed_at"] = "2026-10-18T00:00:00Z"
     challenge = client.post(
-        "/auth/login", json={"email": "one@example.com", "password": "password123"}
+        "/auth/login", json={"email": "one@example.com", "password": "Password123"}
     ).json()
     assert challenge["resend_after_seconds"] == 60
     payload = {"email": "one@example.com", "challenge_id": challenge["challenge_id"]}
@@ -352,7 +353,7 @@ def test_provider_outage_does_not_consume_attempts(api):
         json={
             "email": "one@example.com",
             "full_name": "One",
-            "password": "password123",
+            "password": "Password123",
         },
     ).json()
     provider.fail = True
@@ -385,7 +386,7 @@ def test_duplicate_signup_rejected_without_replacing_password(api, confirm):
             json={
                 "email": "one@example.com",
                 "full_name": "Original",
-                "password": "password123",
+                "password": "Password123",
             },
         ).raise_for_status()
     response = client.post(
@@ -400,7 +401,7 @@ def test_duplicate_signup_rejected_without_replacing_password(api, confirm):
     assert "already registered" in response.json()["detail"]
     assert (
         len(provider.users) == 1
-        and provider.users["one@example.com"]["password"] == "password123"
+        and provider.users["one@example.com"]["password"] == "Password123"
     )
 
 
@@ -411,7 +412,7 @@ def test_signup_cannot_verify_with_six_digit_code(api):
         json={
             "email": "one@example.com",
             "full_name": "One",
-            "password": "password123",
+            "password": "Password123",
         },
     ).json()
     response = client.post(
@@ -435,7 +436,7 @@ def test_email_confirmation_does_not_log_user_in(api):
         json={
             "email": "one@example.com",
             "full_name": "One",
-            "password": "password123",
+            "password": "Password123",
         },
     ).raise_for_status()
     token = provider.verify_code("one@example.com", "123456", "signup")["access_token"]
@@ -461,7 +462,7 @@ def test_resend_confirmation_keeps_link_flow(api):
         json={
             "email": "one@example.com",
             "full_name": "One",
-            "password": "password123",
+            "password": "Password123",
         },
     ).json()
     payload = {"email": "one@example.com", "challenge_id": body["challenge_id"]}
@@ -525,7 +526,7 @@ def test_signup_provider_detects_sanitized_duplicate_and_sets_callback(monkeypat
     monkeypatch.setenv("AUTH_EMAIL_REDIRECT_URL", "http://127.0.0.1:5173/auth/confirm")
     with patch.object(provider, "request", return_value={"identities": []}) as request:
         with pytest.raises(AuthProviderError) as error:
-            provider.signup("one@example.com", "password123", "One")
+            provider.signup("one@example.com", "Password123", "One")
         assert error.value.status == 409
         assert (
             "redirect_to=http%3A%2F%2F127.0.0.1%3A5173%2Fauth%2Fconfirm"
@@ -578,21 +579,21 @@ def test_revocation_blocks_access_and_refresh(api, action):
     client, provider, engine = api
     body, headers = register(api)
     pending = client.post(
-        "/auth/login", json={"email": body["user"]["email"], "password": "password123"}
+        "/auth/login", json={"email": body["user"]["email"], "password": "Password123"}
     ).json()
     if action == "password":
         assert (
             client.put(
                 "/me/password",
                 headers=headers,
-                json={"old_password": "incorrect", "new_password": "newpassword"},
+                json={"old_password": "incorrect", "new_password": "Newpassword123"},
             ).status_code
             == 401
         )
         response = client.put(
             "/me/password",
             headers=headers,
-            json={"old_password": "password123", "new_password": "newpassword"},
+            json={"old_password": "Password123", "new_password": "Newpassword123"},
         )
     else:
         provider.fail = True  # Local revocation must work even during provider outage.
@@ -623,7 +624,9 @@ def test_recovery_session_cannot_read_data_and_resets_password(api):
     body, normal = register(api)
     assert (
         client.post(
-            "/auth/reset-password", headers=normal, json={"new_password": "newpassword"}
+            "/auth/reset-password",
+            headers=normal,
+            json={"new_password": "Newpassword123"},
         ).status_code
         == 403
     )
@@ -671,7 +674,7 @@ def test_recovery_session_cannot_read_data_and_resets_password(api):
         client.post(
             "/auth/reset-password",
             headers=headers,
-            json={"new_password": "newpassword"},
+            json={"new_password": "Newpassword123"},
         ).status_code
         == 200
     )
@@ -682,9 +685,7 @@ def test_forgot_password_does_not_disclose_unknown_email_or_send_email(api):
     client, provider, _engine = api
     body, _headers = register(api)
     provider.sent.clear()
-    known = client.post(
-        "/auth/forgot-password", json={"email": body["user"]["email"]}
-    )
+    known = client.post("/auth/forgot-password", json={"email": body["user"]["email"]})
     unknown = client.post(
         "/auth/forgot-password", json={"email": "not-registered@example.com"}
     )
@@ -807,6 +808,43 @@ def test_signup_field_errors_are_specific_and_do_not_create_accounts(api):
     assert not provider.users
 
 
+@pytest.mark.parametrize(
+    "model,payload",
+    [
+        (
+            accounts.SignupRequest,
+            {
+                "email": "new@example.com",
+                "full_name": "New User",
+                "password": "password123",
+            },
+        ),
+        (accounts.NewPassword, {"new_password": "password123"}),
+        (
+            accounts.SignupRequest,
+            {
+                "email": "new@example.com",
+                "full_name": "New User",
+                "password": "PASSWORD123",
+            },
+        ),
+        (accounts.NewPassword, {"new_password": "PASSWORD123"}),
+        (
+            accounts.SignupRequest,
+            {
+                "email": "new@example.com",
+                "full_name": "New User",
+                "password": "Passwordabc",
+            },
+        ),
+        (accounts.NewPassword, {"new_password": "Passwordabc"}),
+    ],
+)
+def test_signup_and_reset_reject_passwords_missing_character_types(model, payload):
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
 def test_provider_field_errors_reach_the_client(api):
     client, provider, _ = api
     with patch.object(
@@ -817,13 +855,13 @@ def test_provider_field_errors_reach_the_client(api):
             json={
                 "email": "new@example.com",
                 "full_name": "Ád",
-                "password": "password123",
+                "password": "Password123",
             },
         )
     assert response.status_code == 422
     assert response.json()["code"] == "weak_password"
     assert "password" in response.json()["field_errors"]
-    assert "password123" not in response.text
+    assert "Password123" not in response.text
     assert not provider.users
 
 
@@ -922,7 +960,7 @@ def test_password_check_discards_native_session():
         "request",
         side_effect=[{"access_token": "temporary", "user": {"id": "one"}}, {}],
     ) as request:
-        assert provider.check_password("one@example.com", "password123") == {
+        assert provider.check_password("one@example.com", "Password123") == {
             "id": "one"
         }
         assert request.call_args_list[1].args == ("POST", "logout?scope=local")
@@ -976,4 +1014,4 @@ def test_confirmations_disabled_fails_closed():
         provider, "request", side_effect=[{"access_token": "temporary"}, {}]
     ):
         with pytest.raises(AuthProviderError):
-            provider.signup("one@example.com", "password123", "One")
+            provider.signup("one@example.com", "Password123", "One")
