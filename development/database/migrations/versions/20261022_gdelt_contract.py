@@ -14,7 +14,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = 'gdelt_contract_v1'
-down_revision = '0006'
+down_revision = '0007'
 branch_labels = None
 depends_on = None
 
