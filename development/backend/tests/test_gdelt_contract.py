@@ -323,3 +323,13 @@ def test_every_theme_empty_fails_instead_of_a_quiet_success(engine):
     with engine.connect() as conn:
         latest = latest_successful_run(conn, "gdelt_theme_volume")
     assert latest.batch_id == good.results["gdelt_theme_volume"].batch_id
+
+
+@pytest.mark.db
+def test_legacy_0005_tables_are_dropped(engine):
+    """PR 3 contract step: only the contract tables hold GDELT data."""
+    with engine.connect() as conn:
+        for table in ("gdelt_theme_days", "gdelt_articles", "gdelt_spike_checks"):
+            assert conn.execute(
+                text("SELECT to_regclass(:name)"), {"name": f"perennial.{table}"}
+            ).scalar_one() is None

@@ -3,17 +3,19 @@ import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
-
-from src.db import models
 from src.ingestion import collectors
 from src.services.gdelt import client as gdelt_client
 from src.services.gdelt.client import (
-    Article, DayVolume, DocApiClient, GdeltError, Pacer,
-    parse_articles, parse_tone, parse_volume,
+    Article,
+    DayVolume,
+    DocApiClient,
+    GdeltError,
+    Pacer,
+    parse_articles,
+    parse_tone,
+    parse_volume,
 )
 from src.services.gdelt.job import run_gdelt
-from src.services.gdelt.spikes import check_spike
 from src.services.gdelt.themes import ThemeMap, load_theme_map
 
 DAY = date(2026, 10, 13)
@@ -95,20 +97,6 @@ def _baseline(value, days=28, end=DAY):
     return {end - timedelta(days=n): value for n in range(1, days + 1)}
 
 
-def test_spike_needs_ratio_and_minimum_count():
-    hit = check_spike({**_baseline(30), DAY: 60}, DAY)
-    assert (hit.is_spike, hit.ratio, hit.baseline_median) == (True, 2.0, 30.0)
-    assert check_spike({**_baseline(30), DAY: 59}, DAY).is_spike is False
-    assert check_spike({**_baseline(5), DAY: 15}, DAY).is_spike is False  # 3x but under 20 articles
-
-
-def test_spike_needs_enough_baseline_and_handles_zero_median():
-    assert check_spike({**_baseline(30, days=10), DAY: 500}, DAY) is None
-    zero = check_spike({**_baseline(0), DAY: 25}, DAY)
-    assert (zero.is_spike, zero.baseline_median, zero.ratio) == (True, 0.0, None)
-    assert check_spike(_baseline(30), DAY) is None  # no data for the day itself
-
-
 def test_theme_map_matches_subdomains_and_rejects_bad_codes(tmp_path):
     shipped = load_theme_map()
     assert "ECON_OILPRICE" in shipped.themes
@@ -162,6 +150,3 @@ def test_daily_run_goes_through_the_contract_and_leaves_the_0005_tables(engine):
     fake.failing = set()
     summary = run_gdelt(engine, client=fake, theme_map=theme_map, now=now)
     assert summary.failed == {} and summary.events == ["ECON_OILPRICE"]
-    with engine.connect() as conn:
-        for table in (models.gdelt_theme_days, models.gdelt_articles, models.gdelt_spike_checks):
-            assert conn.execute(select(table)).all() == []

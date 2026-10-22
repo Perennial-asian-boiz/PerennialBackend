@@ -18,8 +18,6 @@ IMMUTABLE = (
     "publication_market_caps",
 )
 MUTABLE = ("ingestion_runs", "current_publication")
-IMMUTABLE += ("gdelt_articles",)
-MUTABLE += ("gdelt_theme_days", "gdelt_spike_checks")
 TABLES = (*IMMUTABLE, *MUTABLE, "securities")
 
 
