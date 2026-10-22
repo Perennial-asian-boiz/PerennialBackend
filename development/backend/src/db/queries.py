@@ -13,6 +13,7 @@ from sqlalchemy.engine import Connection, Row
 from src.db.models import (
     SOURCE_TABLES,
     SOURCES,
+    SUBJECTLESS_SOURCES,
     ingestion_runs,
     securities,
     source_batches,
@@ -75,17 +76,28 @@ def batch_rows(
     if offset < 0 or (limit is not None and limit < 0):
         raise ValueError("pagination must be nonnegative")
     table = SOURCE_TABLES[source]
-    order = table.c.row_number if "row_number" in table.c else securities.c.symbol
-    query = (
-        select(securities.c.symbol, table)
-        .join(securities, securities.c.id == table.c.security_id)
-        .where(table.c.batch_id == batch_id)
-        .order_by(order)
-        .offset(offset)
-    )
+    if source in SUBJECTLESS_SOURCES:
+        # Not about one security: no symbol to join or filter on.
+        if symbol is not None:
+            raise ValueError("source has no security symbol")
+        query = (
+            select(table)
+            .where(table.c.batch_id == batch_id)
+            .order_by(table.c.row_number)
+            .offset(offset)
+        )
+    else:
+        order = table.c.row_number if "row_number" in table.c else securities.c.symbol
+        query = (
+            select(securities.c.symbol, table)
+            .join(securities, securities.c.id == table.c.security_id)
+            .where(table.c.batch_id == batch_id)
+            .order_by(order)
+            .offset(offset)
+        )
+        if symbol is not None:
+            query = query.where(securities.c.symbol == symbol.strip().upper())
     if limit is not None:
         query = query.limit(limit)
-    if symbol is not None:
-        query = query.where(securities.c.symbol == symbol.strip().upper())
     result = conn.execute(query)
     return [dict(row._mapping) for row in result]

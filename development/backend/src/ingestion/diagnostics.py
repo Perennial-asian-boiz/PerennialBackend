@@ -68,6 +68,7 @@ ERROR_SUMMARIES = {
 UNIT_KINDS = frozenset(
     {
         "ARK funds",
+        "GDELT themes",
         "Congress requests",
         "insider tickers",
         "short-interest tickers",
@@ -117,7 +118,8 @@ _REQUEST_ERRORS = frozenset(
 )
 _HTTP_CODE = re.compile(r"^http_[1-5][0-9]{2}$")
 _UNIT = re.compile(
-    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|trades_congress\.json|ark_holdings\.json)$"
+    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|trades_congress\.json|ark_holdings\.json"
+    r"|[A-Z][A-Z0-9_]{1,63})$"  # GDELT theme codes
 )
 MAX_COUNT = 10**9
 

@@ -95,3 +95,21 @@ def test_subjectless_batch_is_written_without_touching_securities(engine, monkey
             assert (again_id, again_reused) == (batch_id, True)
         finally:
             trans.rollback()
+
+
+def test_every_source_has_an_explicit_unique_lock_key():
+    """MC-5: keys are pinned per source, not derived from list positions."""
+    from src.pipeline.lifecycle import SOURCE_LOCK_KEYS
+
+    assert set(SOURCE_LOCK_KEYS) == set(models.SOURCES) | {"pipeline"}
+    assert len(set(SOURCE_LOCK_KEYS.values())) == len(SOURCE_LOCK_KEYS)
+    assert {s: SOURCE_LOCK_KEYS[s] for s in WATCHLIST} == {
+        "congress_trades": 170010,
+        "ark_holdings": 170011,
+        "insider_trades": 170012,
+        "short_interest": 170013,
+    }
+    # The publication lock (publication.PUBLICATION_LOCK) must never collide.
+    from src.pipeline.publication import PUBLICATION_LOCK
+
+    assert PUBLICATION_LOCK not in SOURCE_LOCK_KEYS.values()
