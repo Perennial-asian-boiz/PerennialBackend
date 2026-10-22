@@ -505,3 +505,69 @@ def test_cohort_member_past_its_limit_aborts(engine, fixture_path):
         run(engine, feed)
     assert caught.value.source == "short_interest"
     assert current(engine)["id"] == baseline
+
+
+# ── Gate M2 test 7: market-cap fallback (Q3) ──
+
+
+def failing_market_caps(symbols):
+    raise PublicationError("market-cap collection failed")
+
+
+@pytest.mark.db
+def test_market_cap_outage_falls_back_to_stored_observations(engine, fixture_path):
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    second = run(engine, feed, market_cap_collector=failing_market_caps)
+
+    checks = degraded(engine, second)["checks"]
+    assert checks["reused"] == {} and checks["all_sources_reused"] is False
+    assert checks["market_caps"]["fallback"] is True
+    assert checks["market_caps"]["unavailable"] == 0
+    assert checks["market_caps"]["oldest_retrieved_at"] is not None
+    published = {r["ticker"]: r["market_cap"] for b in ("popular_stable", "affordable_growing")
+              for r in current(engine)["output"][b]}
+    assert published and all(v == 20000000000 for v in published.values())
+    assert current(engine)["id"] == second != baseline
+    assert replay(engine, second) == current(engine)["output"]
+
+
+@pytest.mark.db
+def test_market_cap_fallback_ignores_observations_past_three_days(engine, fixture_path):
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    with engine.begin() as conn:
+        symbol_ids = conn.execute(
+            select(models.publication_market_caps.c.security_id).where(
+                models.publication_market_caps.c.publication_id == baseline
+            )
+        ).scalars().all()
+        conn.execute(
+            update(models.market_cap_observations)
+            .where(models.market_cap_observations.c.security_id == symbol_ids[0])
+            .values(retrieved_at=datetime.now(timezone.utc) - timedelta(days=3, minutes=1))
+        )
+    second = run(engine, feed, market_cap_collector=failing_market_caps)
+    assert degraded(engine, second)["checks"]["market_caps"]["unavailable"] == 1
+
+    with engine.begin() as conn:
+        conn.execute(
+            update(models.market_cap_observations).values(
+                retrieved_at=datetime.now(timezone.utc) - timedelta(days=4)
+            )
+        )
+    with pytest.raises(PublicationError, match="all market-cap values are unavailable"):
+        run(engine, feed, market_cap_collector=failing_market_caps)
+    assert current(engine)["id"] == second
+
+
+@pytest.mark.db
+def test_market_cap_collector_bug_is_not_swallowed_by_the_fallback(engine, fixture_path):
+    feed = Feed(fixture_path)
+    run(engine, feed)
+
+    def broken(symbols):
+        raise KeyError("synthetic bug")
+
+    with pytest.raises(KeyError):
+        run(engine, feed, market_cap_collector=broken)

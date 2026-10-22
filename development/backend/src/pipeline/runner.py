@@ -4,12 +4,13 @@ import inspect
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from typing import Any, Callable, Mapping, Sequence
 
 import requests
+from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 
 from src.db import models as m
@@ -30,7 +31,12 @@ from src.pipeline.publication import (
     publish,
 )
 from src.pipeline.ranking import candidate_symbols
-from src.settings import QualityThreshold, Settings, _source_policy_defaults
+from src.settings import (
+    MARKET_CAP_MAX_REUSE_AGE,
+    QualityThreshold,
+    Settings,
+    _source_policy_defaults,
+)
 
 logger = logging.getLogger(__name__)
 UPSTREAM = ("congress_trades", "ark_holdings")
@@ -316,6 +322,65 @@ def collect_market_caps(
             session.close()
 
 
+def market_caps_or_fallback(
+    engine: Engine,
+    symbols: Sequence[str],
+    collector: Callable[[Sequence[str]], Mapping[str, dict[str, Any]]],
+    max_reuse_age: timedelta,
+) -> tuple[Mapping[str, dict[str, Any]], bool]:
+    """Collect market caps; if collection fails, reuse stored ones (M2 Q3).
+
+    Each symbol falls back to its latest stored observation retrieved within
+    max_reuse_age. A symbol without one gets value None (attempted now, nothing
+    usable), which ranking already reports as market_cap_unavailable.
+    """
+    try:
+        return collector(symbols), False
+    except PublicationError:
+        logger.warning("market-cap collection failed; using stored observations")
+    now = datetime.now(timezone.utc)
+    latest = (
+        select(
+            m.securities.c.symbol,
+            m.market_cap_observations.c.value,
+            m.market_cap_observations.c.observed_at,
+            m.market_cap_observations.c.retrieved_at,
+            m.market_cap_observations.c.sector,
+            m.market_cap_observations.c.industry,
+        )
+        .join(
+            m.securities,
+            m.securities.c.id == m.market_cap_observations.c.security_id,
+        )
+        .where(
+            m.securities.c.symbol.in_(symbols),
+            m.market_cap_observations.c.retrieved_at >= now - max_reuse_age,
+            m.market_cap_observations.c.value.is_not(None),
+        )
+        .order_by(
+            m.securities.c.symbol,
+            m.market_cap_observations.c.retrieved_at.desc(),
+            m.market_cap_observations.c.id.desc(),
+        )
+        .distinct(m.securities.c.symbol)
+    )
+    with engine.connect() as conn:
+        stored = {row.symbol: row for row in conn.execute(latest)}
+    observations: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        row = stored.get(symbol)
+        observations[symbol] = {
+            "value": row.value if row else None,
+            "currency": "USD",
+            "provider": "fmp",
+            "observed_at": row.observed_at if row else None,
+            "retrieved_at": row.retrieved_at if row else now,
+            "sector": row.sector if row else None,
+            "industry": row.industry if row else None,
+        }
+    return observations, True
+
+
 def run_pipeline(
     engine: Engine,
     *,
@@ -377,7 +442,14 @@ def _run_pipeline(
     chosen = select_sources(prior, attempt)
     with engine.connect() as conn:
         rows = {s: batch_rows(conn, s, b) for s, b in chosen.batches.items()}
-    observations = market_cap_collector(candidate_symbols(rows))
+    cap_limit = (
+        settings.market_cap_max_reuse_age
+        if settings is not None
+        else MARKET_CAP_MAX_REUSE_AGE
+    )
+    observations, cap_fallback = market_caps_or_fallback(
+        engine, candidate_symbols(rows), market_cap_collector, cap_limit
+    )
     publication_id = publish(
         engine,
         chosen.runs,
@@ -386,6 +458,7 @@ def _run_pipeline(
         quality_thresholds=quality_thresholds,
         reuse=chosen.reuse,
         reuse_limits=reuse_limits,
+        market_cap_fallback=cap_limit if cap_fallback else None,
     )
     logger.info(
         "publication succeeded publication_id=%s reused=%s",

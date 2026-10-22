@@ -405,7 +405,10 @@ def _selected(
 
 
 def _caps(
-    observations: Mapping[str, dict[str, Any]], symbols: Sequence[str], now: datetime
+    observations: Mapping[str, dict[str, Any]],
+    symbols: Sequence[str],
+    now: datetime,
+    retrieval_limit: timedelta = timedelta(days=1),
 ) -> dict[str, dict[str, Any]]:
     if set(observations) != set(symbols):
         raise PublicationError("market-cap coverage does not match candidate universe")
@@ -416,7 +419,7 @@ def _caps(
             raise PublicationError("market-cap observation is malformed")
         if obs.get("currency") != "USD" or obs.get("provider") != "fmp":
             raise PublicationError("unsupported market-cap currency or provider")
-        if not _time_ok(obs.get("retrieved_at"), now, timedelta(days=1)):
+        if not _time_ok(obs.get("retrieved_at"), now, retrieval_limit):
             raise PublicationError("market-cap retrieval is stale or future-dated")
         observed = obs.get("observed_at")
         if observed is not None and not _time_ok(observed, now, timedelta(days=3)):
@@ -504,6 +507,20 @@ def _validate_reuse(
     }
 
 
+def _with_market_cap_fallback(
+    degraded: dict[str, Any] | None, cap_data: Mapping[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Add the market-cap fallback (M2 Q3) to the degraded event body."""
+    body = degraded or {"reused": {}, "cohort": [], "all_sources_reused": False}
+    retrieved = [o["retrieved_at"] for o in cap_data.values() if o["value"] is not None]
+    body["market_caps"] = {
+        "fallback": True,
+        "oldest_retrieved_at": min(retrieved).isoformat() if retrieved else None,
+        "unavailable": sum(o["value"] is None for o in cap_data.values()),
+    }
+    return body
+
+
 def publish(
     engine: Engine,
     run_ids: Mapping[str, int],
@@ -516,6 +533,7 @@ def publish(
     override_checks: Sequence[str] | None = None,
     reuse: Mapping[str, Reuse] | None = None,
     reuse_limits: Mapping[str, timedelta] | None = None,
+    market_cap_fallback: timedelta | None = None,
 ) -> int:
     """Publish and promote; an override skips only the named failed checks.
 
@@ -526,6 +544,9 @@ def publish(
     reuse names sources whose run_ids are the current publication's pins
     (degraded publishing, roadmap M2). Each is re-validated under the lock
     against reuse_limits and recorded in one `degraded` event.
+
+    market_cap_fallback, when set, means the observations are earlier stored
+    ones (M2 Q3): retrieval may be that old, and the publication is degraded.
     """
     reuse = dict(reuse or {})
     if reuse_limits is None:
@@ -612,7 +633,11 @@ def publish(
                 ):
                     raise PublicationError("publication would regress observation date")
         symbols = candidate_symbols(rows)
-        cap_data = _caps(observations, symbols, now)
+        cap_data = _caps(
+            observations, symbols, now, market_cap_fallback or timedelta(days=1)
+        )
+        if market_cap_fallback is not None:
+            degraded = _with_market_cap_fallback(degraded, cap_data)
         config = {
             **DEFAULT_CONFIG,
             "source_as_of": as_of,
