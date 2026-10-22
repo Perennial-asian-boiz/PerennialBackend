@@ -668,3 +668,16 @@ def test_real_collectors_ark_outage_publishes_degraded(engine, provider, poisone
     assert entry["failure_code"] == "collection_failed" and entry["failed_run_id"]
     assert poisoned_files == []
     assert replay(engine, second) == current(engine)["output"]
+
+
+@pytest.mark.db
+def test_empty_batch_refused_by_row_count_does_not_fall_back(engine, fixture_path):
+    """A day with no qualifying insider buys is not served as yesterday's buys."""
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    feed.records["insider_trades"] = []
+    with pytest.raises(PublicationError) as caught:
+        run(engine, feed)
+    assert caught.value.code == "publication_quality_failed"
+    assert caught.value.checks == ("insider_trades:row_count",)
+    assert current(engine)["id"] == baseline

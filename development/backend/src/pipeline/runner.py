@@ -329,12 +329,18 @@ def publish_or_reuse_refused(
     chosen: Selection,
     attempts: Mapping[str, Attempt],
     publish_selection: Callable[[Selection], int],
+    record_count: Callable[[int], int],
 ) -> tuple[int, Selection]:
     """Publish; a fresh batch refused by quality or the date guard falls back (M2 Q7).
 
     The refused batch is never published and no guard is relaxed: its source is
     re-selected as if today's collection had failed with the refusal code, so
     the same reuse limits and cohort rules apply, without new provider calls.
+
+    Exception: a row_count refusal of an *empty* batch never falls back. A day
+    with no qualifying rows (for example no insider buys) may be the true
+    result, and serving old rows as merely degraded would hide that; the
+    original refusal stands for an operator to override or not.
     """
     refused: dict[str, str] = {}
     while True:
@@ -344,6 +350,15 @@ def publish_or_reuse_refused(
             sources = {check.split(":", 1)[0] for check in exc.checks}
             code = exc.code
             error: PublicationError = exc
+            emptied = {
+                c.split(":", 1)[0]
+                for c in exc.checks
+                if c.endswith(":row_count")
+                and (batch := chosen.batches.get(c.split(":", 1)[0])) is not None
+                and record_count(batch) == 0
+            }
+            if emptied:
+                raise
         except PublicationRegressionError as exc:
             sources, code, error = {exc.source}, exc.code, exc
         new = sources - set(chosen.reuse) - set(refused)
@@ -521,8 +536,18 @@ def _run_pipeline(
             market_cap_fallback=cap_limit if cap_fallback else None,
         )
 
+    def record_count(batch_id: int) -> int:
+        with engine.connect() as conn:
+            return int(
+                conn.execute(
+                    select(m.source_batches.c.record_count).where(
+                        m.source_batches.c.id == batch_id
+                    )
+                ).scalar_one()
+            )
+
     publication_id, chosen = publish_or_reuse_refused(
-        prior, chosen, attempts, publish_selection
+        prior, chosen, attempts, publish_selection, record_count
     )
     logger.info(
         "publication succeeded publication_id=%s reused=%s",
