@@ -83,14 +83,15 @@ def test_subjectless_batch_is_written_without_touching_securities(engine, monkey
             ))
             table.create(conn)
             before = conn.execute(select(models.securities.c.id)).all()
-            batch_id, reused = importer._write_batch(conn, batch, None)
+            # [:2]: M4 (feat/m4-identity) appends a registered-alias count.
+            batch_id, reused = importer._write_batch(conn, batch, None)[:2]
             rows = conn.execute(
                 select(table.c.row_number, table.c.label).order_by(table.c.row_number)
             ).all()
             assert not reused
             assert [tuple(r) for r in rows] == [(1, "A"), (2, "B")]
             assert conn.execute(select(models.securities.c.id)).all() == before
-            again_id, again_reused = importer._write_batch(conn, batch, None)
+            again_id, again_reused = importer._write_batch(conn, batch, None)[:2]
             assert (again_id, again_reused) == (batch_id, True)
         finally:
             trans.rollback()
