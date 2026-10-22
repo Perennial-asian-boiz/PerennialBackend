@@ -35,7 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     imp = sub.add_parser("import-file", help="import an existing fetcher JSON file")
-    imp.add_argument("source", choices=SOURCES)
+    imp.add_argument("source", choices=WATCHLIST_SOURCES)
     imp.add_argument("path")
     imp.add_argument(
         "--fixture",
@@ -52,7 +52,7 @@ def _parser() -> argparse.ArgumentParser:
     fetch = sub.add_parser(
         "fetch", help="collect live through the explicit-outcome wrapper and import"
     )
-    fetch.add_argument("source", choices=SOURCES)
+    fetch.add_argument("source", choices=WATCHLIST_SOURCES)
 
     latest = sub.add_parser(
         "latest", help="show the latest successful batch for a source"

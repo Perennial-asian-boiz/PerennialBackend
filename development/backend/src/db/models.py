@@ -26,6 +26,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     Numeric,
+    SmallInteger,
     String,
     Table,
     Text,
@@ -44,12 +45,16 @@ WATCHLIST_SOURCES = (
     "short_interest",
 )
 # Sources whose rows are not about one security: no ticker, no securities FK.
-SUBJECTLESS_SOURCES: tuple[str, ...] = ()
+SUBJECTLESS_SOURCES: tuple[str, ...] = (
+    "gdelt_theme_volume",
+    "gdelt_theme_articles",
+    "gdelt_spike_results",  # derived from gdelt_theme_volume (collection_mode derived)
+)
 # The closed source vocabulary (CHECKs, CLI, locks). Append only: lifecycle lock
 # keys are derived from each source's position.
 SOURCES = WATCHLIST_SOURCES + SUBJECTLESS_SOURCES
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
-COLLECTION_MODES = ("fixture", "file", "live")
+COLLECTION_MODES = ("fixture", "file", "live", "derived")
 PUBLICATION_EVENT_KINDS = ("quality_passed", "quality_override", "degraded", "rollback")
 
 ERROR_SUMMARY_MAX = 1000
@@ -283,11 +288,79 @@ short_interest = Table(
 )
 Index("ix_short_interest_security_id", short_interest.c.security_id)
 
+_THEME_FORMAT = "theme ~ '^[A-Z0-9_]{1,64}$'"
+
+# GDELT through the ingestion contract: immutable batches with run lineage.
+gdelt_theme_volume = Table(
+    "gdelt_theme_volume",
+    metadata,
+    _id(),
+    _batch_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("article_count", Integer, nullable=False),
+    Column("total_articles", BigInteger),
+    Column("avg_tone", Numeric(8, 4)),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "theme", "day"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(_THEME_FORMAT, name="theme_format"),
+    CheckConstraint("article_count >= 0", name="article_count"),
+    CheckConstraint(
+        "total_articles IS NULL OR total_articles >= 0", name="total_articles"
+    ),
+)
+
+gdelt_theme_articles = Table(
+    "gdelt_theme_articles",
+    metadata,
+    _id(),
+    _batch_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("url", String(2048), nullable=False),
+    Column("title", String(500)),
+    Column("domain", String(255)),
+    Column("seen_at", DateTime(timezone=True)),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "theme", "url"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(_THEME_FORMAT, name="theme_format"),
+    CheckConstraint("url ~ '^https?://'", name="url_scheme"),
+)
+
+gdelt_spike_results = Table(
+    "gdelt_spike_results",
+    metadata,
+    _id(),
+    _batch_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("article_count", Integer, nullable=False),
+    Column("baseline_median", Numeric(12, 2)),
+    Column("observed_baseline_days", SmallInteger, nullable=False),
+    Column("ratio", Numeric(10, 2)),
+    Column("is_spike", Boolean),
+    Column("rule_version", String(16), nullable=False),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "theme", "day"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(_THEME_FORMAT, name="theme_format"),
+    CheckConstraint("article_count >= 0", name="article_count"),
+    CheckConstraint("observed_baseline_days >= 0", name="observed_baseline_days"),
+)
+
 SOURCE_TABLES = {
     "congress_trades": congress_trades,
     "ark_holdings": ark_holdings,
     "insider_trades": insider_trades,
     "short_interest": short_interest,
+    "gdelt_theme_volume": gdelt_theme_volume,
+    "gdelt_theme_articles": gdelt_theme_articles,
+    "gdelt_spike_results": gdelt_spike_results,
 }
 
 # These tables make collection lineage and publication explicit. Historical
