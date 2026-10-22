@@ -7,6 +7,7 @@ Context follows asyncio tasks; use copy_context() when starting worker threads.
 
 import json
 import logging
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -16,6 +17,9 @@ from pathlib import Path
 from typing import Any
 
 from src.ingestion.redaction import describe_exception, redact
+
+# Any scheme://... token; paths can carry secrets as well as queries.
+_URL = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+")
 
 _context: ContextVar[dict[str, str | int | None]] = ContextVar(
     "log_context", default={}
@@ -34,6 +38,11 @@ def log_context(**fields: str | int | None) -> Iterator[None]:
         _context.reset(token)
 
 
+def _safe(text: str) -> str:
+    """Drop whole URLs, then mask secret-looking pairs; logs never carry URLs."""
+    return redact(_URL.sub("<url>", text))
+
+
 class JsonFormatter(logging.Formatter):
     """Emit one JSON line; exclude arbitrary extras, tracebacks and request data."""
 
@@ -45,9 +54,9 @@ class JsonFormatter(logging.Formatter):
             ).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": redact(record.getMessage()),
+            "message": _safe(record.getMessage()),
             **{
-                key: redact(value) if isinstance(value, str) else value
+                key: _safe(value) if isinstance(value, str) else value
                 for key in ("run_id", "source", "publication_id")
                 for value in (context.get(key),)
             },

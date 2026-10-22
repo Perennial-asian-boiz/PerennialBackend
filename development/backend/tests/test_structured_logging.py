@@ -166,3 +166,24 @@ def test_cli_diagnostic_carries_source_and_clears_context(monkeypatch, capsys):
     assert row["source"] == "ark_holdings"
     assert cli.main(["current"]) == 2
     assert json.loads(capsys.readouterr().err)["source"] is None
+
+
+def test_formatter_strips_whole_urls_from_message_args_and_context(capture):
+    target, stream = capture
+    url = "https://provider.invalid/v1/SYNTHETIC_PATH_SECRET/rows?apikey=SYNTHETIC_QUERY_SECRET"
+    with log.log_context(source=f"fetch {url}", run_id=7):
+        target.warning(f"request {url}")
+        target.warning("request %s failed", url)
+    rows = [json.loads(line) for line in stream.getvalue().splitlines()]
+    assert [row["message"] for row in rows] == [
+        "request <url>",
+        "request <url> failed",
+    ]
+    assert all(row["source"] == "fetch <url>" and row["run_id"] == 7 for row in rows)
+    text = stream.getvalue()
+    for leaked in (
+        "SYNTHETIC_PATH_SECRET",
+        "SYNTHETIC_QUERY_SECRET",
+        "provider.invalid",
+    ):
+        assert leaked not in text
