@@ -83,8 +83,11 @@ def _clear_libpq_environment():
     return clean_environment()
 
 
-def restore_into_disposable(admin, source, archive, expected, env, report):
-    """Restore into a new random database, compare, and always drop only that database."""
+def restore_into_disposable(admin, source, expected, report, restore):
+    """Restore into a new random database, compare, and always drop only that database.
+
+    restore(target) loads the new database given its connection parameters.
+    """
     target_name = "perennial_test_restore_" + secrets.token_hex(12)
     target = dict(source, dbname=target_name)
     report.update(target_database=target_name, verified=False, target_dropped=False)
@@ -92,8 +95,7 @@ def restore_into_disposable(admin, source, archive, expected, env, report):
     try:
         admin.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(target_name)))
         created = True
-        pg_tool("pg_restore", target, ["--exit-on-error", "--single-transaction", "--no-owner",
-                "--no-acl", str(archive)], env)
+        restore(target)
         with psycopg.connect(**target) as restored:
             restored.execute("SET TIME ZONE 'UTC'")
             actual = table_manifest(restored)
@@ -122,20 +124,64 @@ def run_drill(raw, output):
                 pg_tool("pg_dump", source, ["--format=custom", "--no-owner", "--no-acl",
                         "--snapshot", snapshot_id, "--file", str(archive)], env)
                 expected = table_manifest(snapshot)
-            restore_into_disposable(admin, source, archive, expected, env, report)
+            restore_into_disposable(admin, source, expected, report, lambda target: pg_tool(
+                "pg_restore", target, ["--exit-on-error", "--single-transaction", "--no-owner",
+                                       "--no-acl", str(archive)], env))
         finally:
             (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
+
+
+RESTORE_ARGS = ["--exit-on-error", "--single-transaction", "--no-owner", "--no-acl"]
+
+
+def decrypt_into(target, encrypted, key, env):
+    """openssl cms -decrypt stdout -> pg_restore stdin; plaintext never touches disk.
+
+    openssl buffers the whole archive and checks the GCM tag before writing
+    any output, so an archive that fails authentication passes no bytes on.
+    Only the decryption child sees BACKUP_KEY_PASSPHRASE.
+    """
+    args = ["openssl", "cms", "-decrypt", "-binary", "-inform", "DER", "-in", str(encrypted),
+            "-inkey", str(key)]
+    if env.get("BACKUP_KEY_PASSPHRASE") is not None:
+        args += ["-passin", "env:BACKUP_KEY_PASSPHRASE"]
+    restore_env = {k: v for k, v in env.items() if k != "BACKUP_KEY_PASSPHRASE"}
+    restore_env["PGPASSWORD"] = target["password"]
+    public = {k: v for k, v in target.items() if k != "password"}
+    children = []
+    try:
+        decrypt = subprocess.Popen(args, env=env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL)
+        children.append(decrypt)
+        restore = subprocess.Popen(
+            ["pg_restore", "--no-password", "--dbname", make_conninfo(**public), *RESTORE_ARGS],
+            env=restore_env, stdin=decrypt.stdout, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+        children.append(restore)
+        decrypt.stdout.close()  # pg_restore holds the read end now
+        restored, decrypted = restore.wait(), decrypt.wait()
+    finally:
+        for proc in children:  # interruption: never leave a child holding plaintext
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+    if decrypted:
+        raise RuntimeError("Archive did not decrypt and authenticate; nothing was restored")
+    if restored:
+        raise RuntimeError(f"pg_restore failed (exit {restored}); raw server output suppressed")
 
 
 def run_backup_drill(raw, store, key, output, manifest_name=None, incident_start=None):
     """Timed restore of a stored backup (backup.py) against the D6 RTO/RPO targets.
 
     The clock starts at incident_start (default: now) and covers retrieval,
-    checksum, decryption, restore and verification. Decrypted bytes stay in the
-    new private output directory; a failed decryption is never restored.
+    checksum, decryption, restore and verification. Only report.json is left
+    in the new private output directory: the decrypted dump is streamed into
+    pg_restore, and the copied encrypted archive is removed on every path.
     """
-    from backup import MANIFEST_SUFFIX, manifests, sha256_file
+    from backup import ARCHIVE_SUFFIX, BACKUP_NAME, MANIFEST_SUFFIX, manifests, require_openssl3
+    from backup import sha256_file
 
     incident_start = incident_start or datetime.now(timezone.utc)
     clock = time.monotonic()
@@ -151,33 +197,29 @@ def run_backup_drill(raw, store, key, output, manifest_name=None, incident_start
     env = _clear_libpq_environment()
     output = Path(output)
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
+    encrypted = output / ("archive" + ARCHIVE_SUFFIX)  # fixed name, never manifest-chosen
     report = {"verified": False, "target_dropped": False, "within_rto": False}
     try:
+        require_openssl3(env)
         found = manifests(store)
         if manifest_name is not None:
-            found = [m for m in found if m["name"] + MANIFEST_SUFFIX == manifest_name
-                     or m["name"] == manifest_name]
+            wanted = manifest_name.removesuffix(MANIFEST_SUFFIX)
+            if not BACKUP_NAME.fullmatch(wanted):
+                raise ValueError("Backup name is not a canonical backup.py name")
+            found = [m for m in found if m["name"] == wanted]
         if not found:
             raise RuntimeError("No verified backup manifest in the store")
         manifest = max(found, key=lambda m: m["snapshot_time"])
         report.update(backup=manifest["name"], snapshot_time=manifest["snapshot_time"],
-                      schema_revision=manifest["schema_revision"])
-        encrypted, archive = output / manifest["archive"], output / "database.dump"
+                      schema_revision=manifest.get("schema_revision"))
         store.get(manifest["archive"], encrypted)
         if sha256_file(encrypted) != manifest["archive_sha256"]:
             raise RuntimeError("Stored archive checksum differs from its manifest")
         mark("retrieve")
-        args = ["openssl", "cms", "-decrypt", "-binary", "-inform", "DER", "-in", str(encrypted),
-                "-inkey", str(key), "-out", str(archive)]
-        if os.environ.get("BACKUP_KEY_PASSPHRASE") is not None:
-            args[-2:-2] = ["-passin", "env:BACKUP_KEY_PASSPHRASE"]
-        if subprocess.run(args, env=env, capture_output=True).returncode:
-            archive.unlink(missing_ok=True)
-            raise RuntimeError("Archive did not decrypt and authenticate; nothing was restored")
-        mark("decrypt")
         with psycopg.connect(**source, autocommit=True) as admin:
-            restore_into_disposable(admin, source, archive, manifest["tables"], env, report)
-        mark("restore_and_verify")
+            restore_into_disposable(admin, source, manifest["tables"], report,
+                                    lambda target: decrypt_into(target, encrypted, key, env))
+        mark("decrypt_restore_and_verify")
         rto = (datetime.now(timezone.utc) - incident_start).total_seconds()
         rpo = (incident_start - datetime.fromisoformat(manifest["snapshot_time"])).total_seconds()
         report.update(marks, rto_seconds=round(rto, 3), rto_target_seconds=RTO_SECONDS,
@@ -185,6 +227,7 @@ def run_backup_drill(raw, store, key, output, manifest_name=None, incident_start
                       rpo_seconds=round(rpo, 3), rpo_target_seconds=RPO_SECONDS,
                       within_rpo=rpo <= RPO_SECONDS)
     finally:
+        encrypted.unlink(missing_ok=True)
         report.update(marks)
         (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     return report

@@ -13,10 +13,26 @@ OPS = Path(__file__).resolve().parents[2] / "database" / "ops"
 sys.path.insert(0, str(OPS))
 
 NOW = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+HEX = "0" * 64
 
 
 def _entry(name, age):
     return {"name": name, "snapshot_time": (NOW - age).isoformat()}
+
+
+def _name(taken, suffix="aaaaaa"):
+    return f"perennial-{taken:%Y%m%dT%H%M%SZ}-{suffix}"
+
+
+def _write_set(store, taken, suffix="aaaaaa", **overrides):
+    """A well-formed stored backup set (synthetic archive bytes)."""
+    name = _name(taken, suffix)
+    (store.root / f"{name}.dump.cms").write_bytes(b"synthetic")
+    manifest = {"format": 1, "name": name, "archive": f"{name}.dump.cms",
+                "snapshot_time": taken.isoformat(), "archive_sha256": HEX,
+                "tables": {"ark_holdings": {"rows": 1, "sha256": HEX}}, **overrides}
+    (store.root / f"{name}.manifest.json").write_text(json.dumps(manifest))
+    return name
 
 
 def test_retention_keeps_a_day_of_snapshots_then_one_per_day_for_a_week():
@@ -50,6 +66,120 @@ def test_backup_rejects_unsafe_sources_before_connecting(tmp_path):
     assert LocalStore(tmp_path / "store").names() == []
 
 
+# ── SEC-BACKUP-01: names from manifests and stores never escape the store ──
+
+@pytest.mark.parametrize("name", [
+    "../outside", "/etc/passwd", "a/b", "..", ".", "", ".hidden", "x" * 200, None, "a\x00b",
+])
+def test_store_refuses_names_that_are_not_plain_basenames(tmp_path, name):
+    from backup import LocalStore
+    store = LocalStore(tmp_path / "store")
+    (tmp_path / "src").write_bytes(b"synthetic")
+    for call in (lambda: store.put(name, tmp_path / "src"), lambda: store.delete(name),
+                 lambda: store.get(name, tmp_path / "dest"), lambda: store.open(name)):
+        with pytest.raises(ValueError):
+            call()
+    assert not (tmp_path / "dest").exists()
+
+
+def test_store_ignores_and_never_follows_symlinks(tmp_path):
+    from backup import LocalStore
+    store = LocalStore(tmp_path / "store")
+    victim = tmp_path / "victim.dump.cms"
+    victim.write_bytes(b"sentinel")
+    link = _name(NOW - timedelta(days=30)) + ".dump.cms"
+    (store.root / link).symlink_to(victim)
+    assert store.names() == []
+    for call in (lambda: store.delete(link), lambda: store.open(link),
+                 lambda: store.put(link, victim)):
+        with pytest.raises(ValueError):
+            call()
+    assert victim.read_bytes() == b"sentinel" and (store.root / link).is_symlink()
+
+
+def test_store_tightens_existing_directories_and_refuses_a_symlinked_root(tmp_path):
+    from backup import BackupError, LocalStore
+    loose = tmp_path / "loose"
+    loose.mkdir(mode=0o755)
+    LocalStore(loose)
+    assert loose.stat().st_mode & 0o777 == 0o700
+    (tmp_path / "linked").symlink_to(loose)
+    with pytest.raises(BackupError, match="unsafe_directory"):
+        LocalStore(tmp_path / "linked")
+
+
+@pytest.mark.parametrize("bad", [
+    {"name": "../outside/victim"},
+    {"name": "/tmp/victim"},
+    {"archive": "../outside/victim.dump.cms"},
+    {"name": "perennial-20260101T000000Z-bbbbbb"},  # disagrees with its filename
+    {"snapshot_time": "yesterday"},
+    {"snapshot_time": "2026-10-01T00:00:00"},  # no timezone
+    {"archive_sha256": "../x"},
+    {"tables": {"t": {"rows": "1", "sha256": HEX}}},
+    {"tables": {}},
+    {"format": 2},
+])
+def test_malformed_manifests_are_never_acted_on(tmp_path, bad):
+    from backup import LocalStore, manifests
+    store = LocalStore(tmp_path / "store")
+    name = _write_set(store, NOW - timedelta(days=30), **bad)
+    invalid = []
+    assert manifests(store, invalid) == []
+    assert invalid == [name + ".manifest.json"]
+
+
+@pytest.mark.db
+def test_retention_and_drill_cannot_reach_outside_the_store(engine, loaded, keypair, tmp_path):
+    from backup import LocalStore, run_backup
+    from restore_drill import run_backup_drill
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for f in ("victim.dump.cms", "victim.manifest.json"):
+        (outside / f).write_text("sentinel")
+    store = LocalStore(tmp_path / "store")
+    old = NOW - timedelta(days=30)
+    traversal = _write_set(store, old, "aaaaaa", name="../outside/victim")
+    absolute = _write_set(store, old, "bbbbbb", archive=str(outside / "victim.dump.cms"))
+
+    report = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
+    assert report["status"] == "ok", report
+    assert report["invalid_manifests"] == sorted([absolute + ".manifest.json",
+                                                  traversal + ".manifest.json"])
+    assert sorted(p.name for p in outside.iterdir()) == ["victim.dump.cms",
+                                                         "victim.manifest.json"]
+    assert (store.root / (traversal + ".manifest.json")).exists()  # left for a human
+
+    # The drill only ever selects a validated manifest, so the bad ones are invisible.
+    with pytest.raises(ValueError):
+        run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "pick",
+                         manifest_name="../outside/victim")
+    only_bad = LocalStore(tmp_path / "only-bad")
+    _write_set(only_bad, old, "cccccc", archive="../outside/victim.dump.cms")
+    with pytest.raises(RuntimeError, match="No verified backup manifest"):
+        run_backup_drill(loaded, only_bad, keypair / "key.pem", tmp_path / "bad-drill")
+    assert all(p.read_text() == "sentinel" for p in outside.iterdir())
+    assert sorted(p.name for p in (tmp_path / "bad-drill").iterdir()) == ["report.json"]
+
+
+# ── BK-2: orphan archives are swept; nothing else is ──
+
+@pytest.mark.db
+def test_orphan_archives_are_swept_after_the_grace_period(engine, loaded, keypair, tmp_path):
+    from backup import LocalStore, run_backup
+    store = LocalStore(tmp_path / "store")
+    now = datetime.now(timezone.utc)
+    stale = _name(now - timedelta(hours=2), "dddddd") + ".dump.cms"
+    fresh = _name(now - timedelta(minutes=10), "eeeeee") + ".dump.cms"
+    for f in (stale, fresh, "unrelated.dump.cms", "notes.txt"):
+        (store.root / f).write_bytes(b"synthetic")
+    report = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
+    assert report["status"] == "ok" and report["orphans_swept"] == [stale]
+    assert sorted(store.names()) == sorted([
+        fresh, "notes.txt", "unrelated.dump.cms",
+        report["name"] + ".dump.cms", report["name"] + ".manifest.json"])
+
+
 @pytest.fixture(scope="module")
 def keypair(tmp_path_factory):
     root = tmp_path_factory.mktemp("synthetic-backup-keys")
@@ -58,6 +188,10 @@ def keypair(tmp_path_factory):
             ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
              "-subj", "/CN=synthetic-backup-test", "-keyout", str(root / f"{name}key.pem"),
              "-out", str(root / f"{name}cert.pem")], check=True, capture_output=True)
+    subprocess.run(
+        ["openssl", "pkey", "-in", str(root / "key.pem"), "-aes-256-cbc",
+         "-passout", "pass:synthetic-passphrase", "-out", str(root / "locked-key.pem")],
+        check=True, capture_output=True)
     return root
 
 
@@ -70,12 +204,23 @@ def loaded(engine, fixture_path):
     return engine.url.render_as_string(hide_password=False)
 
 
-def _restore_targets(engine):
+def _exists(engine, database):
     from sqlalchemy import text
     with engine.connect() as conn:
-        return conn.execute(text(
-            "SELECT count(*) FROM pg_database WHERE datname LIKE 'perennial_test_restore_%'"
-        )).scalar_one()
+        return conn.execute(text("SELECT count(*) FROM pg_database WHERE datname = :n"),
+                            {"n": database}).scalar_one() == 1
+
+
+def _target_gone(engine, output):
+    """This drill's own target only: the test server is shared with other runs."""
+    report = json.loads((output / "report.json").read_text())
+    return "target_database" not in report or not _exists(engine, report["target_database"])
+
+
+def _no_plaintext(output):
+    # Only the report survives a drill: no dump, no encrypted copy, no PGDMP bytes.
+    assert sorted(p.name for p in output.iterdir()) == ["report.json"]
+    assert b"PGDMP" not in (output / "report.json").read_bytes()
 
 
 @pytest.mark.db
@@ -101,21 +246,98 @@ def test_backup_is_encrypted_verified_and_restores_within_rto(engine, loaded, ke
     assert drill["verified"] is True and drill["target_dropped"] is True
     assert drill["backup"] == name and drill["tables"] == manifest["tables"]
     assert drill["within_rto"] is True and drill["rto_target_seconds"] == 3600
-    for step in ("retrieve", "decrypt", "restore_and_verify"):
+    for step in ("retrieve", "decrypt_restore_and_verify"):
         assert drill[step + "_seconds"] >= 0
-    assert _restore_targets(engine) == 0
+    _no_plaintext(tmp_path / "drill")
+    assert _target_gone(engine, tmp_path / "drill")
+
+
+# ── SEC-BACKUP-02: no plaintext survives a drill on any path ──
+
+@pytest.mark.db
+def test_no_plaintext_survives_failed_or_interrupted_drills(
+    engine, loaded, keypair, tmp_path, monkeypatch
+):
+    import restore_drill
+    from backup import LocalStore, run_backup
+    store = LocalStore(tmp_path / "store")
+    name = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)["name"]
+
+    # Verification failure after a successful restore.
+    manifest_path = store.root / (name + ".manifest.json")
+    good = manifest_path.read_text()
+    manifest = json.loads(good)
+    manifest["tables"]["ark_holdings"]["rows"] += 1
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(RuntimeError, match="differ"):
+        restore_drill.run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "verify")
+    _no_plaintext(tmp_path / "verify")
+    assert _target_gone(engine, tmp_path / "verify")
+    manifest_path.write_text(good)
+
+    # Interruption while pg_restore is consuming the decrypted stream.
+    real_popen = restore_drill.subprocess.Popen
+    started = []
+
+    def interrupting(args, **kwargs):
+        proc = real_popen(args, **kwargs)
+        started.append(proc)
+        if args[0] == "pg_restore":
+            real_wait = proc.wait
+
+            def wait(*a, **k):  # one Ctrl-C while the restore is running
+                proc.wait = real_wait
+                raise KeyboardInterrupt
+            proc.wait = wait
+        return proc
+
+    monkeypatch.setattr(restore_drill.subprocess, "Popen", interrupting)
+    with pytest.raises(KeyboardInterrupt):
+        restore_drill.run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "interrupt")
+    monkeypatch.setattr(restore_drill.subprocess, "Popen", real_popen)
+    pipeline = [p for p in started if p.args[0] == "pg_restore" or p.args[:2] == ["openssl", "cms"]]
+    assert len(pipeline) == 2 and all(proc.poll() is not None for proc in pipeline)
+    _no_plaintext(tmp_path / "interrupt")
+    assert _target_gone(engine, tmp_path / "interrupt")
+
+
+@pytest.mark.db
+def test_passphrase_reaches_only_the_decryption_child(
+    engine, loaded, keypair, tmp_path, monkeypatch
+):
+    import restore_drill
+    from backup import LocalStore, run_backup
+    store = LocalStore(tmp_path / "store")
+    run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
+    seen = {}
+    real_popen = restore_drill.subprocess.Popen
+
+    def recording(args, **kwargs):
+        seen[args[0]] = (args, kwargs.get("env") or {})
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setenv("BACKUP_KEY_PASSPHRASE", "synthetic-passphrase")
+    monkeypatch.setattr(restore_drill.subprocess, "Popen", recording)
+    drill = restore_drill.run_backup_drill(loaded, store, keypair / "locked-key.pem",
+                                           tmp_path / "drill")
+    assert drill["verified"] is True
+    assert seen["openssl"][1]["BACKUP_KEY_PASSPHRASE"] == "synthetic-passphrase"
+    assert "BACKUP_KEY_PASSPHRASE" not in seen["pg_restore"][1]
+    assert not any("synthetic-passphrase" in a for args, _ in seen.values() for a in args)
+    _no_plaintext(tmp_path / "drill")
 
 
 @pytest.mark.db
 def test_tampered_or_wrongly_keyed_archive_is_never_restored(engine, loaded, keypair, tmp_path):
-    from backup import LocalStore, run_backup
+    from backup import LocalStore, run_backup, sha256_file
     from restore_drill import run_backup_drill
     store = LocalStore(tmp_path / "store")
     name = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)["name"]
 
     with pytest.raises(RuntimeError, match="did not decrypt"):
         run_backup_drill(loaded, store, keypair / "other-key.pem", tmp_path / "wrong-key")
-    assert not (tmp_path / "wrong-key" / "database.dump").exists()
+    _no_plaintext(tmp_path / "wrong-key")
+    assert _target_gone(engine, tmp_path / "wrong-key")
 
     path = store.root / (name + ".dump.cms")
     data = bytearray(path.read_bytes())
@@ -123,17 +345,17 @@ def test_tampered_or_wrongly_keyed_archive_is_never_restored(engine, loaded, key
     path.write_bytes(bytes(data))
     with pytest.raises(RuntimeError, match="checksum"):
         run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "tampered")
+    _no_plaintext(tmp_path / "tampered")
 
     # Even with a manifest rewritten to match, AES-GCM authentication rejects it.
-    from backup import sha256_file
     manifest_path = store.root / (name + ".manifest.json")
     manifest = json.loads(manifest_path.read_text())
     manifest["archive_sha256"] = sha256_file(path)
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(RuntimeError, match="did not decrypt"):
         run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "forged")
-    assert not (tmp_path / "forged" / "database.dump").exists()
-    assert _restore_targets(engine) == 0
+    _no_plaintext(tmp_path / "forged")
+    assert _target_gone(engine, tmp_path / "forged")
 
 
 @pytest.mark.db
@@ -168,18 +390,36 @@ def test_failed_upload_keeps_the_last_verified_backup(engine, loaded, keypair, t
     assert list((tmp_path / "spool").iterdir()) == []
 
 
+# ── BK-3: the stored-object checksum is what decides ──
+
+@pytest.mark.db
+def test_mismatched_storage_receipt_is_not_a_backup(engine, loaded, keypair, tmp_path):
+    from backup import LocalStore, run_backup
+    store = LocalStore(tmp_path / "store")
+    run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
+    before = store.names()
+
+    class CorruptingStore(LocalStore):
+        def put(self, name, path):
+            receipt = super().put(name, path)
+            return dict(receipt, sha256="f" * 64)  # the provider stored other bytes
+
+    report = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool",
+                        CorruptingStore(tmp_path / "store"))
+    assert report["status"] == "failed" and report["error_code"] == "upload_verify_failed"
+    assert store.names() == before  # unverified archive removed, no manifest, old set intact
+
+
 @pytest.mark.db
 def test_backup_applies_retention_to_stale_verified_sets(engine, loaded, keypair, tmp_path):
     from backup import LocalStore, run_backup
     store = LocalStore(tmp_path / "store")
-    for name, age in (("perennial-stale-a", 9), ("perennial-stale-b", 10)):
-        taken = (datetime.now(timezone.utc) - timedelta(days=age)).isoformat()
-        (store.root / f"{name}.dump.cms").write_bytes(b"synthetic")
-        (store.root / f"{name}.manifest.json").write_text(
-            json.dumps({"name": name, "snapshot_time": taken}))
+    now = datetime.now(timezone.utc)
+    stale = [_write_set(store, now - timedelta(days=9), "aaaaaa"),
+             _write_set(store, now - timedelta(days=10), "bbbbbb")]
     report = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
     assert report["status"] == "ok"
-    assert report["deleted"] == ["perennial-stale-a", "perennial-stale-b"]
+    assert report["deleted"] == sorted(stale)
     assert store.names() == [report["name"] + ".dump.cms", report["name"] + ".manifest.json"]
 
 
@@ -201,6 +441,7 @@ def test_backup_and_drill_command_lines(engine, loaded, keypair, tmp_path):
     report = json.loads(drill.stdout)
     assert report["verified"] and report["within_rto"] and report["target_dropped"]
     assert json.loads((tmp_path / "drill" / "report.json").read_text()) == report
+    _no_plaintext(tmp_path / "drill")
 
     with psycopg.connect(loaded.replace("postgresql+psycopg", "postgresql"), autocommit=True) as other:
         from backup import BACKUP_LOCK
@@ -227,3 +468,19 @@ def test_truncated_dump_fails_even_though_encryption_succeeds(
     report = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
     assert report["status"] == "failed" and report["error_code"] == "dump_failed"
     assert store.names() == [] and list((tmp_path / "spool").iterdir()) == []
+
+
+@pytest.mark.db
+def test_libressl_is_refused_rather_than_failing_later(
+    engine, loaded, keypair, tmp_path, monkeypatch
+):
+    from backup import LocalStore, run_backup
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "openssl").write_text("#!/bin/sh\necho 'LibreSSL 3.3.6'\n")
+    (fake / "openssl").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    store = LocalStore(tmp_path / "store")
+    report = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
+    assert report["status"] == "failed" and report["error_code"] == "openssl_unsupported"
+    assert store.names() == []
