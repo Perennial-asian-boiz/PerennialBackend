@@ -33,13 +33,14 @@ Failed-input diagnostics and retention policy:
     Succeeded runs keep only collection counters, which are not input data.
 """
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from pydantic import ValidationError
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
@@ -84,6 +85,7 @@ def safe_coverage(value: Any) -> Optional[Dict[str, Any]]:
 MAX_RECORDS = 50_000
 # Sources whose tickers define the collection universe; see _register_roots.
 ROOT_SOURCES = frozenset({"congress_trades", "ark_holdings"})
+_PUNCTUATION = re.compile(r"[./-]")
 DIAGNOSTICS_KEEP_PER_SOURCE = 20
 DIAGNOSTICS_MAX_AGE_DAYS = 30
 RETRYABLE_SQLSTATES = frozenset({"40001", "40P01"})
@@ -237,6 +239,26 @@ def _register_roots(
     """
     if source not in ROOT_SOURCES or not tickers:
         return {}
+    # A spelling that differs from a stored canonical ticker only by [./-]
+    # (BRKB vs BRK.B) is far likelier an alias than a new listing: fail so it
+    # is seeded, instead of guessing either way.
+    stripped = {t: _PUNCTUATION.sub("", t) for t in tickers}
+    taken = set(
+        conn.execute(
+            select(
+                func.regexp_replace(security_identifiers.c.value, "[./-]", "", "g")
+            ).where(
+                security_identifiers.c.scheme == "ticker",
+                func.strpos(security_identifiers.c.value, ":") == 0,
+                func.regexp_replace(security_identifiers.c.value, "[./-]", "", "g").in_(
+                    set(stripped.values())
+                ),
+            )
+        ).scalars()
+    )
+    collisions = [(t, ALIAS_COLLISION) for t in tickers if stripped[t] in taken]
+    if collisions:
+        raise _unresolved(collisions)
     conn.execute(
         pg_insert(securities)
         .values([{"symbol": t, **wanted[t]} for t in tickers])

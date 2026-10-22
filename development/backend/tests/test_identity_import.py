@@ -220,3 +220,51 @@ def test_alias_added_after_publication_does_not_change_replay(engine, fixture_pa
     assert json.dumps(replay(engine, publication), sort_keys=True) == json.dumps(
         stored, sort_keys=True
     )
+
+
+@pytest.mark.parametrize("variant", ["BRKB", "BRK/B", "B.R.K-B"])
+def test_punctuation_variant_of_stored_ticker_is_not_registered(seeded, variant):
+    """M4-N1: a new spelling that only differs by [./-] must be seeded, not guessed."""
+    before = totals(seeded)
+    result = imported(seeded, "congress_trades", congress(variant, "NEWCO"))
+    assert result.error_code == "unresolved_security"
+    assert diagnostics(seeded, result.run_id)["failures"] == [
+        {"unit": variant, "code": "alias_collision"}
+    ]
+    assert totals(seeded) == before  # NEWCO is not registered either
+
+
+def test_provider_alias_values_do_not_block_registration(seeded):
+    """Only canonical tickers count; FINNHUB:BRK-B must not reserve 'FINNHUBBRKB'."""
+    with seeded.begin() as conn:
+        googl = conn.execute(
+            select(securities.c.id).where(securities.c.symbol == "GOOGL")
+        ).scalar_one()
+        conn.execute(
+            insert(security_identifiers).values(
+                scheme="ticker", value="ARK:ZZQ.Q", security_id=googl
+            )
+        )
+    assert imported(seeded, "ark_holdings", ark("ZZQQ")).succeeded
+
+
+def test_seeded_alias_resolves_a_variant_without_tripping_the_guard(seeded):
+    with seeded.begin() as conn:
+        brk = conn.execute(
+            select(securities.c.id).where(securities.c.symbol == "BRK.B")
+        ).scalar_one()
+        conn.execute(
+            insert(security_identifiers).values(
+                scheme="ticker", value="BRKB", security_id=brk
+            )
+        )
+    result = imported(seeded, "congress_trades", congress("BRKB"))
+    assert result.succeeded
+    assert security_ids(seeded, "congress_trades", result.batch_id) == ["BRK.B"]
+
+
+def test_distinct_new_variants_in_one_first_batch_still_register(engine):
+    """Residual by design: the guard compares against stored tickers only."""
+    result = imported(engine, "congress_trades", congress("ZZB.B", "ZZBB"))
+    assert result.succeeded
+    assert diagnostics(engine, result.run_id) == {"securities_registered": 2}
