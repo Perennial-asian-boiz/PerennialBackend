@@ -11,6 +11,7 @@ placeholders that no provider ever sees.
 
 import copy
 import json
+import os
 import re
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -24,7 +25,12 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from src.pipeline.demo_guard import DEMO_MARKER, DEMO_MODES, check_demo_database
+from src.pipeline.demo_guard import (
+    DEMO_MARKER,
+    DEMO_MODES,
+    check_demo_database,
+    local_engine,
+)
 
 FIXTURES = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "providers"
 PLACEHOLDER_KEY = "demo-replay-not-a-key"
@@ -171,9 +177,33 @@ class DemoReplay:
         return body  # other providers' thin variants are not needed by the walkthrough
 
 
+PROVIDER_ENV = ("FMP_API_KEY", "FINNHUB_API_KEY")
+
+
+def _load_fetchers_without_provider_config() -> None:
+    """Import the fetcher modules with dotenv disabled and provider variables
+    hidden, so the demo never reads a .env file or a provider key (SEC-DEMO-03).
+    A module already imported by this process is left as it is; the demo passes
+    placeholder keys explicitly either way."""
+    import dotenv
+
+    from src.ingestion import collectors
+
+    with ExitStack() as stack:
+        stack.enter_context(
+            mock.patch.object(dotenv, "load_dotenv", lambda *a, **k: False)
+        )
+        env = stack.enter_context(mock.patch.dict(os.environ))
+        for name in PROVIDER_ENV:
+            env.pop(name, None)
+        for name in ("fmp", "ark", "insider", "short_interest"):
+            collectors._fetcher(name)
+
+
 @contextmanager
 def replaying(replay: DemoReplay) -> Iterator[None]:
     """Route every requests.Session.get to the replay; drop provider pacing."""
+    _load_fetchers_without_provider_config()
     from src.ingestion import collectors
 
     def get(
@@ -222,26 +252,47 @@ def run_demo(engine: Engine, replay: DemoReplay) -> int:
 
 
 def create_demo_database(admin: Engine, name: str = "perennial_demo") -> None:
-    """Create (if absent), mark and migrate a local demo database."""
+    """Create, mark and migrate a local demo database; or reuse a marked one.
+
+    Order matters (SEC-DEMO-01/02): the admin connection must reach a loopback
+    server before any statement; an existing database is reused only if it
+    already carries the exact marker, and is otherwise refused untouched; only
+    a database this call created gets the marker.
+    """
     from alembic import command
     from alembic.config import Config
+    from psycopg import errors as pg_errors
+    from sqlalchemy.exc import ProgrammingError
 
-    from src.db.session import make_engine
-    from src.pipeline.demo_guard import DEMO_DATABASE
+    from src.pipeline.demo_guard import (
+        DEMO_DATABASE,
+        DemoGuardError,
+        database_marker,
+        require_local,
+    )
 
     if not DEMO_DATABASE.fullmatch(name):
         raise ValueError("demo database names must match perennial_demo[_suffix]")
     with admin.connect() as conn:
+        require_local(conn)
+        created = False
         exists = conn.execute(
             text("SELECT 1 FROM pg_database WHERE datname = :n"), {"n": name}
         ).first()
         if not exists:
-            conn.execute(text(f'CREATE DATABASE "{name}"'))
-        conn.execute(text(f"COMMENT ON DATABASE \"{name}\" IS '{DEMO_MARKER}'"))
-    engine = make_engine(
-        admin.url.set(database=name).render_as_string(hide_password=False),
-        connect_args={"hostaddr": admin.url.host or "127.0.0.1"},
-    )
+            try:
+                conn.execute(text(f'CREATE DATABASE "{name}"'))
+                created = True
+            except ProgrammingError as exc:
+                # Lost a creation race: the winner's database is checked below.
+                if not isinstance(exc.orig, pg_errors.DuplicateDatabase):
+                    raise
+        if created:
+            conn.execute(text(f"COMMENT ON DATABASE \"{name}\" IS '{DEMO_MARKER}'"))
+        elif database_marker(conn, name) != DEMO_MARKER:
+            raise DemoGuardError()  # an existing, unmarked database is never adopted
+    url = admin.url.set(database=name).render_as_string(hide_password=False)
+    engine = local_engine(url)
     try:
         with engine.connect() as conn:
             check_demo_database(conn)
@@ -252,6 +303,22 @@ def create_demo_database(admin: Engine, name: str = "perennial_demo") -> None:
             command.upgrade(cfg, "head")
     finally:
         engine.dispose()
+
+
+def demo_marked(engine: Engine, publication_id: int) -> bool:
+    """Whether the publication's quality event carries the demo marker."""
+    from sqlalchemy import select
+
+    from src.db.models import publication_events
+
+    with engine.connect() as conn:
+        checks = conn.execute(
+            select(publication_events.c.checks).where(
+                publication_events.c.publication_id == publication_id,
+                publication_events.c.kind.in_(["quality_passed", "quality_override"]),
+            )
+        ).scalar_one_or_none()
+    return bool(checks and checks.get("demo") is True)
 
 
 def walkthrough(engine: Engine, today: date | None = None) -> list[dict[str, Any]]:
@@ -293,7 +360,7 @@ def walkthrough(engine: Engine, today: date | None = None) -> list[dict[str, Any
         {
             "step": "current",
             "publication_id": served["id"],
-            "demo_marker": served["ranking_config"].get("demo") is True,
+            "demo_marker": demo_marked(engine, served["id"]),
             "tickers": sum(
                 len(served["output"][b])
                 for b in ("popular_stable", "affordable_growing")

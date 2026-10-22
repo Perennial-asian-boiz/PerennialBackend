@@ -672,7 +672,6 @@ def publish(
             "freshness_seconds": {
                 s: int(age.total_seconds()) for s, age in max_age.items()
             },
-            **({"demo": True} if demo else {}),
         }
         output = calculate(
             rows, {s: o["value"] for s, o in cap_data.items()}, now, config
@@ -699,6 +698,9 @@ def publish(
                     "sources": source_audit,
                     "failed": failed_checks,
                     "overridden": overridden,
+                    # Demo publications are marked in their audit event, not in
+                    # ranking_config (ranking inputs only).
+                    **({"demo": True} if demo else {}),
                 },
                 created_at=now,
             )

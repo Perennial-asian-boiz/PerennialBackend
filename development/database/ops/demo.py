@@ -22,40 +22,36 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "backend"))
 
 from sqlalchemy.engine import make_url  # noqa: E402
-
-LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+from sqlalchemy.exc import ArgumentError  # noqa: E402
 
 
 def main(argv: list[str]) -> int:
-    from src.db.session import make_engine
     from src.pipeline.demo import create_demo_database, walkthrough
-    from src.pipeline.demo_guard import DEMO_DATABASE
+    from src.pipeline.demo_guard import DemoGuardError, local_engine
 
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+    raw = os.environ.get("DEMO_DATABASE_URL", "")
     try:
-        url = make_url(os.environ.get("DEMO_DATABASE_URL", ""))
-    except Exception:
-        print("error: DEMO_DATABASE_URL is not a database URL", file=sys.stderr)
-        return 2
-    if url.host not in LOOPBACK or not DEMO_DATABASE.fullmatch(url.database or ""):
+        # Pinned and sanitized: loopback host, hostaddr pinned, no routing options.
+        engine = local_engine(raw)
+        admin = (
+            local_engine(
+                make_url(raw).set(database="postgres").render_as_string(hide_password=False),
+                demo_name=False,
+                isolation_level="AUTOCOMMIT",
+            )
+            if "--create" in argv
+            else None
+        )
+    except (DemoGuardError, ValueError, ArgumentError):
         print(
             "error: demo mode needs a loopback DEMO_DATABASE_URL naming perennial_demo[_suffix]",
             file=sys.stderr,
         )
         return 2
-    hostaddr = {"hostaddr": "127.0.0.1" if url.host == "localhost" else url.host}
-    if "--create" in argv:
-        admin = make_engine(
-            url.set(database="postgres").render_as_string(hide_password=False),
-            connect_args=hostaddr,
-            isolation_level="AUTOCOMMIT",
-        )
-        try:
-            create_demo_database(admin, url.database or "")
-        finally:
-            admin.dispose()
-    engine = make_engine(url.render_as_string(hide_password=False), connect_args=hostaddr)
     try:
+        if admin is not None:
+            create_demo_database(admin, engine.url.database or "")
         for step in walkthrough(engine):
             print(json.dumps(step, default=str))
     except Exception as exc:
@@ -63,6 +59,8 @@ def main(argv: list[str]) -> int:
         return 1
     finally:
         engine.dispose()
+        if admin is not None:
+            admin.dispose()
     return 0
 
 

@@ -24,9 +24,9 @@ def demo_engine(db_url):
 
     admin = pinned_engine(db_url, isolation_level="AUTOCOMMIT")
     name = f"perennial_demo_{secrets.token_hex(4)}"
-    create_demo_database(admin, name)
     engine = pinned_engine(db_url.set(database=name))
-    try:
+    try:  # cleanup covers a failed bootstrap too
+        create_demo_database(admin, name)
         yield engine
     finally:
         engine.dispose()
@@ -55,6 +55,8 @@ def test_walkthrough_runs_every_step_in_the_demo_database(demo_engine):
 
 @pytest.mark.db
 def test_demo_runs_are_recorded_as_fixture_mode_and_marked(demo_engine):
+    from src.pipeline.demo import demo_marked
+
     pub = run_demo(demo_engine, DemoReplay())
     with demo_engine.connect() as conn:
         modes = set(conn.execute(select(models.ingestion_runs.c.collection_mode)).scalars())
@@ -62,7 +64,8 @@ def test_demo_runs_are_recorded_as_fixture_mode_and_marked(demo_engine):
             select(models.publications.c.ranking_config).where(models.publications.c.id == pub)
         ).scalar_one()
     assert modes == {"fixture"}
-    assert config["demo"] is True
+    assert demo_marked(demo_engine, pub) is True  # DM-4: marked in the audit event
+    assert "demo" not in config  # ranking_config holds ranking inputs only
 
 
 @pytest.mark.db
@@ -100,12 +103,12 @@ def test_guard_needs_both_the_demo_name_and_the_marker(db_url, named_demo, marke
 
     admin = pinned_engine(db_url, isolation_level="AUTOCOMMIT")
     name = ("perennial_demo_" if named_demo else "perennial_test_notdemo_") + secrets.token_hex(4)
-    with admin.connect() as conn:
-        conn.execute(text(f'CREATE DATABASE "{name}"'))
-        if marked:
-            conn.execute(text(f"COMMENT ON DATABASE \"{name}\" IS '{DEMO_MARKER}'"))
     engine = pinned_engine(db_url.set(database=name))
     try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{name}"'))
+            if marked:
+                conn.execute(text(f"COMMENT ON DATABASE \"{name}\" IS '{DEMO_MARKER}'"))
         with engine.connect() as conn, pytest.raises(DemoGuardError):
             check_demo_database(conn)
     finally:
@@ -141,14 +144,194 @@ def test_demo_script_refuses_remote_or_non_demo_urls(url):
     assert "error:" in result.stderr and "Traceback" not in result.stderr
 
 
-def test_guard_refuses_a_non_loopback_url_before_querying():
-    class Conn:
-        class engine:
-            class url:
-                host = "db.example.com"
+# ── SEC-DEMO-02: effective connection target, pinned factory ──
 
-        def execute(self, *a, **k):
-            raise AssertionError("must not query a non-loopback server")
+
+class _Info:
+    def __init__(self, host, hostaddr=""):
+        self.host, self.hostaddr = host, hostaddr
+
+
+@pytest.mark.parametrize(
+    "info,local",
+    [
+        (_Info("127.0.0.1"), True),
+        (_Info("localhost", "127.0.0.1"), True),
+        (_Info("/var/run/postgresql"), True),
+        (_Info("localhost", "192.0.2.1"), False),  # URL says localhost, routed away
+        (_Info("db.example.com"), False),
+        (_Info("db.example.com", "::1"), True),  # effective address is loopback
+    ],
+)
+def test_guard_judges_the_effective_target_not_the_url(info, local):
+    from src.pipeline.demo_guard import _target_is_local
+
+    assert _target_is_local(info) is local
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql+psycopg://u@localhost:5433/perennial_demo?hostaddr=192.0.2.1",
+        "postgresql+psycopg://u@localhost:5433/perennial_demo?host=db.example.com",
+        "postgresql+psycopg://u@localhost:5433/perennial_demo?service=prod",
+        "postgresql+psycopg://u@db.example.com:5433/perennial_demo",
+        "postgresql+psycopg://u@127.0.0.1:5433/perennial",
+    ],
+)
+def test_pinned_factory_refuses_routing_options_and_non_demo_urls(url):
+    from src.pipeline.demo_guard import local_engine
 
     with pytest.raises(DemoGuardError):
-        check_demo_database(Conn())  # type: ignore[arg-type]
+        local_engine(url)
+
+
+@pytest.mark.db
+def test_pinned_engine_ignores_ambient_libpq_routing(demo_engine, monkeypatch):
+    from src.pipeline.demo_guard import local_engine
+
+    monkeypatch.setenv("PGHOSTADDR", "192.0.2.1")  # would route away if honoured
+    engine = local_engine(demo_engine.url.render_as_string(hide_password=False))
+    try:
+        with engine.connect() as conn:
+            check_demo_database(conn)
+            assert conn.connection.dbapi_connection.info.hostaddr == "127.0.0.1"
+    finally:
+        engine.dispose()
+
+
+def test_bootstrap_checks_locality_before_any_statement():
+    """A non-local admin connection is refused before its first statement."""
+    executed = []
+
+    class Conn:
+        class connection:
+            class dbapi_connection:
+                info = _Info("localhost", "192.0.2.1")
+
+        def execute(self, *a, **k):
+            executed.append(a)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class Admin:
+        def connect(self):
+            return Conn()
+
+    with pytest.raises(DemoGuardError):
+        create_demo_database(Admin(), "perennial_demo_x")  # type: ignore[arg-type]
+    assert executed == []
+
+
+# ── SEC-DEMO-01: never adopt an existing database ──
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("comment", [None, "other-team-database"])
+def test_bootstrap_refuses_an_existing_unmarked_database_untouched(db_url, comment):
+    from conftest import pinned_engine
+    from src.pipeline.demo_guard import database_marker
+
+    admin = pinned_engine(db_url, isolation_level="AUTOCOMMIT")
+    name = f"perennial_demo_{secrets.token_hex(4)}"
+    try:
+        with admin.connect() as conn:
+            conn.execute(text(f'CREATE DATABASE "{name}"'))
+            if comment:
+                conn.execute(text(f"COMMENT ON DATABASE \"{name}\" IS '{comment}'"))
+        with pytest.raises(DemoGuardError):
+            create_demo_database(admin, name)
+        with admin.connect() as conn:
+            assert database_marker(conn, name) == comment
+        target = pinned_engine(db_url.set(database=name))
+        try:
+            with target.connect() as conn:  # not migrated either
+                assert conn.execute(text("SELECT to_regclass('public.alembic_version')")).scalar() is None
+        finally:
+            target.dispose()
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@pytest.mark.db
+def test_bootstrap_losing_a_creation_race_does_not_adopt_the_winner(db_url):
+    """Another session creates the database between our existence check and our
+    CREATE; our CREATE fails and the unmarked winner is refused, untouched."""
+    from sqlalchemy import event
+
+    from conftest import pinned_engine
+    from src.pipeline.demo_guard import database_marker
+
+    admin = pinned_engine(db_url, isolation_level="AUTOCOMMIT")
+    rival = pinned_engine(db_url, isolation_level="AUTOCOMMIT")
+    name = f"perennial_demo_{secrets.token_hex(4)}"
+
+    @event.listens_for(admin, "before_cursor_execute")
+    def race(conn, cursor, statement, params, context, executemany):
+        if statement.startswith("CREATE DATABASE"):
+            with rival.connect() as other:
+                other.execute(text(f'CREATE DATABASE "{name}"'))
+
+    try:
+        with pytest.raises(DemoGuardError):
+            create_demo_database(admin, name)
+        event.remove(admin, "before_cursor_execute", race)
+        with admin.connect() as conn:
+            assert database_marker(conn, name) is None
+    finally:
+        with rival.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+        rival.dispose()
+
+
+@pytest.mark.db
+def test_bootstrap_reuses_an_already_marked_demo_database(demo_engine, db_url):
+    from conftest import pinned_engine
+
+    admin = pinned_engine(db_url, isolation_level="AUTOCOMMIT")
+    try:
+        create_demo_database(admin, demo_engine.url.database)  # idempotent
+    finally:
+        admin.dispose()
+    with demo_engine.connect() as conn:
+        check_demo_database(conn)
+
+
+# ── SEC-DEMO-03: no dotenv or provider-key read on the demo path ──
+
+
+def test_demo_replay_reads_no_dotenv_or_provider_key_in_a_fresh_process():
+    backend = Path(__file__).resolve().parents[1]
+    probe = """
+import json, os, dotenv
+calls = []
+dotenv.load_dotenv = lambda *a, **k: calls.append("load_dotenv") or False
+os.environ["FINNHUB_API_KEY"] = "SYNTHETIC_ENV_KEY"
+os.environ["FMP_API_KEY"] = "SYNTHETIC_ENV_KEY"
+from src.pipeline.demo import DemoReplay, replaying
+with replaying(DemoReplay()):
+    from src.ingestion import collectors
+    key = collectors._fetcher("insider").FINNHUB_API_KEY
+print(json.dumps({"calls": calls, "key_seen": key == "SYNTHETIC_ENV_KEY",
+                  "env_restored": os.environ["FINNHUB_API_KEY"] == "SYNTHETIC_ENV_KEY"}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=backend,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PATH": "", "PYTHONPATH": str(backend)},
+    )
+    assert result.returncode == 0, result.stderr[-300:]
+    import json
+
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report == {"calls": [], "key_seen": False, "env_restored": True}
