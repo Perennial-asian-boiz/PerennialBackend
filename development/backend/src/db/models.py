@@ -342,6 +342,12 @@ Index(
     unique=True,
     postgresql_where=text("kind IN ('quality_passed', 'quality_override')"),
 )
+Index(
+    "uq_publication_events_degraded",
+    publication_events.c.publication_id,
+    unique=True,
+    postgresql_where=text("kind = 'degraded'"),
+)
 
 publication_sources = Table(
     "publication_sources",
