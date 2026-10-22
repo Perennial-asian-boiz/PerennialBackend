@@ -563,7 +563,9 @@ def publish(
         reuse_limits = {
             s: p.max_reuse_age for s, p in _source_policy_defaults().items()
         }
-    if set(reuse) - set(m.WATCHLIST_SOURCES) or set(reuse_limits) != set(m.WATCHLIST_SOURCES):
+    if set(reuse) - set(m.WATCHLIST_SOURCES) or set(reuse_limits) != set(
+        m.WATCHLIST_SOURCES
+    ):
         raise ValueError("reuse must name known sources with limits for every source")
     max_age = dict(MAX_AGE if max_age is None else max_age)
     if set(max_age) != set(m.WATCHLIST_SOURCES) or any(
