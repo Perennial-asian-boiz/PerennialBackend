@@ -341,3 +341,20 @@ def test_health_shows_a_rolled_back_publication_until_the_next_publish(
     third = run(engine, Feed(fixture_path))
     assert current(engine)["id"] == third
     assert "publication:rolled_back" not in health(engine)["issues"]
+
+
+def test_gdelt_engine_disposal_failure_is_logged_safely(monkeypatch, caplog):
+    """SEC-M3-01: a cleanup error neither escapes run_once nor exposes its text."""
+    from src.pipeline import scheduler
+    from src.services.gdelt import job
+
+    class LeakyEngine:
+        def dispose(self):
+            raise RuntimeError("postgresql://u:SYNTHETIC_SECRET@db/x")
+
+    monkeypatch.setattr(scheduler, "make_engine", lambda *a, **kwargs: LeakyEngine())
+    monkeypatch.setattr(job, "run_gdelt", lambda engine: job.RunSummary(day="2026-10-22"))
+    with caplog.at_level("ERROR"):
+        assert scheduler.run_once("gdelt", _settings()) == 0
+    assert "engine dispose failed: RuntimeError" in caplog.text
+    assert "SYNTHETIC_SECRET" not in caplog.text

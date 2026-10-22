@@ -109,7 +109,10 @@ def _run_gdelt_once(settings: Settings | None) -> int:
         return 1
     finally:
         if engine is not None:
-            engine.dispose()
+            try:
+                engine.dispose()
+            except Exception as exc:  # cleanup must not leak raw text (SEC-M3-01)
+                logger.error("engine dispose failed: %s", describe_exception(exc))
     if summary.failed:
         logger.error(
             "gdelt run incomplete code=%s ok=%d failed=%d",
