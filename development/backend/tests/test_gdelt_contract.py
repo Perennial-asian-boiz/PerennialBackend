@@ -20,7 +20,8 @@ DAY = date(2026, 10, 13)  # target day: the last complete UTC day before NOW
 THEMES = ThemeMap({"ECON_OILPRICE": {}, "ECON_INFLATION": {}}, ("reuters.com",))
 
 
-def counts(target, baseline=30, days=28, gaps=()):
+def counts(target, baseline=30, days=89, gaps=()):
+    """A full 90-day window (89 baseline days plus the target day), as GDELT serves."""
     out = {DAY - timedelta(days=n): baseline for n in range(1, days + 1)}
     out[DAY] = target
     for gap in gaps:
@@ -77,7 +78,7 @@ def test_volume_and_articles_import_as_batches_without_securities(engine):
         ).mappings().one()
         assert conn.execute(select(models.securities)).all() == []
     assert {r["theme"] for r in rows} == {"ECON_OILPRICE", "ECON_INFLATION"}
-    assert len(rows) == 2 * 29 and max(r["day"] for r in rows) == DAY
+    assert len(rows) == 2 * 90 and max(r["day"] for r in rows) == DAY
     assert str(rows[0]["avg_tone"]) == "-1.2346"
     assert batch["source_as_of"] == DAY
     envelope = batch["payload"]["envelope"]
@@ -291,3 +292,22 @@ def test_gdelt_staleness_is_an_advisory_not_a_watchlist_issue(engine):
     report = health(engine)
     assert report["advisories"] == ["gdelt_theme_volume:stale"]
     assert not any("gdelt" in issue for issue in report["issues"])
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("reported_days,expect_missing", [(10, 80), (0, 90)])
+def test_missing_days_cover_the_whole_window(engine, reported_days, expect_missing):
+    """GD-1: a sparse start and an empty timeline are gaps, not complete coverage."""
+    sparse = {DAY - timedelta(days=n): 30 for n in range(reported_days)}
+    gappy = Client({"ECON_OILPRICE": sparse, "ECON_INFLATION": counts(31)})
+    run = run_contract(engine, gappy, THEMES, NOW)
+    volume = run.results["gdelt_theme_volume"]
+    with engine.connect() as conn:
+        envelope = conn.execute(
+            select(models.source_batches.c.payload).where(
+                models.source_batches.c.id == volume.batch_id
+            )
+        ).scalar_one()["envelope"]
+    assert envelope["missing_days_count"] == expect_missing
+    assert all(day.startswith("ECON_OILPRICE:") for day in envelope["missing_days"])
+    assert envelope["missing_days"][0] == f"ECON_OILPRICE:{DAY - timedelta(days=89)}"

@@ -140,19 +140,14 @@ def collect_volume(
                     "avg_tone": tone.get(d),
                 }
             )
-        if days:  # gaps inside the theme's own reported span
-            span = (days[-1] - days[0]).days + 1
-            seen = set(days)
-            missing.extend(
-                f"{theme}:{days[0] + timedelta(days=n)}"
-                for n in range(span)
-                if days[0] + timedelta(days=n) not in seen
-            )
-            if days[-1] < day:
-                missing.extend(
-                    f"{theme}:{days[-1] + timedelta(days=n)}"
-                    for n in range(1, (day - days[-1]).days + 1)
-                )
+        # Every day of the window GDELT did not report is a gap, including a
+        # sparse start and an empty timeline (checker GD-1).
+        seen = set(days)
+        missing.extend(
+            f"{theme}:{first + timedelta(days=n)}"
+            for n in range(WINDOW_DAYS)
+            if first + timedelta(days=n) not in seen
+        )
     failed = tracker.failed_outcome(VOLUME)
     if failed is not None:
         return failed
