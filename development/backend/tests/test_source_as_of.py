@@ -1,6 +1,6 @@
 """X1: real collector outcomes carry content dates through publication."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from src.ingestion import collectors
@@ -60,7 +60,11 @@ def test_content_date_and_stable_batch_identity(source):
     day = date.today() - timedelta(days=2)
     first, second = outcome(source, day), outcome(source, day)
     assert first.succeeded and second.succeeded
-    assert first.source_as_of == second.source_as_of == day
+    assert (
+        first.source_as_of
+        == second.source_as_of
+        == (datetime.now(timezone.utc).date() if source == "insider_trades" else day)
+    )
     hashes = [
         canonicalize(
             source, validate_records(source, o.records), o.source_as_of
@@ -101,7 +105,7 @@ def test_congress_uses_latest_retained_disclosure():
     assert result.source_as_of == day
 
 
-def test_insider_uses_latest_filing_of_retained_buys_only():
+def test_insider_uses_query_through_date_regardless_of_filings():
     day = date.today()
     rows = [
         purchase(filingDate=(day - timedelta(days=1)).isoformat()),
@@ -116,7 +120,7 @@ def test_insider_uses_latest_filing_of_retained_buys_only():
         sleep=lambda _: None,
     )
     assert result.succeeded and len(result.records) == 2
-    assert result.source_as_of == day
+    assert result.source_as_of == datetime.now(timezone.utc).date()
 
 
 def test_short_interest_mixed_settlements_use_latest():
@@ -154,7 +158,13 @@ def test_empty_batch_has_no_invented_observation_date(source):
         result = collectors.collect_short_interest(
             session, upstream=UPSTREAM, sleep=lambda _: None
         )
-    assert result.succeeded and result.records == [] and result.source_as_of is None
+    if source == "short_interest":
+        assert not result.succeeded and result.error_code == "empty_short_interest"
+    else:
+        assert result.succeeded and result.records == []
+        assert result.source_as_of == (
+            datetime.now(timezone.utc).date() if source == "insider_trades" else None
+        )
 
 
 @pytest.mark.parametrize("source", ("congress_trades", "insider_trades"))
@@ -207,7 +217,7 @@ def test_changed_collector_batch_publishes_unless_date_regresses(
     first = publish(engine, runs, caps(engine, batches))
     saved = current(engine)["output"]
     runs, batches = import_round(engine, fixture_path, source, delta, marker=1)
-    if delta < 0:
+    if delta < 0 and source != "insider_trades":
         with pytest.raises(PublicationQualityError) as error:
             publish(engine, runs, caps(engine, batches))
         assert f"{source}:source_as_of" in error.value.checks

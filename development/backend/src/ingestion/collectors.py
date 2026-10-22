@@ -17,7 +17,8 @@ page, ticker) as completed or failed. Policy:
     partial results. A unit whose data would be dropped by such a swallowed
     error fails instead.
   * A collection that completed every unit with zero records is a successful
-    empty result (e.g. no insider buys in the window).
+    empty result (e.g. no insider buys in the window), except short interest:
+    an entirely empty Nasdaq universe fails with empty_short_interest.
   * Insider and short-interest plans use explicit upstream={trades, holdings}
     rows from pinned database batches. Only callers omitting upstream use the
     legacy bounded file fallback. Malformed supplied rows or missing/malformed
@@ -685,7 +686,6 @@ def collect_insider(
     session = session or requests.Session()
     tracker = _Tracker("insider tickers", planned=len(plan))
     buys: List[Dict[str, Any]] = []
-    filing_dates: List[Any] = []
     unsupported: List[str] = []
     cutoff = insider.lookback_cutoff().isoformat()
     today = datetime.now(timezone.utc).date().isoformat()
@@ -711,22 +711,13 @@ def collect_insider(
             tracker.fail(ticker, "malformed_response")
             break
         else:
-            # Parse each transaction with the existing parser so its filing
-            # date is retained only when that transaction contributes a buy.
-            # No duplicate filtering policy or fetcher/schema change is needed.
-            # Empty payloads still pass through the parser/error contract.
-            for txn in resp.data["data"] or [None]:
-                parsed_buys, parse_code, _parse_detail = insider.parse_finnhub_buys(
-                    ticker, {"data": [] if txn is None else [txn]}, bucket
-                )
-                if parse_code is not None or not isinstance(parsed_buys, list):
-                    tracker.fail(ticker, "parse_error")
-                    break
-                if parsed_buys:
-                    filing_dates.append(txn.get("filingDate") if txn else None)
-                    buys.extend(parsed_buys)
-            if tracker.failure_count:
+            parsed_buys, parse_code, _parse_detail = insider.parse_finnhub_buys(
+                ticker, resp.data, bucket
+            )
+            if parse_code is not None or not isinstance(parsed_buys, list):
+                tracker.fail(ticker, "parse_error")
                 break
+            buys.extend(parsed_buys)
             tracker.ok()
         sleep(insider.REQUEST_DELAY)
     envelope = {
@@ -742,7 +733,10 @@ def collect_insider(
         "insider_trades",
         buys,
         envelope=envelope,
-        source_as_of=_latest_iso_date(filing_dates),
+        # Coverage through the exact UTC date sent in every request, not the
+        # newest buy in a changing universe. Pinned by the importer in batch
+        # identity; same content on a later query day intentionally differs.
+        source_as_of=date.fromisoformat(today),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 
@@ -826,6 +820,13 @@ def collect_short_interest(
                 records.append(record)
                 tracker.ok()
         sleep(si.REQUEST_DELAY)
+    if not records and not tracker.failure_count:
+        return CollectionOutcome.failure(
+            "short_interest",
+            "live",
+            "empty_short_interest",
+            diagnostics=tracker.diagnostics(),
+        )
     records.sort(key=lambda r: r["ticker"])
     envelope = {
         "schema_version": "1.0",
