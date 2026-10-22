@@ -65,6 +65,7 @@ def health(
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc) if now is None else now
     holidays = settings.trading_holidays if settings is not None else TRADING_HOLIDAYS
+    window_start = publication_window_start(now, holidays)
     issues: list[str] = []
     sources: dict[str, dict[str, Any] | None] = {}
     with engine.connect() as conn:
@@ -138,13 +139,26 @@ def health(
         batches = conn.execute(
             select(func.count()).select_from(m.source_batches)
         ).scalar_one()
+    # M3 missed-run monitor: the scheduled job never started for the trading day
+    # whose deadline passed (distinct from a run that started and failed).
+    with engine.connect() as conn:
+        started = conn.execute(
+            select(func.count())
+            .select_from(m.ingestion_runs)
+            .where(
+                m.ingestion_runs.c.collection_mode == "live",
+                m.ingestion_runs.c.started_at >= window_start,
+            )
+        ).scalar_one()
+    if not started:
+        issues.append("pipeline:missed_run")
     pub = current(engine)
     if pub is None:
         issues.append("publication:missing")
     else:
         if now - pub["created_at"] > timedelta(days=3):
             issues.append("publication:stale")
-        if pub["created_at"] < publication_window_start(now, holidays):
+        if pub["created_at"] < window_start:
             issues.append("publication:missed")
         with engine.connect() as conn:
             marker = conn.execute(
