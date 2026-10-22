@@ -3,6 +3,7 @@
 import inspect
 import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from functools import partial
@@ -11,7 +12,6 @@ from typing import Any, Callable, Mapping, Sequence
 import requests
 from sqlalchemy.engine import Connection, Engine
 
-from src.db import models as m
 from src.db.queries import batch_rows, latest_successful_run
 from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
@@ -21,12 +21,94 @@ from src.pipeline.lifecycle import (
     heartbeat_worker,
     source_lock,
 )
-from src.pipeline.publication import PublicationError, publish
+from src.pipeline.publication import (
+    PriorPublication,
+    PublicationError,
+    Reuse,
+    prior_publication,
+    publish,
+)
 from src.pipeline.ranking import candidate_symbols
-from src.settings import QualityThreshold, Settings
+from src.settings import QualityThreshold, Settings, _source_policy_defaults
 
 logger = logging.getLogger(__name__)
 UPSTREAM = ("congress_trades", "ark_holdings")
+DOWNSTREAM = ("insider_trades", "short_interest")
+
+
+class RequiredSourceUnavailableError(RuntimeError):
+    """A required source has neither a fresh batch nor a reusable pinned one."""
+
+    code = "required_source_unavailable"
+
+    def __init__(self, source: str, failure_code: str | None):
+        self.source, self.failure_code = source, failure_code
+        super().__init__(f"collection failed for {source}: {failure_code}")
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """Today's outcome for one source: a fresh run, or a failure code."""
+
+    run_id: int | None
+    batch_id: int | None
+    error_code: str | None
+    dependencies: Mapping[str, int] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.error_code is None and self.batch_id is not None
+
+
+@dataclass
+class Selection:
+    runs: dict[str, int] = field(default_factory=dict)
+    batches: dict[str, int] = field(default_factory=dict)
+    reuse: dict[str, Reuse] = field(default_factory=dict)
+
+    def fresh(self, source: str, attempt: Attempt) -> None:
+        assert attempt.run_id is not None and attempt.batch_id is not None
+        self.runs[source], self.batches[source] = attempt.run_id, attempt.batch_id
+        self.reuse.pop(source, None)
+
+    def pinned(self, prior: PriorPublication | None, source: str, why: Reuse) -> None:
+        pin = prior.pins.get(source) if prior is not None else None
+        if pin is None or not pin.reusable:
+            raise RequiredSourceUnavailableError(source, why.failure_code)
+        self.runs[source], self.batches[source] = pin.run_id, pin.batch_id
+        self.reuse[source] = why
+
+
+def select_sources(
+    prior: PriorPublication | None,
+    attempt: Callable[[str, Mapping[str, int] | None], Attempt],
+) -> Selection:
+    """Choose each source's run: today's if it succeeded, else the pinned one.
+
+    attempt(source, upstream_batches) collects (or replays a recorded outcome);
+    downstream sources are attempted with the upstream batches selected here,
+    so a reused upstream batch plans today's downstream collection.
+    """
+    chosen = Selection()
+    for source in UPSTREAM:
+        result = attempt(source, None)
+        if result.ok:
+            chosen.fresh(source, result)
+        else:
+            chosen.pinned(prior, source, Reuse(result.error_code, result.run_id))
+    for source in DOWNSTREAM:
+        upstream = {s: chosen.batches[s] for s in UPSTREAM}
+        result = attempt(source, upstream)
+        if result.ok and dict(result.dependencies) == upstream:
+            chosen.fresh(source, result)
+            continue
+        code = result.error_code or "lineage_mismatch"
+        pin = prior.pins.get(source) if prior is not None else None
+        if pin is not None and pin.dependencies == upstream:
+            chosen.pinned(prior, source, Reuse(code, result.run_id))
+        else:
+            raise RequiredSourceUnavailableError(source, code)
+    return chosen
 
 
 def _upstream(
@@ -243,11 +325,15 @@ def _run_pipeline(
         fmp_key = settings.fmp_api_key if settings is not None else None
         api_key = fmp_key.get_secret_value() if fmp_key is not None else None
         market_cap_collector = partial(collect_market_caps, api_key=api_key)
+    policies = (
+        settings.source_policies if settings is not None else _source_policy_defaults()
+    )
+    max_age = {s: p.max_age for s, p in policies.items()}
+    reuse_limits = {s: p.max_reuse_age for s, p in policies.items()}
     abandon_stale_runs(engine)
-    run_ids: dict[str, int] = {}
-    batches: dict[str, int] = {}
-    for source in m.SOURCES:
-        upstream = {s: batches[s] for s in UPSTREAM} if source not in UPSTREAM else None
+    prior = prior_publication(engine, datetime.now(timezone.utc), max_age, reuse_limits)
+
+    def attempt(source: str, upstream: Mapping[str, int] | None) -> Attempt:
         result = collect_source(
             engine,
             source,
@@ -256,14 +342,27 @@ def _run_pipeline(
             settings=settings,
         )
         if not result.succeeded:
-            raise RuntimeError(f"collection failed for {source}: {result.error_code}")
-        assert result.batch_id is not None  # A successful import always has a batch.
-        run_ids[source], batches[source] = result.run_id, result.batch_id
+            return Attempt(
+                result.run_id, None, result.error_code or "collection_failed"
+            )
+        return Attempt(result.run_id, result.batch_id, None, dict(upstream or {}))
+
+    chosen = select_sources(prior, attempt)
     with engine.connect() as conn:
-        rows = {s: batch_rows(conn, s, b) for s, b in batches.items()}
+        rows = {s: batch_rows(conn, s, b) for s, b in chosen.batches.items()}
     observations = market_cap_collector(candidate_symbols(rows))
     publication_id = publish(
-        engine, run_ids, observations, quality_thresholds=quality_thresholds
+        engine,
+        chosen.runs,
+        observations,
+        max_age=max_age,
+        quality_thresholds=quality_thresholds,
+        reuse=chosen.reuse,
+        reuse_limits=reuse_limits,
     )
-    logger.info("publication succeeded publication_id=%s", publication_id)
+    logger.info(
+        "publication succeeded publication_id=%s reused=%s",
+        publication_id,
+        ",".join(sorted(chosen.reuse)) or "none",
+    )
     return publication_id

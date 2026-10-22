@@ -38,6 +38,8 @@ ERROR_SUMMARIES = {
     "publication_quality_failed": "publication quality checks failed",
     "publication_in_progress": "another publication is in progress; retry later",
     "override_input_rejected": "override actor or reason is not safe to record",
+    "required_source_unavailable": "a required source has neither a fresh nor a reusable batch",
+    "reuse_not_current": "a reused run is no longer pinned by the current publication or is too old",
     "worker_abandoned": "Worker heartbeat expired.",
     "collection_failed": "collection did not complete",
     "partial_collection": "collection was incomplete; some units failed",

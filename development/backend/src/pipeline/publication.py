@@ -6,6 +6,7 @@ independent. Defaults are deliberately visible policy, configurable by the calle
 
 import re
 import unicodedata
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence, cast
@@ -16,8 +17,9 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 
 from src.db import models as m
 from src.db.queries import batch_rows
+from src.ingestion.diagnostics import safe_code
 from src.pipeline.ranking import DEFAULT_CONFIG, VERSION, calculate, candidate_symbols
-from src.settings import QualityThreshold, _quality_defaults
+from src.settings import QualityThreshold, _quality_defaults, _source_policy_defaults
 
 MAX_AGE = {
     "congress_trades": timedelta(days=3),
@@ -25,6 +27,7 @@ MAX_AGE = {
     "insider_trades": timedelta(days=3),
     "short_interest": timedelta(days=45),
 }
+DOWNSTREAM = ("insider_trades", "short_interest")
 QUALITY_CHECKS = ("row_count", "null_share", "source_as_of")
 PUBLICATION_LOCK = 170099
 
@@ -92,6 +95,41 @@ def _check_override_text(actor: str, reason: str) -> None:
         )
 
 
+class PublicationReuseError(PublicationError):
+    """A reused run is no longer pinned by the current publication or is too old."""
+
+    code = "reuse_not_current"
+
+
+@dataclass(frozen=True)
+class Reuse:
+    """Why a source pins the previous publication's run instead of a fresh one.
+
+    failure_code is the fixed code of today's failed attempt, or None for a
+    source reused only to keep a reused downstream run's lineage intact (cohort).
+    """
+
+    failure_code: str | None
+    failed_run_id: int | None = None
+    cohort: bool = False
+    unpublished_run_id: int | None = None
+
+
+@dataclass(frozen=True)
+class PinnedRun:
+    run_id: int
+    batch_id: int
+    collected_at: datetime
+    dependencies: dict[str, int]
+    reusable: bool
+
+
+@dataclass(frozen=True)
+class PriorPublication:
+    publication_id: int
+    pins: dict[str, PinnedRun]
+
+
 class PublicationInProgressError(PublicationError):
     """Another publisher holds the pointer lock; fail fast instead of queueing."""
 
@@ -149,10 +187,16 @@ def _quality_audit(
     batches: Mapping[str, int],
     rows: Mapping[str, list[dict[str, Any]]],
     thresholds: Mapping[str, QualityThreshold],
+    reused: frozenset[str] = frozenset(),
 ) -> tuple[dict[str, Any], list[str]]:
     audit: dict[str, Any] = {}
     failed: list[str] = []
     for source in m.SOURCES:
+        if source in reused:
+            # Already passed when first published; comparing it against newer,
+            # unpublished batches would only produce spurious failures.
+            audit[source] = {"status": "reused", "batch_id": batches[source]}
+            continue
         candidate = runs[source]
         previous = (
             conn.execute(
@@ -213,6 +257,111 @@ def _time_ok(value: Any, now: datetime, max_age: timedelta) -> bool:
     )
 
 
+def _check_run(
+    conn: Connection, source: str, run_id: int, now: datetime, max_age: timedelta
+) -> tuple[RowMapping, list[dict[str, Any]], date | None]:
+    """Every per-source publication rule; shared by publishing and reuse planning."""
+    run = (
+        conn.execute(select(m.ingestion_runs).where(m.ingestion_runs.c.id == run_id))
+        .mappings()
+        .one_or_none()
+    )
+    if not run or run["source"] != source or run["status"] != "succeeded":
+        raise PublicationError("source run is not successful")
+    if run["collection_mode"] != "live":
+        raise PublicationError("production requires live collection mode")
+    if not _time_ok(run["collected_at"], now, max_age):
+        raise PublicationError("source collection is stale or future-dated")
+    if not run["coverage"] or run["coverage"].get("complete") is not True:
+        raise PublicationError("source coverage is incomplete or unknown")
+    batch = (
+        conn.execute(
+            select(m.source_batches).where(m.source_batches.c.id == run["batch_id"])
+        )
+        .mappings()
+        .one()
+    )
+    day = batch["source_as_of"]
+    if day and day > now.date():
+        raise PublicationError("source observation is future-dated")
+    if source == "ark_holdings" and (
+        day is None or day < (now - timedelta(days=7)).date()
+    ):
+        raise PublicationError("ARK observation date is stale or unknown")
+    rows = batch_rows(conn, source, run["batch_id"])
+    if source == "short_interest" and any(
+        r["settlement_date"] > now.date()
+        or r["settlement_date"] < (now - timedelta(days=45)).date()
+        for r in rows
+    ):
+        raise PublicationError("short-interest observation is stale or future-dated")
+    return run, rows, day
+
+
+def _prior_pins(conn: Connection) -> tuple[int | None, dict[str, Any]]:
+    prior = conn.execute(
+        select(m.current_publication.c.publication_id).where(
+            m.current_publication.c.channel == "production"
+        )
+    ).scalar_one_or_none()
+    if prior is None:
+        return None, {}
+    pins = {
+        row.source: row
+        for row in conn.execute(
+            select(
+                m.publication_sources.c.source,
+                m.publication_sources.c.run_id,
+                m.publication_sources.c.batch_id,
+                m.ingestion_runs.c.collected_at,
+            )
+            .join(
+                m.ingestion_runs,
+                m.ingestion_runs.c.id == m.publication_sources.c.run_id,
+            )
+            .where(m.publication_sources.c.publication_id == prior)
+        )
+    }
+    return prior, pins
+
+
+def prior_publication(
+    engine: Engine,
+    now: datetime,
+    max_age: Mapping[str, timedelta],
+    reuse_limits: Mapping[str, timedelta],
+) -> PriorPublication | None:
+    """The current production publication's pins, marking which may be reused.
+
+    A pin is reusable while it passes every publication rule and was collected
+    within its source's max_reuse_age. Nothing else is ever reused.
+    """
+    with engine.connect() as conn:
+        prior, pins = _prior_pins(conn)
+        if prior is None:
+            return None
+        result = {}
+        for source, pin in pins.items():
+            try:
+                _check_run(conn, source, pin.run_id, now, max_age[source])
+                reusable = now - pin.collected_at <= reuse_limits[source]
+            except PublicationError:
+                reusable = False
+            deps = dict(
+                conn.execute(
+                    select(
+                        m.run_dependencies.c.source, m.run_dependencies.c.batch_id
+                    ).where(m.run_dependencies.c.run_id == pin.run_id)
+                )
+                .tuples()
+                .all()
+            )
+            result[source] = PinnedRun(
+                pin.run_id, pin.batch_id, pin.collected_at, deps, reusable
+            )
+        return PriorPublication(prior, result)
+
+
 def _selected(
     conn: Connection,
     run_ids: Mapping[str, int],
@@ -231,46 +380,12 @@ def _selected(
     rows: dict[str, list[dict[str, Any]]] = {}
     as_of: dict[str, str | None] = {}
     for source in m.SOURCES:
-        run = (
-            conn.execute(
-                select(m.ingestion_runs).where(m.ingestion_runs.c.id == run_ids[source])
-            )
-            .mappings()
-            .one_or_none()
+        run, source_rows, day = _check_run(
+            conn, source, run_ids[source], now, max_age[source]
         )
-        if not run or run["source"] != source or run["status"] != "succeeded":
-            raise PublicationError("source run is not successful")
-        if run["collection_mode"] != "live":
-            raise PublicationError("production requires live collection mode")
-        if not _time_ok(run["collected_at"], now, max_age[source]):
-            raise PublicationError("source collection is stale or future-dated")
-        if not run["coverage"] or run["coverage"].get("complete") is not True:
-            raise PublicationError("source coverage is incomplete or unknown")
-        batch = (
-            conn.execute(
-                select(m.source_batches).where(m.source_batches.c.id == run["batch_id"])
-            )
-            .mappings()
-            .one()
-        )
-        day = batch["source_as_of"]
-        if day and day > now.date():
-            raise PublicationError("source observation is future-dated")
-        if source == "ark_holdings" and (
-            day is None or day < (now - timedelta(days=7)).date()
-        ):
-            raise PublicationError("ARK observation date is stale or unknown")
         runs[source], batches[source] = run, run["batch_id"]
-        rows[source] = batch_rows(conn, source, run["batch_id"])
+        rows[source] = source_rows
         as_of[source] = day.isoformat() if day else None
-        if source == "short_interest" and any(
-            r["settlement_date"] > now.date()
-            or r["settlement_date"] < (now - timedelta(days=45)).date()
-            for r in rows[source]
-        ):
-            raise PublicationError(
-                "short-interest observation is stale or future-dated"
-            )
     expected = {s: batches[s] for s in ("congress_trades", "ark_holdings")}
     for source in ("insider_trades", "short_interest"):
         deps = (
@@ -339,6 +454,56 @@ def _caps(
     return normalized
 
 
+def _validate_reuse(
+    conn: Connection,
+    reuse: Mapping[str, Reuse],
+    runs: Mapping[str, RowMapping],
+    now: datetime,
+    max_age: Mapping[str, timedelta],
+    reuse_limits: Mapping[str, timedelta],
+) -> dict[str, Any] | None:
+    """Re-check reuse under the publication lock; return the degraded event body."""
+    if not reuse:
+        return None
+    prior, pins = _prior_pins(conn)
+    reused: dict[str, Any] = {}
+    for source, why in sorted(reuse.items()):
+        pin = pins.get(source)
+        run = runs[source]
+        if pin is None or pin.run_id != run["id"]:
+            raise PublicationReuseError(
+                "reused run is not pinned by the current publication"
+            )
+        age = now - run["collected_at"]
+        if age > reuse_limits[source]:
+            raise PublicationReuseError("reused run is older than its reuse limit")
+        reused[source] = {
+            "run_id": run["id"],
+            "batch_id": run["batch_id"],
+            "from_publication_id": prior,
+            "collected_at": run["collected_at"].isoformat(),
+            "age_seconds": int(age.total_seconds()),
+            "failed_run_id": why.failed_run_id,
+            "failure_code": None
+            if why.failure_code is None
+            else safe_code(why.failure_code),
+            "unpublished_run_id": why.unpublished_run_id,
+        }
+    return {
+        "reused": reused,
+        "cohort": sorted(s for s, why in reuse.items() if why.cohort),
+        "all_sources_reused": set(reuse) == set(m.SOURCES),
+        "policy": {
+            s: {
+                "required": True,
+                "max_reuse_age_seconds": int(reuse_limits[s].total_seconds()),
+                "max_age_seconds": int(max_age[s].total_seconds()),
+            }
+            for s in m.SOURCES
+        },
+    }
+
+
 def publish(
     engine: Engine,
     run_ids: Mapping[str, int],
@@ -349,13 +514,26 @@ def publish(
     override_reason: str | None = None,
     override_actor: str | None = None,
     override_checks: Sequence[str] | None = None,
+    reuse: Mapping[str, Reuse] | None = None,
+    reuse_limits: Mapping[str, timedelta] | None = None,
 ) -> int:
     """Publish and promote; an override skips only the named failed checks.
 
     override_checks are "source:check" names exactly as a refused publish
     reported them. Every failure must be named, every name must have failed,
     and no override relaxes the observation-date regression guard.
+
+    reuse names sources whose run_ids are the current publication's pins
+    (degraded publishing, roadmap M2). Each is re-validated under the lock
+    against reuse_limits and recorded in one `degraded` event.
     """
+    reuse = dict(reuse or {})
+    if reuse_limits is None:
+        reuse_limits = {
+            s: p.max_reuse_age for s, p in _source_policy_defaults().items()
+        }
+    if set(reuse) - set(m.SOURCES) or set(reuse_limits) != set(m.SOURCES):
+        raise ValueError("reuse must name known sources with limits for every source")
     max_age = dict(MAX_AGE if max_age is None else max_age)
     if set(max_age) != set(m.SOURCES) or any(
         v.total_seconds() <= 0 for v in max_age.values()
@@ -387,8 +565,9 @@ def publish(
         ).scalar_one():
             raise PublicationInProgressError()
         runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age)
+        degraded = _validate_reuse(conn, reuse, runs, now, max_age, reuse_limits)
         source_audit, failed_checks = _quality_audit(
-            conn, runs, batches, rows, quality_thresholds
+            conn, runs, batches, rows, quality_thresholds, frozenset(reuse)
         )
         if override_reason is None:
             if failed_checks:
@@ -470,6 +649,15 @@ def publish(
                 created_at=now,
             )
         )
+        if degraded is not None:
+            conn.execute(
+                insert(m.publication_events).values(
+                    publication_id=pub_id,
+                    kind="degraded",
+                    checks=degraded,
+                    created_at=now,
+                )
+            )
         conn.execute(
             insert(m.publication_sources),
             [
