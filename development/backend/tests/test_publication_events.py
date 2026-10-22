@@ -68,6 +68,7 @@ def test_ranking_config_holds_ranking_inputs_only(engine, fixture_path):
         "market_cap_threshold",
         "source_as_of",
         "freshness_seconds",
+        "congress_window_years",  # ranking input: the D13 window over history
     }
     [event] = events(engine, pub)
     assert event["kind"] == "quality_passed"

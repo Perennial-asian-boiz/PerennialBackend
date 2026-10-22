@@ -17,6 +17,7 @@ from src.db import models as m
 from src.db.queries import batch_rows, latest_successful_run
 from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
+from src.pipeline import congress_history
 from src.pipeline.lifecycle import (
     abandon_stale_runs,
     begin_run,
@@ -232,6 +233,18 @@ def collect_source(
                         source, "live", code, diagnostics=exception_diagnostics(exc)
                     )
             result = import_collection(engine, outcome, run_id=run_id)
+        if source == "congress_trades" and result.succeeded:
+            # Fold every live page into history now: an unpublished (evening)
+            # run's rows would otherwise scroll off the free page unseen.
+            with engine.begin() as conn:
+                derived = congress_history.derive(conn, result.run_id)
+            logger.info(
+                "congress history run_id=%s added=%s possible_gaps=%s gap_days=%s",
+                result.run_id,
+                derived["history_added"],
+                derived["possible_gaps"],
+                derived["gap_days"],
+            )
         logger.info(
             "collection source=%s run_id=%s status=%s code=%s",
             source,
@@ -517,8 +530,13 @@ def _run_pipeline(
     cap_cache: dict[tuple[str, ...], tuple[Mapping[str, dict[str, Any]], bool]] = {}
 
     def publish_selection(selection: Selection) -> int:
-        with engine.connect() as conn:
+        # Candidates must match what publish() ranks: accumulated Congress history.
+        with engine.begin() as conn:
             rows = {s: batch_rows(conn, s, b) for s, b in selection.batches.items()}
+            congress_history.derive(conn, selection.runs["congress_trades"])
+            rows["congress_trades"] = congress_history.ranking_rows(
+                conn, congress_history.watermark(conn), datetime.now(timezone.utc)
+            )
         symbols = tuple(candidate_symbols(rows))
         if symbols not in cap_cache:  # a Q7 retry must not call FMP again
             cap_cache[symbols] = market_caps_or_fallback(

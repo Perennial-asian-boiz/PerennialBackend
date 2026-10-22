@@ -151,7 +151,7 @@ def raw_records(trades):
 
 
 @pytest.mark.db
-def test_v1_publication_replays_baseline_output_and_new_publication_is_v2(engine, fixture_path):
+def test_v1_publication_replays_baseline_output_and_new_publication_is_v3(engine, fixture_path):
     """A stored historical v1 graph replays its independent baseline golden output."""
     expected = json.loads(fixture_path('ranking_v1_golden.json').read_text())
     runs, batches = ranking_inputs(engine, raw_records(golden_trades()))
@@ -172,7 +172,7 @@ def test_v1_publication_replays_baseline_output_and_new_publication_is_v2(engine
                             retrieved_at=datetime.now(timezone.utc)) for s in ('ZZAA', 'ZZBB')}
     new = publish(engine, runs, observations)
     saved = current(engine)
-    assert saved['ranking_version'] == saved['output']['ranking_version'] == 'watchlist-v2'
+    assert saved['ranking_version'] == saved['output']['ranking_version'] == 'watchlist-v3'
     assert replay(engine, new) == saved['output']
     assert canonical_json_bytes(replay(engine, old)) == canonical_json_bytes(expected)
     with engine.connect() as conn:

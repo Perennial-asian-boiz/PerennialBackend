@@ -19,6 +19,8 @@ IMMUTABLE = (
 MUTABLE = ("ingestion_runs", "current_publication")
 IMMUTABLE += ("gdelt_articles",)
 MUTABLE += ("gdelt_theme_days", "gdelt_spike_checks")
+# Congress history (free-plan accumulation): append-only like source batches.
+IMMUTABLE += ("congress_trade_history", "congress_history_gaps", "publication_history_watermarks")
 TABLES = (*IMMUTABLE, *MUTABLE, "securities")
 
 

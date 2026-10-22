@@ -185,14 +185,33 @@ def test_congress_exception_text_with_key_never_leaks(capsys):
     assert_clean(outcome, capsys)
 
 
-def test_congress_402_truncation_is_failure():
+def test_congress_free_plan_reads_only_page_zero():
+    calls = []
+
     def limited(url, params):
+        calls.append((url.rsplit("/", 1)[-1], params["page"], params["limit"]))
         if params["page"] >= 1:
             return FakeResponse(status=402, body={})
         return FakeResponse(body=[fmp_item() for _ in range(20)])
 
     outcome = collectors.collect_congress(
         congress_session(limited), api_key="k", sleep=NO_SLEEP
+    )
+    assert outcome.succeeded and len(outcome.records) == 40
+    assert calls == [("senate-latest", 0, 20), ("house-latest", 0, 20)]
+    assert outcome.diagnostics["senate_rows_served"] == 20
+    assert outcome.diagnostics["house_rows_served"] == 20
+    assert outcome.diagnostics["fmp_calls"] == 2
+
+
+def test_congress_402_truncation_is_failure_when_paging_deeper():
+    def limited(url, params):
+        if params["page"] >= 1:
+            return FakeResponse(status=402, body={})
+        return FakeResponse(body=[fmp_item() for _ in range(20)])
+
+    outcome = collectors.collect_congress(
+        congress_session(limited), api_key="k", sleep=NO_SLEEP, max_pages=2
     )
     assert outcome.error_code == "partial_collection"
 

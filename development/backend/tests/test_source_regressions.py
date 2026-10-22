@@ -134,9 +134,8 @@ def test_congress_parser_preserves_provider_identity():
 
 
 @pytest.mark.parametrize("ending", ["full", "short", "empty", "402"])
-def test_congress_pagination_completeness(ending, monkeypatch):
-    fmp = collectors._fetcher("fmp")
-    monkeypatch.setattr(fmp, "MAX_PAGES", 2)
+def test_congress_pagination_completeness(ending):
+    """Paid-tier paging (max_pages > 1): a full final page ends the chamber."""
 
     def handler(url, params):
         if not url.endswith("-latest"):
@@ -148,16 +147,14 @@ def test_congress_pagination_completeness(ending, monkeypatch):
         return FakeResponse(body=[fmp_item()] if ending == "short" else [])
 
     result = collectors.collect_congress(
-        FakeSession(handler), api_key="test", sleep=NO_SLEEP
+        FakeSession(handler), api_key="test", sleep=NO_SLEEP, max_pages=2
     )
-    assert result.succeeded == (ending in {"short", "empty"})
+    assert result.succeeded == (ending != "402")
     if result.succeeded:
         assert result.coverage == {"complete": True, "scope": "recent_window"}
     else:
         assert result.coverage is None
-        assert result.diagnostics["failures"][0]["code"] == (
-            "pagination_exhausted" if ending == "full" else "http_402"
-        )
+        assert result.diagnostics["failures"][0]["code"] == "http_402"
 
 
 def test_ark_complete_coverage():
