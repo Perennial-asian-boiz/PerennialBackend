@@ -52,6 +52,8 @@ def test_alembic_connection_failure_is_credential_free(no_env_file):
 def test_cli_import_fetch_and_latest(engine, db_url, no_env_file, monkeypatch, capsys, fixture_path):
     monkeypatch.setenv("DATABASE_URL", db_url.render_as_string(hide_password=False))
     path = str(fixture_path("short_interest.json"))
+    assert cli.main(["import-file", "ark_holdings", str(fixture_path("ark_holdings.json")), "--fixture"]) == 0
+    capsys.readouterr()  # ARK registers the universe short interest resolves against
 
     assert cli.main(["import-file", "short_interest", path]) == 1  # legacy file needs attestation
     assert json.loads(capsys.readouterr().out)["error_code"] == "collection_unattested"
