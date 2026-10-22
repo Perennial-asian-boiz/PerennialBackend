@@ -1,7 +1,7 @@
 """Machine-readable checks for a supervisor/monitor. No credentials or payloads."""
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
@@ -62,7 +62,9 @@ def health(
     *,
     settings: Settings | None = None,
     now: datetime | None = None,
+    modes: Sequence[str] = ("live",),
 ) -> dict[str, Any]:
+    """modes: which collection modes count as runs; only the demo widens it."""
     now = datetime.now(timezone.utc) if now is None else now
     holidays = settings.trading_holidays if settings is not None else TRADING_HOLIDAYS
     issues: list[str] = []
@@ -74,7 +76,7 @@ def health(
                     select(m.ingestion_runs)
                     .where(
                         m.ingestion_runs.c.source == source,
-                        m.ingestion_runs.c.collection_mode == "live",
+                        m.ingestion_runs.c.collection_mode.in_(modes),
                     )
                     .order_by(
                         m.ingestion_runs.c.started_at.desc(),
@@ -91,7 +93,7 @@ def health(
                     .where(
                         m.ingestion_runs.c.source == source,
                         m.ingestion_runs.c.status == "succeeded",
-                        m.ingestion_runs.c.collection_mode == "live",
+                        m.ingestion_runs.c.collection_mode.in_(modes),
                     )
                     .order_by(
                         m.ingestion_runs.c.collected_at.desc().nullslast(),

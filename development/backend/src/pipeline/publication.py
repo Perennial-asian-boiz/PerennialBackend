@@ -18,6 +18,11 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from src.db import models as m
 from src.db.queries import batch_rows
 from src.ingestion.diagnostics import safe_code
+from src.pipeline.demo_guard import (
+    DEMO_MODES,
+    LIVE_MODES,
+    check_demo_database,
+)
 from src.pipeline.ranking import DEFAULT_CONFIG, VERSION, calculate, candidate_symbols
 from src.settings import QualityThreshold, _quality_defaults, _source_policy_defaults
 
@@ -198,6 +203,7 @@ def _quality_audit(
     rows: Mapping[str, list[dict[str, Any]]],
     thresholds: Mapping[str, QualityThreshold],
     reused: frozenset[str] = frozenset(),
+    modes: Sequence[str] = LIVE_MODES,
 ) -> tuple[dict[str, Any], list[str]]:
     audit: dict[str, Any] = {}
     failed: list[str] = []
@@ -218,7 +224,7 @@ def _quality_audit(
                 .where(
                     m.ingestion_runs.c.source == source,
                     m.ingestion_runs.c.status == "succeeded",
-                    m.ingestion_runs.c.collection_mode == "live",
+                    m.ingestion_runs.c.collection_mode.in_(modes),
                     m.ingestion_runs.c.id != candidate["id"],
                     m.ingestion_runs.c.finished_at <= candidate["finished_at"],
                     m.source_batches.c.id != batches[source],
@@ -268,7 +274,12 @@ def _time_ok(value: Any, now: datetime, max_age: timedelta) -> bool:
 
 
 def _check_run(
-    conn: Connection, source: str, run_id: int, now: datetime, max_age: timedelta
+    conn: Connection,
+    source: str,
+    run_id: int,
+    now: datetime,
+    max_age: timedelta,
+    modes: Sequence[str] = LIVE_MODES,
 ) -> tuple[RowMapping, list[dict[str, Any]], date | None]:
     """Every per-source publication rule; shared by publishing and reuse planning."""
     run = (
@@ -278,7 +289,7 @@ def _check_run(
     )
     if not run or run["source"] != source or run["status"] != "succeeded":
         raise PublicationError("source run is not successful")
-    if run["collection_mode"] != "live":
+    if run["collection_mode"] not in modes:
         raise PublicationError("production requires live collection mode")
     if not _time_ok(run["collected_at"], now, max_age):
         raise PublicationError("source collection is stale or future-dated")
@@ -340,6 +351,7 @@ def prior_publication(
     now: datetime,
     max_age: Mapping[str, timedelta],
     reuse_limits: Mapping[str, timedelta],
+    modes: Sequence[str] = LIVE_MODES,
 ) -> PriorPublication | None:
     """The current production publication's pins, marking which may be reused.
 
@@ -353,7 +365,7 @@ def prior_publication(
         result = {}
         for source, pin in pins.items():
             try:
-                _check_run(conn, source, pin.run_id, now, max_age[source])
+                _check_run(conn, source, pin.run_id, now, max_age[source], modes)
                 reusable = now - pin.collected_at <= reuse_limits[source]
             except PublicationError:
                 reusable = False
@@ -377,6 +389,7 @@ def _selected(
     run_ids: Mapping[str, int],
     now: datetime,
     max_age: Mapping[str, timedelta],
+    modes: Sequence[str] = LIVE_MODES,
 ) -> tuple[
     dict[str, RowMapping],
     dict[str, int],
@@ -391,7 +404,7 @@ def _selected(
     as_of: dict[str, str | None] = {}
     for source in m.SOURCES:
         run, source_rows, day = _check_run(
-            conn, source, run_ids[source], now, max_age[source]
+            conn, source, run_ids[source], now, max_age[source], modes
         )
         runs[source], batches[source] = run, run["batch_id"]
         rows[source] = source_rows
@@ -544,6 +557,7 @@ def publish(
     reuse: Mapping[str, Reuse] | None = None,
     reuse_limits: Mapping[str, timedelta] | None = None,
     market_cap_fallback: timedelta | None = None,
+    demo: bool = False,
 ) -> int:
     """Publish and promote; an override skips only the named failed checks.
 
@@ -595,10 +609,14 @@ def publish(
             text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": PUBLICATION_LOCK}
         ).scalar_one():
             raise PublicationInProgressError()
-        runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age)
+        if demo:
+            # Only the marked local demo database may pin fixture-mode runs.
+            check_demo_database(conn)
+        modes = DEMO_MODES if demo else LIVE_MODES
+        runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age, modes)
         degraded = _validate_reuse(conn, reuse, runs, now, max_age, reuse_limits)
         source_audit, failed_checks = _quality_audit(
-            conn, runs, batches, rows, quality_thresholds, frozenset(reuse)
+            conn, runs, batches, rows, quality_thresholds, frozenset(reuse), modes
         )
         if override_reason is None:
             if failed_checks:
@@ -654,6 +672,7 @@ def publish(
             "freshness_seconds": {
                 s: int(age.total_seconds()) for s, age in max_age.items()
             },
+            **({"demo": True} if demo else {}),
         }
         output = calculate(
             rows, {s: o["value"] for s, o in cap_data.items()}, now, config
