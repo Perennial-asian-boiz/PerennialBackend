@@ -201,7 +201,7 @@ def _quality_audit(
 ) -> tuple[dict[str, Any], list[str]]:
     audit: dict[str, Any] = {}
     failed: list[str] = []
-    for source in m.SOURCES:
+    for source in m.WATCHLIST_SOURCES:
         if source in reused:
             # Already passed when first published; comparing it against newer,
             # unpublished batches would only produce spurious failures.
@@ -383,13 +383,13 @@ def _selected(
     dict[str, list[dict[str, Any]]],
     dict[str, str | None],
 ]:
-    if set(run_ids) != set(m.SOURCES):
+    if set(run_ids) != set(m.WATCHLIST_SOURCES):
         raise PublicationError("all source run IDs are required")
     runs: dict[str, RowMapping] = {}
     batches: dict[str, int] = {}
     rows: dict[str, list[dict[str, Any]]] = {}
     as_of: dict[str, str | None] = {}
-    for source in m.SOURCES:
+    for source in m.WATCHLIST_SOURCES:
         run, source_rows, day = _check_run(
             conn, source, run_ids[source], now, max_age[source]
         )
@@ -505,14 +505,14 @@ def _validate_reuse(
     return {
         "reused": reused,
         "cohort": sorted(s for s, why in reuse.items() if why.cohort),
-        "all_sources_reused": set(reuse) == set(m.SOURCES),
+        "all_sources_reused": set(reuse) == set(m.WATCHLIST_SOURCES),
         "policy": {
             s: {
                 "required": True,
                 "max_reuse_age_seconds": int(reuse_limits[s].total_seconds()),
                 "max_age_seconds": int(max_age[s].total_seconds()),
             }
-            for s in m.SOURCES
+            for s in m.WATCHLIST_SOURCES
         },
     }
 
@@ -563,24 +563,24 @@ def publish(
         reuse_limits = {
             s: p.max_reuse_age for s, p in _source_policy_defaults().items()
         }
-    if set(reuse) - set(m.SOURCES) or set(reuse_limits) != set(m.SOURCES):
+    if set(reuse) - set(m.WATCHLIST_SOURCES) or set(reuse_limits) != set(m.WATCHLIST_SOURCES):
         raise ValueError("reuse must name known sources with limits for every source")
     max_age = dict(MAX_AGE if max_age is None else max_age)
-    if set(max_age) != set(m.SOURCES) or any(
+    if set(max_age) != set(m.WATCHLIST_SOURCES) or any(
         v.total_seconds() <= 0 for v in max_age.values()
     ):
         raise ValueError("freshness policy must cover every source with positive ages")
     quality_thresholds = (
         _quality_defaults() if quality_thresholds is None else quality_thresholds
     )
-    if set(quality_thresholds) != set(m.SOURCES):
+    if set(quality_thresholds) != set(m.WATCHLIST_SOURCES):
         raise ValueError("quality policy must cover every source")
     overridden: list[str] = []
     if override_reason is not None:
         override_reason = override_reason.strip()
         override_actor = (override_actor or "").strip()
         _check_override_text(override_actor, override_reason)
-        valid = {f"{s}:{c}" for s in m.SOURCES for c in QUALITY_CHECKS}
+        valid = {f"{s}:{c}" for s in m.WATCHLIST_SOURCES for c in QUALITY_CHECKS}
         if not override_checks or not set(override_checks) <= valid:
             raise ValueError("override must name one or more known source:check names")
         overridden = sorted(set(override_checks))
@@ -702,7 +702,7 @@ def publish(
                     run_id=run_ids[s],
                     batch_id=batches[s],
                 )
-                for s in m.SOURCES
+                for s in m.WATCHLIST_SOURCES
             ],
         )
         security_ids = dict(
