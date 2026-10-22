@@ -638,3 +638,33 @@ def test_market_cap_collector_bug_is_not_swallowed_by_the_fallback(engine, fixtu
 
     with pytest.raises(KeyError):
         run(engine, feed, market_cap_collector=broken)
+
+
+# ── Gate M2 test 1, end to end with the production collectors ──
+
+from test_pipeline_contract import (  # noqa: E402
+    StubResponse,
+    poisoned_files,  # noqa: F401  (pytest fixture)
+    provider,  # noqa: F401  (pytest fixture)
+    stub_market_caps,
+)
+
+
+@pytest.mark.db
+def test_real_collectors_ark_outage_publishes_degraded(engine, provider, poisoned_files):  # noqa: F811
+    baseline = run_pipeline(engine, market_cap_collector=stub_market_caps)
+    serve = provider.get
+
+    def ark_down(session, url, params=None, **kwargs):
+        if "arkfunds.io" in url:
+            return StubResponse({}, status=404)
+        return serve(session, url, params=params, **kwargs)
+
+    provider.get = ark_down
+    second = run_pipeline(engine, market_cap_collector=stub_market_caps)
+
+    assert pins(engine, second)["ark_holdings"] == pins(engine, baseline)["ark_holdings"]
+    entry = degraded(engine, second)["checks"]["reused"]["ark_holdings"]
+    assert entry["failure_code"] == "collection_failed" and entry["failed_run_id"]
+    assert poisoned_files == []
+    assert replay(engine, second) == current(engine)["output"]
