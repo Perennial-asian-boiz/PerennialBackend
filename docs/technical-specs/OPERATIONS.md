@@ -320,6 +320,67 @@ loss, or production RTO. The M3 logical exercise above must separately establish
 evidence; neither exercise establishes PITR. Synthetic archives may be deleted after their evidence is recorded;
 production backup retention is separately owned by the deployment.
 
+### Local scheduled backup job and timed archive restore
+
+`development/database/ops/backup.py` is one run of the scheduled job above,
+local-first: the same loopback/`test`-name guards and `--synthetic-only`
+attestation as the drill, `pg_dump`/`pg_restore` 17 and `openssl` (3.x) on PATH.
+
+```bash
+.venv/bin/python development/database/ops/backup.py --synthetic-only \
+  --recipient synthetic-cert.pem --spool /private/tmp/perennial-backup-spool \
+  --store /private/tmp/perennial-backup-store
+```
+
+It takes a repeatable-read snapshot under advisory lock 170097 (one backup at a
+time) and streams a custom-format `pg_dump` of that snapshot straight into
+OpenSSL CMS public-key encryption (AES-256-GCM). No plaintext dump is written,
+and the backup host holds only the recipient certificate; the private key is
+needed only to restore. The archive is uploaded, its stored SHA-256 is checked
+against the local one, and only then is its manifest written: name, snapshot
+time, completion time, schema revision, archive checksum and size, encryption,
+recipient certificate fingerprint, storage receipt, and per-table row counts and
+content hashes. No connection details or rows. A manifest exists only for a
+verified archive. Retention then keeps every snapshot from the last 24 hours, the
+newest of each of the last seven UTC days, and always the newest verified backup.
+It deletes a manifest before its archive, so an interruption leaves an orphan
+archive, never a manifest without one.
+
+The report is JSON on stdout with a fixed `status`/`error_code`. Exit 0 is `ok`;
+1 is a failure (`unsafe_source`, `recipient_unreadable`, `dump_failed`,
+`encrypt_failed`, `upload_failed`, `upload_verify_failed`, `retention_failed`,
+`backup_failed`); 3 is `skipped_overlap`, which must alert like a failure. A
+`pg_dump` that dies mid-stream fails the run even though encryption of the
+truncated stream succeeds. `snapshot_age_seconds` is completion minus snapshot
+time: it must stay under ten minutes for the five-minute schedule to meet RPO.
+
+`--store` is a stub: a local directory standing in for off-site storage until
+the Supabase project and an encrypted off-site target exist. A real uploader
+keeps `LocalStore`'s `put`/`get`/`names`/`delete` and returns the provider's
+checksum of the stored object. Production use also needs a connection mode
+without the loopback guard (a protected libpq service file, TLS verification),
+a scheduler, alerting on the exit status and newest manifest age, and Bryan's
+key custody. None of that exists yet.
+
+To restore the newest verified archive into a disposable database and time it:
+
+```bash
+.venv/bin/python development/database/ops/restore_drill.py --synthetic-only \
+  --from-store /private/tmp/perennial-backup-store --key synthetic-key.pem \
+  --output /private/tmp/perennial-archive-drill-unique
+```
+
+It fetches the archive and checks it against the manifest checksum, then
+decrypts it. Decryption authenticates the archive (a forged checksum still
+fails), and an archive that doesn't decrypt is never restored. If the key is
+encrypted, set `BACKUP_KEY_PASSPHRASE`. It restores in one transaction into a new
+random `perennial_test_restore_*` database, compares every table's count and hash
+with the manifest, and drops only that database. The report records
+`retrieve_seconds`, `decrypt_seconds`, `restore_and_verify_seconds`, `rto_seconds`
+from incident start (default: drill start) against `rto_target_seconds` 3600, and
+`rpo_seconds` against 900. A local synthetic timing is not the hosted RTO, which
+the Bryan-operated drill above must measure.
+
 ## Phase 0 quality gates
 
 The baseline is Python **3.12** (`.python-version` pins 3.12.13) and PostgreSQL
