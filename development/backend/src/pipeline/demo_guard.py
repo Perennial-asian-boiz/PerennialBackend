@@ -12,6 +12,7 @@ from sqlalchemy.engine import Connection
 
 DEMO_DATABASE = re.compile(r"perennial_demo(_[a-z0-9]+)?")
 DEMO_MARKER = "perennial-demo"  # COMMENT ON DATABASE, set only by the demo bootstrap
+LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 LIVE_MODES = ("live",)
 DEMO_MODES = ("live", "fixture")
 
@@ -26,13 +27,16 @@ class DemoGuardError(RuntimeError):
 
 
 def check_demo_database(conn: Connection) -> None:
-    name, address, comment = conn.execute(
+    """Client side: the URL host is loopback. Server side: the database's name
+    and the marker comment that only the demo bootstrap sets. (The server's own
+    address is not checked: a local container answers from a bridge address.)"""
+    if conn.engine.url.host not in LOOPBACK:
+        raise DemoGuardError()
+    name, comment = conn.execute(
         text(
-            "SELECT current_database(), host(inet_server_addr()), "
-            "shobj_description(d.oid, 'pg_database') "
+            "SELECT current_database(), shobj_description(d.oid, 'pg_database') "
             "FROM pg_database d WHERE d.datname = current_database()"
         )
     ).one()
-    local = address is None or address in ("127.0.0.1", "::1")
-    if not (DEMO_DATABASE.fullmatch(name) and local and comment == DEMO_MARKER):
+    if not (DEMO_DATABASE.fullmatch(name) and comment == DEMO_MARKER):
         raise DemoGuardError()
