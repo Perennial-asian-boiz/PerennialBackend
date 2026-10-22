@@ -75,9 +75,6 @@ UNIT_KINDS = frozenset(
     }
 )
 _COUNT_KEYS = (
-    "senate_rows_served",
-    "house_rows_served",
-    "fmp_calls",
     "senate_pages_fetched",
     "house_pages_fetched",
     "input_count",
@@ -87,6 +84,9 @@ _COUNT_KEYS = (
     "completed",
     "failed",
     "not_attempted",
+    "senate_rows_served",
+    "house_rows_served",
+    "fmp_calls",
 )
 
 _OWN_ERROR_TYPES = {"not_an_object", "duplicate_security", "conflicting_exchange"}
