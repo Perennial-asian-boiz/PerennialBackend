@@ -441,14 +441,14 @@ def test_insider_empty_or_failed_outcome_coverage(status, complete):
     )
 
 
-def test_short_interest_explicit_no_data_has_complete_coverage():
+def test_short_interest_explicit_no_data_fails_collection():
     result = collectors.collect_short_interest(
         FakeSession(lambda u, p: FakeResponse(body={"data": None})),
         sleep=NO_SLEEP,
         upstream=UPSTREAM,
     )
-    assert result.succeeded and result.records == []
-    assert result.coverage == {"complete": True, "scope": "selected_universe"}
+    assert not result.succeeded and result.error_code == "empty_short_interest"
+    assert result.coverage is None
 
 
 def test_congress_identity_survives_normalization_without_database_column():
