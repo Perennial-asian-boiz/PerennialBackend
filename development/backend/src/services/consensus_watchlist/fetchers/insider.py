@@ -60,21 +60,43 @@ OUTPUT:
     responses can never replace data a working run already collected.
 """
 
-import requests
 import json
+import logging
 import os
-import time
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from collections import Counter, defaultdict
-from dotenv import load_dotenv
+
 # ── shared path resolution (see paths.py) ──
 import sys as _sys
+import time
+from collections import Counter, defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from pathlib import Path as _Path
-_sys.path.insert(0, str(next(
-    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
-)))
-from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+
+import requests
+from dotenv import load_dotenv
+
+_sys.path.insert(
+    0,
+    str(
+        next(
+            p
+            for p in _Path(__file__).resolve().parents
+            if p.name == "consensus_watchlist"
+        )
+    ),
+)
+# Support direct script execution as well as package imports.
+_sys.path.insert(
+    0, str(next(p for p in _Path(__file__).resolve().parents if p.name == "backend"))
+)
+from paths import (  # noqa: F401 -- legacy module exports
+    ENV_PATH,
+    LOCAL_DATA_DIR,
+    local_data_dir,
+)
+from src.utils.logger import configure_logging, log_exception
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────
@@ -83,16 +105,16 @@ from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
 
 load_dotenv(dotenv_path=ENV_PATH)
 
-FINNHUB_API_KEY     = os.getenv("FINNHUB_API_KEY", "")
-FINNHUB_URL         = "https://finnhub.io/api/v1/stock/insider-transactions"
-SOURCE_NAME         = "Finnhub (SEC Form 4)"
-LOOKBACK_DAYS       = 180    # 6 months
-MIN_BUY_VALUE       = 10_000 # $10K minimum conviction filter
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+FINNHUB_URL = "https://finnhub.io/api/v1/stock/insider-transactions"
+SOURCE_NAME = "Finnhub (SEC Form 4)"
+LOOKBACK_DAYS = 180  # 6 months
+MIN_BUY_VALUE = 10_000  # $10K minimum conviction filter
 MAX_CONGRESS_TICKERS = 50
-REQUEST_DELAY       = 1.1    # seconds between API calls — free tier is 60/minute
-RATE_LIMIT_WAIT     = 10     # fallback wait after a 429 with no usable reset header
-MAX_RATE_LIMIT_WAIT = 65     # never wait longer than one 60-call window (+ slack)
-RATE_LIMIT_RETRIES  = 2      # retries after a 429 before the ticker is unknown
+REQUEST_DELAY = 1.1  # seconds between API calls — free tier is 60/minute
+RATE_LIMIT_WAIT = 10  # fallback wait after a 429 with no usable reset header
+MAX_RATE_LIMIT_WAIT = 65  # never wait longer than one 60-call window (+ slack)
+RATE_LIMIT_RETRIES = 2  # retries after a 429 before the ticker is unknown
 
 # Bloomberg-style US composite exchange suffixes ARK uses ("RKLB UQ").
 # Mirrors src/ingestion/schemas.US_EXCHANGE_SUFFIXES; a test keeps them equal.
@@ -104,9 +126,9 @@ PROVIDER_ALIASES = {"GOOG": "GOOGL"}
 
 # Collection outcomes. These travel in the output file, not just the console,
 # so consensus.py can tell "checked, no buys" from "never found out".
-STATUS_SUCCESS   = "success"    # provider answered, transactions parsed (may be empty)
-STATUS_FAILED    = "failed"     # request or parse did not complete — result unknown
-STATUS_PARTIAL   = "partial"    # run level only: some tickers failed
+STATUS_SUCCESS = "success"  # provider answered, transactions parsed (may be empty)
+STATUS_FAILED = "failed"  # request or parse did not complete — result unknown
+STATUS_PARTIAL = "partial"  # run level only: some tickers failed
 STATUS_UNSUPPORTED = "unsupported"  # no SEC Form 4 listing to ask about — not requested
 
 # A run that answered less than this fraction of its tickers is treated as
@@ -116,14 +138,14 @@ MAX_LISTED_FAILED_TICKERS = 25  # keep the output file readable on an outage
 
 # Why a request failed. A fixed vocabulary rather than exception class names,
 # so these stay stable and greppable as the code changes.
-ERR_RATE_LIMITED     = "rate_limited"      # 429 — provider throttled us
-ERR_TIMEOUT          = "timeout"           # no response within REQUEST_TIMEOUT
-ERR_CONNECTION       = "connection_error"  # DNS / refused / network down
-ERR_HTTP             = "http_error"        # other non-200
-ERR_BAD_RESPONSE     = "bad_response"      # answered 200, shape unusable
-ERR_REQUEST          = "request_error"     # anything unclassified
-ERR_CREDENTIAL       = "credential_error"  # FINNHUB_API_KEY missing or rejected (401)
-ERR_INPUT_MISSING    = "input_missing"     # upstream fetcher never ran
+ERR_RATE_LIMITED = "rate_limited"  # 429 — provider throttled us
+ERR_TIMEOUT = "timeout"  # no response within REQUEST_TIMEOUT
+ERR_CONNECTION = "connection_error"  # DNS / refused / network down
+ERR_HTTP = "http_error"  # other non-200
+ERR_BAD_RESPONSE = "bad_response"  # answered 200, shape unusable
+ERR_REQUEST = "request_error"  # anything unclassified
+ERR_CREDENTIAL = "credential_error"  # FINNHUB_API_KEY missing or rejected (401)
+ERR_INPUT_MISSING = "input_missing"  # upstream fetcher never ran
 ERR_INPUT_UNREADABLE = "input_unreadable"  # upstream output corrupt
 
 # What a dev should DO about each code — the field worth reading first:
@@ -133,14 +155,14 @@ ERR_INPUT_UNREADABLE = "input_unreadable"  # upstream output corrupt
 #   config    — our own setup is incomplete; fix development/backend/.env
 #   pipeline  — an earlier stage of our own pipeline produced no input
 ERROR_CATEGORY = {
-    ERR_RATE_LIMITED:     "transient",
-    ERR_TIMEOUT:          "transient",
-    ERR_CONNECTION:       "transient",
-    ERR_HTTP:             "provider",
-    ERR_BAD_RESPONSE:     "contract",
-    ERR_REQUEST:          "unknown",
-    ERR_CREDENTIAL:       "config",
-    ERR_INPUT_MISSING:    "pipeline",
+    ERR_RATE_LIMITED: "transient",
+    ERR_TIMEOUT: "transient",
+    ERR_CONNECTION: "transient",
+    ERR_HTTP: "provider",
+    ERR_BAD_RESPONSE: "contract",
+    ERR_REQUEST: "unknown",
+    ERR_CREDENTIAL: "config",
+    ERR_INPUT_MISSING: "pipeline",
     ERR_INPUT_UNREADABLE: "pipeline",
 }
 REQUEST_TIMEOUT = 15  # seconds
@@ -198,6 +220,7 @@ def lookback_cutoff():
 # LOAD — Bucket 1: Congress tickers from fmp.py
 # ─────────────────────────────────────────────────────────
 
+
 def load_congress_tickers():
     """
     Reads trades_congress.json produced by fmp.py.
@@ -207,33 +230,34 @@ def load_congress_tickers():
     input_file = LOCAL_DATA_DIR / "trades_congress.json"
 
     if not input_file.exists():
-        print("[insider] ❌ trades_congress.json not found — run fmp.py first")
+        logger.warning("trades_congress.json not found run fmp.py first")
         return [], ERR_INPUT_MISSING
 
     try:
         with open(input_file, "r") as f:
             data = json.load(f)
 
-        trades    = data.get("trades", [])
+        trades = data.get("trades", [])
         purchases = [
-            t["ticker"] for t in trades
-            if "purchase" in t.get("trade_type", "").lower()
-            and t.get("ticker")
+            t["ticker"]
+            for t in trades
+            if "purchase" in t.get("trade_type", "").lower() and t.get("ticker")
         ]
 
         ticker_counts = Counter(purchases).most_common(MAX_CONGRESS_TICKERS)
-        tickers       = [t for t, _ in ticker_counts]
-        print(f"[insider] Loaded {len(tickers)} Congress tickers (Bucket 1)")
+        tickers = [t for t, _ in ticker_counts]
+        logger.info("Loaded %s Congress tickers (Bucket 1)", len(tickers))
         return tickers, None
 
     except Exception as e:
-        print(f"[insider] ❌ Failed to load Congress tickers: {e}")
+        log_exception(logger, "insider_load_congress_tickers_failed", e)
         return [], ERR_INPUT_UNREADABLE
 
 
 # ─────────────────────────────────────────────────────────
 # LOAD — Bucket 2: ARK tickers from ark.py
 # ─────────────────────────────────────────────────────────
+
 
 def load_ark_tickers():
     """
@@ -245,7 +269,7 @@ def load_ark_tickers():
     input_file = LOCAL_DATA_DIR / "ark_holdings.json"
 
     if not input_file.exists():
-        print("[insider] ❌ ark_holdings.json not found — run ark.py first")
+        logger.warning("ark_holdings.json not found run ark.py first")
         return [], ERR_INPUT_MISSING
 
     try:
@@ -255,23 +279,27 @@ def load_ark_tickers():
         holdings = data.get("holdings", [])
 
         # Sort: multi-fund first, then single fund
-        multi  = [h["ticker"] for h in holdings if h["fund_count"] > 1]
+        multi = [h["ticker"] for h in holdings if h["fund_count"] > 1]
         single = [h["ticker"] for h in holdings if h["fund_count"] == 1]
         tickers = multi + single
 
-        print(f"[insider] Loaded {len(tickers)} ARK tickers "
-              f"({len(multi)} multi-fund, {len(single)} single-fund) "
-              f"(Bucket 2)")
+        logger.info(
+            "Loaded %s ARK tickers ( %s multi-fund, %s single-fund) (Bucket 2)",
+            len(tickers),
+            len(multi),
+            len(single),
+        )
         return tickers, None
 
     except Exception as e:
-        print(f"[insider] ❌ Failed to load ARK tickers: {e}")
+        log_exception(logger, "insider_load_ark_tickers_failed", e)
         return [], ERR_INPUT_UNREADABLE
 
 
 # ─────────────────────────────────────────────────────────
 # FETCH — Insider activity for one ticker
 # ─────────────────────────────────────────────────────────
+
 
 def fetch_insider_activity(ticker: str):
     """
@@ -283,9 +311,14 @@ def fetch_insider_activity(ticker: str):
     so there is no separate "not on provider" outcome — that case reads as
     a ticker with no transactions.
     """
+
     def failure(code, detail):
-        return {"status": STATUS_FAILED, "data": None,
-                "error_code": code, "error_detail": detail}
+        return {
+            "status": STATUS_FAILED,
+            "data": None,
+            "error_code": code,
+            "error_detail": detail,
+        }
 
     if not has_api_key():
         return failure(ERR_CREDENTIAL, "FINNHUB_API_KEY is not set in .env")
@@ -297,11 +330,11 @@ def fetch_insider_activity(ticker: str):
             FINNHUB_URL,
             params={
                 "symbol": provider_symbol(ticker) or ticker,
-                "from":   lookback_cutoff().isoformat(),
-                "to":     datetime.now(timezone.utc).date().isoformat(),
+                "from": lookback_cutoff().isoformat(),
+                "to": datetime.now(timezone.utc).date().isoformat(),
             },
             headers={"X-Finnhub-Token": FINNHUB_API_KEY},
-            timeout=REQUEST_TIMEOUT
+            timeout=REQUEST_TIMEOUT,
         )
 
     try:
@@ -311,14 +344,20 @@ def fetch_insider_activity(ticker: str):
             if resp.status_code != 429:
                 break
             wait = rate_limit_wait(resp)
-            print(f"[insider] ⚠️  {ticker} rate limited — waiting {wait:.0f}s "
-                  f"(retry {attempt}/{RATE_LIMIT_RETRIES})")
+            logger.warning(
+                "insider_rate_limited wait_seconds=%s attempt=%d max_attempts=%d",
+                wait,
+                attempt,
+                RATE_LIMIT_RETRIES,
+            )
             time.sleep(wait)
             resp = request()
 
         if resp.status_code == 429:
-            return failure(ERR_RATE_LIMITED,
-                           f"HTTP 429 from provider, after {RATE_LIMIT_RETRIES} retries")
+            return failure(
+                ERR_RATE_LIMITED,
+                f"HTTP 429 from provider, after {RATE_LIMIT_RETRIES} retries",
+            )
         if resp.status_code == 401:
             return failure(ERR_CREDENTIAL, "HTTP 401 — FINNHUB_API_KEY rejected")
         if resp.status_code != 200:
@@ -329,11 +368,16 @@ def fetch_insider_activity(ticker: str):
         except Exception as e:
             # Answered 200 but the body is not JSON — provider-side change or
             # an error page. Not retryable; needs a look.
-            return failure(ERR_BAD_RESPONSE,
-                           f"200 but body is not JSON ({type(e).__name__})")
+            return failure(
+                ERR_BAD_RESPONSE, f"200 but body is not JSON ({type(e).__name__})"
+            )
 
-        return {"status": STATUS_SUCCESS, "data": payload,
-                "error_code": None, "error_detail": None}
+        return {
+            "status": STATUS_SUCCESS,
+            "data": payload,
+            "error_code": None,
+            "error_detail": None,
+        }
 
     except requests.exceptions.Timeout:
         return failure(ERR_TIMEOUT, f"no response in {REQUEST_TIMEOUT}s")
@@ -346,6 +390,7 @@ def fetch_insider_activity(ticker: str):
 # ─────────────────────────────────────────────────────────
 # PARSE — Extract meaningful insider buys
 # ─────────────────────────────────────────────────────────
+
 
 def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
     """
@@ -375,7 +420,7 @@ def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
     if not isinstance(raw, dict) or not isinstance(raw.get("data"), list):
         return [], ERR_BAD_RESPONSE, "response has no `data` list"
 
-    buys   = []
+    buys = []
     cutoff = lookback_cutoff()
 
     try:
@@ -392,21 +437,23 @@ def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
 
             # Must be real money — a missing price makes the value 0
             shares = txn.get("change") or 0
-            value  = round(shares * (txn.get("transactionPrice") or 0), 2)
+            value = round(shares * (txn.get("transactionPrice") or 0), 2)
             if value < MIN_BUY_VALUE:
                 continue
 
-            buys.append({
-                "ticker":           ticker,
-                "insider_name":     (txn.get("name") or "").strip(),
-                "transaction_type": "Purchase",
-                "value":            value,
-                "shares":           shares,
-                "transaction_date": date_str,
-                "bucket":           bucket,
-                "data_source":      "finnhub",
-                "fetched_at":       datetime.now(timezone.utc).isoformat(),
-            })
+            buys.append(
+                {
+                    "ticker": ticker,
+                    "insider_name": (txn.get("name") or "").strip(),
+                    "transaction_type": "Purchase",
+                    "value": value,
+                    "shares": shares,
+                    "transaction_date": date_str,
+                    "bucket": bucket,
+                    "data_source": "finnhub",
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
     except Exception as e:
         return [], ERR_BAD_RESPONSE, f"{type(e).__name__}: {e}"[:200]
@@ -418,47 +465,49 @@ def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
 # SCAN — Check a list of tickers for insider buys
 # ─────────────────────────────────────────────────────────
 
+
 def scan_tickers(tickers: list, bucket: str, label: str):
     """
     Loops through tickers checking each for insider buying.
     Returns (all_buys, outcomes) where outcomes carries one status record
     per ticker so a coverage gap is never mistaken for an absence of buying.
     """
-    all_buys  = []
-    outcomes  = []
-    found     = 0
-    no_buys   = 0
-    failed    = 0
+    all_buys = []
+    outcomes = []
+    found = 0
+    no_buys = 0
+    failed = 0
     unsupported = 0
     credential_failure = None  # set once the key turns out missing or rejected
 
-    print(f"\n[insider] {label}")
-    print(f"[insider] Checking {len(tickers)} tickers...")
-    print(f"[insider] Est. time: ~{len(tickers) * REQUEST_DELAY:.0f}s\n")
+    logger.info("insider_scan_started")
+    logger.info("insider_scan_planned count=%d", len(tickers))
+    logger.info("insider_scan_rate_limited")
 
     for i, ticker in enumerate(tickers, 1):
         if provider_symbol(ticker) is None:
             unsupported += 1
-            print(f"  ➖ {ticker:<8} not a US Form 4 listing — skipped "
-                  f"[{i}/{len(tickers)}]")
-            outcomes.append({
-                "ticker":       ticker,
-                "bucket":       bucket,
-                "status":       STATUS_UNSUPPORTED,
-                "buy_count":    0,
-                "error_code":   None,
-                "error_detail": None,
-                "checked_at":   datetime.now(timezone.utc).isoformat(),
-            })
+            logger.info("insider_unsupported completed=%d planned=%d", i, len(tickers))
+            outcomes.append(
+                {
+                    "ticker": ticker,
+                    "bucket": bucket,
+                    "status": STATUS_UNSUPPORTED,
+                    "buy_count": 0,
+                    "error_code": None,
+                    "error_detail": None,
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             continue
 
         # A missing or rejected key fails every request the same way, so
         # stop calling the provider and mark the remaining tickers unknown.
         result = credential_failure or fetch_insider_activity(ticker)
         status = result["status"]
-        code   = result["error_code"]
+        code = result["error_code"]
         detail = result["error_detail"]
-        buys   = []
+        buys = []
 
         if status == STATUS_SUCCESS:
             buys, parse_code, parse_detail = parse_finnhub_buys(
@@ -471,35 +520,47 @@ def scan_tickers(tickers: list, bucket: str, label: str):
             failed += 1
             # One line is enough for a credential problem — the rest are identical.
             if not credential_failure:
-                print(f"  ⚠️  {ticker:<8} UNKNOWN — {code} "
-                      f"[{ERROR_CATEGORY.get(code, 'unknown')}]: {detail} "
-                      f"[{i}/{len(tickers)}]")
+                logger.warning(
+                    "insider_request_failed completed=%d planned=%d", i, len(tickers)
+                )
             if code == ERR_CREDENTIAL:
                 credential_failure = result
         elif buys:
             all_buys.extend(buys)
             found += 1
             total = sum(b["value"] for b in buys)
-            print(f"  ✅ {ticker:<8} {len(buys)} buy(s) | "
-                  f"${total:,.0f} total [{i}/{len(tickers)}]")
+            logger.info(
+                "insider_buys_found count=%d value=%s completed=%d planned=%d",
+                len(buys),
+                total,
+                i,
+                len(tickers),
+            )
         else:
             no_buys += 1
 
-        outcomes.append({
-            "ticker":       ticker,
-            "bucket":       bucket,
-            "status":       status,
-            "buy_count":    len(buys),
-            "error_code":   code,
-            "error_detail": detail,
-            "checked_at":   datetime.now(timezone.utc).isoformat(),
-        })
+        outcomes.append(
+            {
+                "ticker": ticker,
+                "bucket": bucket,
+                "status": status,
+                "buy_count": len(buys),
+                "error_code": code,
+                "error_detail": detail,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
         if not credential_failure:
             time.sleep(REQUEST_DELAY)
 
-    print(f"\n[insider] Done — {found} with buys, {no_buys} checked with none, "
-          f"{failed} unknown (failed), {unsupported} skipped (not US listings)")
+    logger.warning(
+        "Done %s with buys, %s checked with none, %s unknown (failed), %s skipped (not US listings)",
+        found,
+        no_buys,
+        failed,
+        unsupported,
+    )
     return all_buys, outcomes
 
 
@@ -507,43 +568,44 @@ def scan_tickers(tickers: list, bucket: str, label: str):
 # ANALYZE
 # ─────────────────────────────────────────────────────────
 
+
 def analyze_insider_buys(all_buys: list):
     """
     Groups buys by ticker and calculates signal metrics.
     Multiple insiders buying same stock = cluster buy signal.
     """
-    ticker_summary = defaultdict(lambda: {
-        "ticker":            "",
-        "bucket":            "",
-        "insider_buy_count": 0,
-        "total_buy_value":   0,
-        "most_recent_buy":   "",
-        "insiders":          [],
-    })
+    ticker_summary = defaultdict(
+        lambda: {
+            "ticker": "",
+            "bucket": "",
+            "insider_buy_count": 0,
+            "total_buy_value": 0,
+            "most_recent_buy": "",
+            "insiders": [],
+        }
+    )
 
     for buy in all_buys:
         ticker = buy["ticker"]
-        s      = ticker_summary[ticker]
-        s["ticker"]            = ticker
-        s["bucket"]            = buy["bucket"]
+        s = ticker_summary[ticker]
+        s["ticker"] = ticker
+        s["bucket"] = buy["bucket"]
         s["insider_buy_count"] += 1
-        s["total_buy_value"]   += buy["value"]
+        s["total_buy_value"] += buy["value"]
         s["insiders"].append(buy["insider_name"])
 
-        if not s["most_recent_buy"] or \
-           buy["transaction_date"] > s["most_recent_buy"]:
+        if not s["most_recent_buy"] or buy["transaction_date"] > s["most_recent_buy"]:
             s["most_recent_buy"] = buy["transaction_date"]
 
     return sorted(
-        ticker_summary.values(),
-        key=lambda x: x["insider_buy_count"],
-        reverse=True
+        ticker_summary.values(), key=lambda x: x["insider_buy_count"], reverse=True
     )
 
 
 # ─────────────────────────────────────────────────────────
 # SAVE
 # ─────────────────────────────────────────────────────────
+
 
 def build_coverage(outcomes: list, inputs: dict):
     """
@@ -560,11 +622,11 @@ def build_coverage(outcomes: list, inputs: dict):
     as not evaluated instead of "no qualifying buys".
     """
     unsupported = [o["ticker"] for o in outcomes if o["status"] == STATUS_UNSUPPORTED]
-    outcomes   = [o for o in outcomes if o["status"] != STATUS_UNSUPPORTED]
-    checked    = len(outcomes)
-    failed     = sum(1 for o in outcomes if o["status"] == STATUS_FAILED)
-    succeeded  = sum(1 for o in outcomes if o["status"] == STATUS_SUCCESS)
-    with_buys  = sum(1 for o in outcomes if o["buy_count"] > 0)
+    outcomes = [o for o in outcomes if o["status"] != STATUS_UNSUPPORTED]
+    checked = len(outcomes)
+    failed = sum(1 for o in outcomes if o["status"] == STATUS_FAILED)
+    succeeded = sum(1 for o in outcomes if o["status"] == STATUS_SUCCESS)
+    with_buys = sum(1 for o in outcomes if o["buy_count"] > 0)
     bad_inputs = [name for name, i in inputs.items() if i.get("error_code")]
 
     success_rate = (succeeded / checked) if checked else 0.0
@@ -578,29 +640,29 @@ def build_coverage(outcomes: list, inputs: dict):
         run_status = STATUS_SUCCESS
 
     return {
-        "run_status":           run_status,
-        "success_rate":         round(success_rate, 3),
-        "tickers_checked":      checked,
-        "succeeded":            succeeded,
-        "with_buys":            with_buys,
-        "confirmed_no_buys":    succeeded - with_buys,
-        "failed":               failed,
+        "run_status": run_status,
+        "success_rate": round(success_rate, 3),
+        "tickers_checked": checked,
+        "succeeded": succeeded,
+        "with_buys": with_buys,
+        "confirmed_no_buys": succeeded - with_buys,
+        "failed": failed,
         # consensus.py evaluates every Congress purchase ticker, but we only
         # scan the top MAX_CONGRESS_TICKERS. Without this list it cannot tell
         # "scanned, no buys" from "never scanned".
-        "scanned_tickers":      [o["ticker"] for o in outcomes],
+        "scanned_tickers": [o["ticker"] for o in outcomes],
         # Of those, the ones whose result is unknown. A scanned ticker that is
         # absent from both this list and transactions genuinely had no
         # qualifying purchases.
-        "failed_tickers":       errors["failed_tickers"],
+        "failed_tickers": errors["failed_tickers"],
         # Tickers with no SEC Form 4 listing (e.g. Canadian "ETHQ/U"),
         # skipped without a request. Neither a buy nor a confirmed absence.
-        "unsupported_tickers":  unsupported,
+        "unsupported_tickers": unsupported,
         # Why those failed, grouped by cause, each with the category that
         # says what to do about it. This is the dev-facing diagnostic.
-        "errors_by_code":       errors["by_code"],
-        "inputs":               inputs,
-        "degraded_inputs":      bad_inputs,
+        "errors_by_code": errors["by_code"],
+        "inputs": inputs,
+        "degraded_inputs": bad_inputs,
     }
 
 
@@ -622,12 +684,15 @@ def summarize_errors(outcomes: list):
             continue
 
         code = o.get("error_code") or ERR_REQUEST
-        g = groups.setdefault(code, {
-            "category":      ERROR_CATEGORY.get(code, "unknown"),
-            "count":         0,
-            "tickers":       [],
-            "sample_detail": o.get("error_detail"),
-        })
+        g = groups.setdefault(
+            code,
+            {
+                "category": ERROR_CATEGORY.get(code, "unknown"),
+                "count": 0,
+                "tickers": [],
+                "sample_detail": o.get("error_detail"),
+            },
+        )
         g["count"] += 1
         g["tickers"].append(o["ticker"])
         tickers.append(o["ticker"])
@@ -650,14 +715,14 @@ def build_attempt(coverage: dict, outcomes: list, retained: bool):
         group["tickers"] = listed
 
     return {
-        "fetcher":                "insider.py",
-        "attempted_at":           datetime.now(timezone.utc).isoformat(),
-        "run_status":             coverage["run_status"],
-        "tickers_checked":        coverage["tickers_checked"],
-        "succeeded":              coverage["succeeded"],
-        "failed":                 coverage["failed"],
-        "degraded_inputs":        coverage["degraded_inputs"],
-        "errors":                 errors,
+        "fetcher": "insider.py",
+        "attempted_at": datetime.now(timezone.utc).isoformat(),
+        "run_status": coverage["run_status"],
+        "tickers_checked": coverage["tickers_checked"],
+        "succeeded": coverage["succeeded"],
+        "failed": coverage["failed"],
+        "degraded_inputs": coverage["degraded_inputs"],
+        "errors": errors,
         "retained_previous_data": retained,
     }
 
@@ -684,35 +749,37 @@ def retain_previous_data(filename, attempt: dict):
             with open(filename, "r") as f:
                 previous = json.load(f)
         except Exception as e:
-            print(f"[insider] ⚠️  Existing {Path(filename).name} is unreadable "
-                  f"({type(e).__name__}) — nothing to preserve")
+            log_exception(logger, "insider_retain_previous_data_failed", e)
 
     if previous is None:
         # No good data to protect. Write a data-less record so consensus.py
         # sees an explicit failure rather than a missing file.
         attempt["retained_previous_data"] = False
-        _write_json(filename, {
-            "source":        SOURCE_NAME,
-            "data_as_of":    None,
-            "coverage":      {"run_status": STATUS_FAILED, "tickers_checked": 0},
-            "last_attempt":  attempt,
-            "transactions":  [],
-        })
-        print(f"[insider] 💾 No prior data to keep — recorded failed attempt "
-              f"→ {filename}")
+        _write_json(
+            filename,
+            {
+                "source": SOURCE_NAME,
+                "data_as_of": None,
+                "coverage": {"run_status": STATUS_FAILED, "tickers_checked": 0},
+                "last_attempt": attempt,
+                "transactions": [],
+            },
+        )
+        logger.warning("No prior data to keep recorded failed attempt")
         return False
 
     previous["last_attempt"] = attempt
     _write_json(filename, previous)
-    print(f"[insider] 🛡️  Collection failed — kept existing data from "
-          f"{previous.get('data_as_of') or 'an earlier run'} "
-          f"({len(previous.get('transactions', []))} buys) and recorded the "
-          f"failed attempt")
+    logger.warning(
+        "Collection failed kept existing data from ( %s buys) and recorded the failed attempt",
+        len(previous.get("transactions", [])),
+    )
     return True
 
 
-def save_to_json(all_buys: list, summary: list, outcomes: list,
-                 inputs: dict, filename=None):
+def save_to_json(
+    all_buys: list, summary: list, outcomes: list, inputs: dict, filename=None
+):
     """
     Writes trades_insider.json — but only when this run actually collected
     something. On a failed run the previous file is preserved and the
@@ -721,7 +788,7 @@ def save_to_json(all_buys: list, summary: list, outcomes: list,
     if filename is None:
         output_dir = LOCAL_DATA_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
-        filename   = output_dir / "trades_insider.json"
+        filename = output_dir / "trades_insider.json"
 
     coverage = build_coverage(outcomes, inputs)
 
@@ -730,19 +797,19 @@ def save_to_json(all_buys: list, summary: list, outcomes: list,
         return
 
     popular = [s for s in summary if s["bucket"] == "popular_stable"]
-    growth  = [s for s in summary if s["bucket"] == "affordable_growing"]
+    growth = [s for s in summary if s["bucket"] == "affordable_growing"]
 
     now = datetime.now(timezone.utc).isoformat()
 
     output = {
-        "source":            SOURCE_NAME,
+        "source": SOURCE_NAME,
         # When the data IN this file was collected. Survives a later failed
         # run, unlike last_attempt.attempted_at.
-        "data_as_of":        now,
-        "fetched_at":        now,
-        "lookback_days":     LOOKBACK_DAYS,
-        "min_buy_value":     MIN_BUY_VALUE,
-        "total_buys":        len(all_buys),
+        "data_as_of": now,
+        "fetched_at": now,
+        "lookback_days": LOOKBACK_DAYS,
+        "min_buy_value": MIN_BUY_VALUE,
+        "total_buys": len(all_buys),
         "tickers_with_buys": len(summary),
         "note": (
             "insider.py is a SCORER not a gate. "
@@ -753,16 +820,14 @@ def save_to_json(all_buys: list, summary: list, outcomes: list,
             "as 'no insider buying': on 'partial' or 'failed' the "
             "absence may just mean we never got an answer."
         ),
-
-        "coverage":      coverage,
-        "last_attempt":  build_attempt(coverage, outcomes, retained=False),
-
+        "coverage": coverage,
+        "last_attempt": build_attempt(coverage, outcomes, retained=False),
         "popular_stable": {
-            "count":   len(popular),
+            "count": len(popular),
             "tickers": popular,
         },
         "affordable_growing": {
-            "count":   len(growth),
+            "count": len(growth),
             "tickers": growth,
         },
         "transactions": all_buys,
@@ -770,109 +835,56 @@ def save_to_json(all_buys: list, summary: list, outcomes: list,
 
     _write_json(filename, output)
 
-    print(f"[insider] 💾 Saved {len(all_buys)} insider buys "
-          f"(run_status={coverage['run_status']}) → {filename}")
+    logger.info("Saved %s insider buys (run_status=)", len(all_buys))
 
 
 # ─────────────────────────────────────────────────────────
 # PRINT
 # ─────────────────────────────────────────────────────────
 
+
 def print_summary(summary: list, all_buys: list, coverage: dict):
-    popular = [s for s in summary if s["bucket"] == "popular_stable"]
-    growth  = [s for s in summary if s["bucket"] == "affordable_growing"]
-
-    print("\n" + "="*60)
-    print("  PERENNIAL — Insider Buys Summary")
-    print("="*60)
-    print(f"  Run status             : {coverage['run_status'].upper()}")
-    print(f"  Tickers checked        : {coverage['tickers_checked']}")
-    print(f"  Confirmed no buys      : {coverage['confirmed_no_buys']}")
-    print(f"  Unknown (failed)       : {coverage['failed']}")
-    print(f"  Skipped (not US)       : {len(coverage['unsupported_tickers'])}")
-    print(f"  Total insider buys     : {len(all_buys)}")
-    print(f"  Popular & Stable hits  : {len(popular)}")
-    print(f"  Affordable & Growing   : {len(growth)}")
-    print(f"  Lookback window        : {LOOKBACK_DAYS} days")
-    print(f"  Min buy value          : ${MIN_BUY_VALUE:,}")
-
-    if coverage["degraded_inputs"]:
-        print(f"  ⚠️  Degraded inputs     : "
-              f"{', '.join(coverage['degraded_inputs'])}")
-
-    by_code = coverage.get("errors_by_code") or {}
-    if by_code:
-        print("\n  ❌ Why requests failed:")
-        print("  " + "-" * 40)
-        for code, g in sorted(by_code.items(), key=lambda kv: -kv[1]["count"]):
-            print(f"  {code:<18} {g['count']:>3}x  [{g['category']}]")
-            print(f"     e.g. {g['tickers'][0]}: {g['sample_detail']}")
-        if any(g["category"] == "contract" for g in by_code.values()):
-            print("\n     ⚠️  'contract' means Finnhub answered but the")
-            print("        response shape broke our parser — needs a code fix,")
-            print("        not a retry.")
-
-    if popular:
-        print("\n  📊 Popular & Stable — Congress + Insider overlap:")
-        print("  " + "-"*40)
-        for s in popular[:10]:
-            bar = "█" * min(s["insider_buy_count"], 10)
-            print(f"  {s['ticker']:<8} {bar:<12} "
-                  f"{s['insider_buy_count']} insider(s) | "
-                  f"${s['total_buy_value']:>12,.0f} | "
-                  f"last: {s['most_recent_buy']}")
-
-    if growth:
-        print("\n  🚀 Affordable & Growing — ARK + Insider signal:")
-        print("  " + "-"*40)
-        for s in growth[:10]:
-            bar = "█" * min(s["insider_buy_count"], 10)
-            print(f"  {s['ticker']:<8} {bar:<12} "
-                  f"{s['insider_buy_count']} insider(s) | "
-                  f"${s['total_buy_value']:>12,.0f} | "
-                  f"last: {s['most_recent_buy']}")
-
-    if not popular and not growth:
-        if coverage["run_status"] == STATUS_SUCCESS:
-            print("\n  ℹ️  No insider buys found — this is fine.")
-            print("     Every ticker returned an answer; none had")
-            print("     qualifying purchases. insider.py is a scorer,")
-            print("     not a gate. Congress + ARK tickers still enter")
-            print("     consensus.py. Zero buys = no bonus, not no output.")
-        else:
-            print("\n  ⚠️  No insider buys recorded, but this run did not")
-            print("     complete cleanly — do NOT read this as 'no insider")
-            print("     buying'. See coverage.run_status in the output file.")
+    logger.info(
+        "insider_summary checked=%d no_buys=%d failed=%d skipped=%d buys=%d signals=%d",
+        coverage["tickers_checked"],
+        coverage["confirmed_no_buys"],
+        coverage["failed"],
+        len(coverage["unsupported_tickers"]),
+        len(all_buys),
+        len(summary),
+    )
 
 
 # ─────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────
 
+
 def run():
-    print("[insider] Starting insider trades fetch...")
-    print("[insider] Reads from: trades_congress.json + ark_holdings.json")
-    print(f"[insider] Checks via: {SOURCE_NAME}\n")
+    logger.info("Starting insider trades fetch...")
+    logger.info("Reads from: trades_congress.json + ark_holdings.json")
+    logger.info("insider_provider_finnhub")
     if not has_api_key():
-        print("[insider] ❌ FINNHUB_API_KEY is not set in development/backend/.env "
-              "— no ticker can be checked\n")
+        logger.info(
+            "FINNHUB_API_KEY is not set in development/backend/.env no ticker can be checked"
+        )
 
     all_buys = []
     outcomes = []
-    inputs   = {}
+    inputs = {}
 
     # ── BUCKET 1: Congress tickers ───────────────────────
     congress_tickers, congress_error = load_congress_tickers()
     inputs["trades_congress.json"] = {
         "tickers_loaded": len(congress_tickers),
-        "error_code":     congress_error,
-        "category":       ERROR_CATEGORY.get(congress_error),
+        "error_code": congress_error,
+        "category": ERROR_CATEGORY.get(congress_error),
     }
     if congress_tickers:
         stable_buys, stable_outcomes = scan_tickers(
             congress_tickers,
             bucket="popular_stable",
-            label="BUCKET 1 — Popular & Stable"
+            label="BUCKET 1 — Popular & Stable",
         )
         all_buys.extend(stable_buys)
         outcomes.extend(stable_outcomes)
@@ -881,40 +893,42 @@ def run():
     ark_tickers, ark_error = load_ark_tickers()
     inputs["ark_holdings.json"] = {
         "tickers_loaded": len(ark_tickers),
-        "error_code":     ark_error,
-        "category":       ERROR_CATEGORY.get(ark_error),
+        "error_code": ark_error,
+        "category": ERROR_CATEGORY.get(ark_error),
     }
     if ark_tickers:
-        congress_set  = set(congress_tickers)
+        congress_set = set(congress_tickers)
         unique_growth = [t for t in ark_tickers if t not in congress_set]
-        print(f"[insider] {len(unique_growth)} unique ARK tickers "
-              f"(excluding {len(ark_tickers) - len(unique_growth)} "
-              f"already in Bucket 1)")
+        logger.info(
+            "%s unique ARK tickers (excluding %s already in Bucket 1)",
+            len(unique_growth),
+            len(ark_tickers) - len(unique_growth),
+        )
 
         growth_buys, growth_outcomes = scan_tickers(
             unique_growth,
             bucket="affordable_growing",
-            label="BUCKET 2 — Affordable & Growing"
+            label="BUCKET 2 — Affordable & Growing",
         )
         all_buys.extend(growth_buys)
         outcomes.extend(growth_outcomes)
 
     # ── Analyze + Print + Save ───────────────────────────
-    summary  = analyze_insider_buys(all_buys)
+    summary = analyze_insider_buys(all_buys)
     coverage = build_coverage(outcomes, inputs)
     print_summary(summary, all_buys, coverage)
     save_to_json(all_buys, summary, outcomes, inputs)
 
     if coverage["run_status"] == STATUS_FAILED:
-        print("[insider] ❌ Done, but nothing was established this run.")
+        logger.info("Done, but nothing was established this run.")
     elif coverage["run_status"] == STATUS_PARTIAL:
-        print(f"[insider] ⚠️  Done with gaps — {coverage['failed']} ticker(s) "
-              f"unknown.")
+        logger.warning("Done with gaps %s ticker(s) unknown.", coverage["failed"])
     else:
-        print("[insider] ✅ Done.")
+        logger.info("Done.")
 
     return all_buys
 
 
 if __name__ == "__main__":
+    configure_logging()
     run()
