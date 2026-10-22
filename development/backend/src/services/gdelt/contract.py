@@ -151,6 +151,10 @@ def collect_volume(
     failed = tracker.failed_outcome(VOLUME)
     if failed is not None:
         return failed
+    if theme_map.themes and not records:
+        # No theme has any volume in the whole window: a provider-side outage,
+        # not a quiet day (checker GD-2). Keep the last good batch.
+        return CollectionOutcome.failure(VOLUME, "live", "empty_gdelt_timeline")
     return CollectionOutcome.success(
         VOLUME,
         "live",

@@ -311,3 +311,15 @@ def test_missing_days_cover_the_whole_window(engine, reported_days, expect_missi
     assert envelope["missing_days_count"] == expect_missing
     assert all(day.startswith("ECON_OILPRICE:") for day in envelope["missing_days"])
     assert envelope["missing_days"][0] == f"ECON_OILPRICE:{DAY - timedelta(days=89)}"
+
+
+@pytest.mark.db
+def test_every_theme_empty_fails_instead_of_a_quiet_success(engine):
+    """GD-2: all-empty timelines are a provider outage; the last good batch stays."""
+    good = run_contract(engine, client(), THEMES, NOW)
+    empty = Client({"ECON_OILPRICE": {}, "ECON_INFLATION": {}})
+    run = run_contract(engine, empty, THEMES, NOW)
+    assert run.results["gdelt_theme_volume"].error_code == "empty_gdelt_timeline"
+    with engine.connect() as conn:
+        latest = latest_successful_run(conn, "gdelt_theme_volume")
+    assert latest.batch_id == good.results["gdelt_theme_volume"].batch_id
