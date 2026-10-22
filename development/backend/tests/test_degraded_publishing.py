@@ -53,6 +53,7 @@ class Feed:
         }
         self.fail: set[str] = set()
         self.calls: list[str] = []
+        self.as_of_override: dict = {}
 
     def change(self, source):
         """New content for a source, so its next batch gets a new batch id."""
@@ -66,6 +67,8 @@ class Feed:
         self.records[source] = rows
 
     def as_of(self, source):
+        if source in self.as_of_override:
+            return self.as_of_override[source]
         if source == "short_interest":
             return max(
                 datetime.fromisoformat(r["settlement_date"]).date()
@@ -376,17 +379,81 @@ def test_pointer_moving_after_selection_refuses_the_stale_reuse(engine, fixture_
 
 
 @pytest.mark.db
-def test_fresh_source_failing_quality_still_blocks_a_degraded_publication(
+def test_fresh_source_failing_quality_still_blocks_without_a_reusable_pin(
     engine, fixture_path
 ):
+    """Q7 needs a reusable pin; otherwise the original, overridable refusal stands."""
     feed = Feed(fixture_path)
-    run(engine, feed)
+    baseline = run(engine, feed)
+    age_run(engine, pins(engine, baseline)["insider_trades"][0], timedelta(days=4))
     feed.fail = {"ark_holdings"}
     feed.records["insider_trades"] = feed.records["insider_trades"][:1]
     with pytest.raises(PublicationError) as caught:
         run(engine, feed)
     assert caught.value.code == "publication_quality_failed"
     assert caught.value.checks == ("insider_trades:row_count",)
+    assert current(engine)["id"] == baseline
+
+
+# ── Gate M2 test 14: reuse when quality or the date guard refuses (Q7) ──
+
+
+@pytest.mark.db
+def test_batch_refused_by_quality_falls_back_to_its_pinned_batch(engine, fixture_path):
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    feed.records["insider_trades"] = feed.records["insider_trades"][:1]
+    cap_calls = []
+
+    def counting_caps(symbols):
+        cap_calls.append(tuple(symbols))
+        return market_caps(symbols)
+
+    feed.calls.clear()
+    second = run(engine, feed, market_cap_collector=counting_caps)
+    # The retry replays recorded attempts: no second collection or FMP pass.
+    assert sorted(feed.calls) == sorted(FILES) and len(cap_calls) == 1
+
+    assert pins(engine, second)["insider_trades"] == pins(engine, baseline)["insider_trades"]
+    entry = degraded(engine, second)["checks"]["reused"]["insider_trades"]
+    assert entry["failure_code"] == "publication_quality_failed"
+    with engine.connect() as conn:
+        refused_batch = conn.execute(
+            select(models.ingestion_runs.c.batch_id).where(
+                models.ingestion_runs.c.id == entry["failed_run_id"]
+            )
+        ).scalar_one()
+    assert refused_batch not in {b for _, b in pins(engine, second).values()}
+    assert replay(engine, second) == current(engine)["output"]
+
+
+@pytest.mark.db
+def test_batch_refused_by_the_date_guard_falls_back_without_relaxing_it(
+    engine, fixture_path
+):
+    from src.ingestion.importer import import_collection
+    from src.pipeline.lifecycle import begin_run
+
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    today = datetime.now(timezone.utc).date()
+    # An older unpublished ARK batch becomes the quality baseline, so today's
+    # batch passes quality but would still move the published date backwards.
+    older = Feed(fixture_path)
+    older.change("ark_holdings")
+    older.change("ark_holdings")
+    older.as_of_override["ark_holdings"] = today - timedelta(days=2)
+    run_id = begin_run(engine, "ark_holdings", "live")
+    assert import_collection(engine, older.collectors()["ark_holdings"](), run_id=run_id).succeeded
+    feed.change("ark_holdings")
+    feed.as_of_override["ark_holdings"] = today - timedelta(days=1)
+    second = run(engine, feed)
+
+    published = pins(engine, second)
+    assert published["ark_holdings"] == pins(engine, baseline)["ark_holdings"]
+    checks = degraded(engine, second)["checks"]
+    assert checks["reused"]["ark_holdings"]["failure_code"] == "observation_regressed"
+    assert current(engine)["ranking_config"]["source_as_of"]["ark_holdings"] == today.isoformat()
 
 
 # ── Gate M2 test 9: concurrency ──

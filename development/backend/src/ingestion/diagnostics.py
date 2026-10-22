@@ -40,6 +40,8 @@ ERROR_SUMMARIES = {
     "override_input_rejected": "override actor or reason is not safe to record",
     "required_source_unavailable": "a required source has neither a fresh nor a reusable batch",
     "reuse_not_current": "a reused run is no longer pinned by the current publication or is too old",
+    "observation_regressed": "a source's observation date would go backwards",
+    "lineage_mismatch": "a downstream run was planned from different upstream batches",
     "worker_abandoned": "Worker heartbeat expired.",
     "collection_failed": "collection did not complete",
     "partial_collection": "collection was incomplete; some units failed",

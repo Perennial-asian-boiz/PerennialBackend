@@ -26,6 +26,8 @@ from src.pipeline.lifecycle import (
 from src.pipeline.publication import (
     PriorPublication,
     PublicationError,
+    PublicationQualityError,
+    PublicationRegressionError,
     Reuse,
     prior_publication,
     publish,
@@ -322,6 +324,50 @@ def collect_market_caps(
             session.close()
 
 
+def publish_or_reuse_refused(
+    prior: PriorPublication | None,
+    chosen: Selection,
+    attempts: Mapping[str, Attempt],
+    publish_selection: Callable[[Selection], int],
+) -> tuple[int, Selection]:
+    """Publish; a fresh batch refused by quality or the date guard falls back (M2 Q7).
+
+    The refused batch is never published and no guard is relaxed: its source is
+    re-selected as if today's collection had failed with the refusal code, so
+    the same reuse limits and cohort rules apply, without new provider calls.
+    """
+    refused: dict[str, str] = {}
+    while True:
+        try:
+            return publish_selection(chosen), chosen
+        except PublicationQualityError as exc:
+            sources = {check.split(":", 1)[0] for check in exc.checks}
+            code = exc.code
+            error: PublicationError = exc
+        except PublicationRegressionError as exc:
+            sources, code, error = {exc.source}, exc.code, exc
+        new = sources - set(chosen.reuse) - set(refused)
+        if not new:
+            raise error
+        refused.update(dict.fromkeys(new, code))
+        logger.warning(
+            "fresh batch refused; reusing pinned batch sources=%s code=%s",
+            ",".join(sorted(new)),
+            code,
+        )
+
+        def replay(source: str, upstream: Mapping[str, int] | None) -> Attempt:
+            recorded = attempts[source]
+            if source in refused:
+                return Attempt(recorded.run_id, None, refused[source])
+            return recorded
+
+        try:
+            chosen = select_sources(prior, replay)
+        except RequiredSourceUnavailableError:
+            raise error from None
+
+
 def market_caps_or_fallback(
     engine: Engine,
     symbols: Sequence[str],
@@ -425,6 +471,8 @@ def _run_pipeline(
     abandon_stale_runs(engine)
     prior = prior_publication(engine, datetime.now(timezone.utc), max_age, reuse_limits)
 
+    attempts: dict[str, Attempt] = {}
+
     def attempt(source: str, upstream: Mapping[str, int] | None) -> Attempt:
         result = collect_source(
             engine,
@@ -434,31 +482,47 @@ def _run_pipeline(
             settings=settings,
         )
         if not result.succeeded:
-            return Attempt(
+            outcome = Attempt(
                 result.run_id, None, result.error_code or "collection_failed"
             )
-        return Attempt(result.run_id, result.batch_id, None, dict(upstream or {}))
+        else:
+            outcome = Attempt(
+                result.run_id, result.batch_id, None, dict(upstream or {})
+            )
+        attempts[source] = outcome
+        return outcome
 
     chosen = select_sources(prior, attempt)
-    with engine.connect() as conn:
-        rows = {s: batch_rows(conn, s, b) for s, b in chosen.batches.items()}
     cap_limit = (
         settings.market_cap_max_reuse_age
         if settings is not None
         else MARKET_CAP_MAX_REUSE_AGE
     )
-    observations, cap_fallback = market_caps_or_fallback(
-        engine, candidate_symbols(rows), market_cap_collector, cap_limit
-    )
-    publication_id = publish(
-        engine,
-        chosen.runs,
-        observations,
-        max_age=max_age,
-        quality_thresholds=quality_thresholds,
-        reuse=chosen.reuse,
-        reuse_limits=reuse_limits,
-        market_cap_fallback=cap_limit if cap_fallback else None,
+
+    cap_cache: dict[tuple[str, ...], tuple[Mapping[str, dict[str, Any]], bool]] = {}
+
+    def publish_selection(selection: Selection) -> int:
+        with engine.connect() as conn:
+            rows = {s: batch_rows(conn, s, b) for s, b in selection.batches.items()}
+        symbols = tuple(candidate_symbols(rows))
+        if symbols not in cap_cache:  # a Q7 retry must not call FMP again
+            cap_cache[symbols] = market_caps_or_fallback(
+                engine, symbols, market_cap_collector, cap_limit
+            )
+        observations, cap_fallback = cap_cache[symbols]
+        return publish(
+            engine,
+            selection.runs,
+            observations,
+            max_age=max_age,
+            quality_thresholds=quality_thresholds,
+            reuse=selection.reuse,
+            reuse_limits=reuse_limits,
+            market_cap_fallback=cap_limit if cap_fallback else None,
+        )
+
+    publication_id, chosen = publish_or_reuse_refused(
+        prior, chosen, attempts, publish_selection
     )
     logger.info(
         "publication succeeded publication_id=%s reused=%s",

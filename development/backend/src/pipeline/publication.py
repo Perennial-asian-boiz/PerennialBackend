@@ -95,6 +95,16 @@ def _check_override_text(actor: str, reason: str) -> None:
         )
 
 
+class PublicationRegressionError(PublicationError):
+    """A source's observation date would go backwards against the prior publication."""
+
+    code = "observation_regressed"
+
+    def __init__(self, source: str):
+        self.source = source
+        super().__init__("publication would regress observation date")
+
+
 class PublicationReuseError(PublicationError):
     """A reused run is no longer pinned by the current publication or is too old."""
 
@@ -631,7 +641,7 @@ def publish(
                     as_of[old.source] is None
                     or as_of[old.source] < old.source_as_of.isoformat()
                 ):
-                    raise PublicationError("publication would regress observation date")
+                    raise PublicationRegressionError(old.source)
         symbols = candidate_symbols(rows)
         cap_data = _caps(
             observations, symbols, now, market_cap_fallback or timedelta(days=1)
