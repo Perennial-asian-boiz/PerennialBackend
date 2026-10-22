@@ -4,6 +4,8 @@ Only this module changes the production pointer. Importing/backfilling remains
 independent. Defaults are deliberately visible policy, configurable by the caller.
 """
 
+import re
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence, cast
@@ -23,6 +25,32 @@ MAX_AGE = {
     "insider_trades": timedelta(days=3),
     "short_interest": timedelta(days=45),
 }
+QUALITY_CHECKS = ("row_count", "null_share", "source_as_of")
+PUBLICATION_LOCK = 170099
+
+# Override audit text is append-only and ends up in backups, so unsafe input is
+# refused rather than redacted: no redactor can prove free text holds no secret.
+# Actor is an identity handle; reason is one line of plain prose.
+_SAFE_ACTOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,199}")
+_UNSAFE_REASON = (
+    re.compile(r"(?i)[a-z][a-z0-9+.-]*://|\bwww\."),  # URLs
+    # Credential vocabulary anywhere, whatever follows: quoting, spacing or
+    # separators cannot smuggle a value past a delimiter check. "_" counts as a
+    # boundary so x_api_key matches; plain "key" is too common and is below.
+    re.compile(
+        r"(?i)(?<![a-z0-9])(api[\s_-]?keys?|(access|auth|refresh|session)[\s_-]?tokens?|"
+        r"tokens?|secrets?|client[\s_-]?secret|private[\s_-]?key|passwords?|passwd|pwd|"
+        r"passphrase|credentials?|authorization|bearer|cookies?)(?![a-z0-9])"
+    ),
+    # key/sig/signature used as a field name, quoted or not.
+    re.compile(r"(?i)(?<![a-z0-9])(key|sig|signature)[\"'`]?\s*[:=]"),
+    # Any quoted field name followed by a value separator: JSON or dict dumps.
+    re.compile(r"[\"'`]\s*[:=]"),
+    # Structured-dump and assignment syntax has no place in a one-line reason.
+    re.compile(r"[{}=<>`\\]"),
+    # Key-shaped runs: 20+ token characters with a digit, or 32+ of any kind.
+    re.compile(r"(?=[A-Za-z0-9_+/=-]*\d)[A-Za-z0-9_+/=-]{20,}|[A-Za-z0-9_+/=-]{32,}"),
+)
 
 
 class PublicationError(ValueError):
@@ -41,6 +69,38 @@ class PublicationQualityError(PublicationError):
         super().__init__("publication quality checks failed: " + ", ".join(self.checks))
 
 
+class OverrideInputError(ValueError):
+    """Override actor or reason is not safe to retain; the input is never echoed."""
+
+    code = "override_input_rejected"
+
+
+def _check_override_text(actor: str, reason: str) -> None:
+    if not _SAFE_ACTOR.fullmatch(actor):
+        raise OverrideInputError(
+            "override actor must be 1 to 200 characters of letters, digits and ._@+-"
+        )
+    if (
+        not reason
+        or len(reason) > 500
+        or any(unicodedata.category(ch).startswith("C") for ch in reason)
+        or any(pattern.search(reason) for pattern in _UNSAFE_REASON)
+    ):
+        raise OverrideInputError(
+            "override reason must be 1 to 500 characters of plain one-line text "
+            "without URLs, credential words, field syntax, tokens or control characters"
+        )
+
+
+class PublicationInProgressError(PublicationError):
+    """Another publisher holds the pointer lock; fail fast instead of queueing."""
+
+    code = "publication_in_progress"
+
+    def __init__(self) -> None:
+        super().__init__("another publication is in progress")
+
+
 def _null_share(rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> float:
     if not rows or not fields:
         return 0.0
@@ -56,15 +116,16 @@ def _quality_failures(
     candidate_as_of: date | None,
     threshold: QualityThreshold,
 ) -> list[str]:
-    """Return fixed check names; exact thresholds pass at their boundary."""
+    """Return fixed check names; exact thresholds pass at their boundary.
+
+    An empty baseline has no ratio to compare against, so row_count is not
+    evaluated; the caller records it as no_baseline.
+    """
     issues = []
     before, after = len(previous), len(candidate)
-    if (before == 0 and after > 0) or (
-        before > 0
-        and (
-            after < before * threshold.min_count_ratio
-            or after > before * threshold.max_count_ratio
-        )
+    if before > 0 and (
+        after < before * threshold.min_count_ratio
+        or after > before * threshold.max_count_ratio
     ):
         issues.append("row_count")
     if _null_share(candidate, threshold.null_fields) > (
@@ -138,6 +199,8 @@ def _quality_audit(
             "baseline_batch_id": previous["id"],
             "failed_checks": issues,
         }
+        if not earlier_rows:
+            audit[source]["no_baseline_checks"] = ["row_count"]
         failed.extend(f"{source}:{issue}" for issue in issues)
     return audit, sorted(failed)
 
@@ -285,7 +348,14 @@ def publish(
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
     override_reason: str | None = None,
     override_actor: str | None = None,
+    override_checks: Sequence[str] | None = None,
 ) -> int:
+    """Publish and promote; an override skips only the named failed checks.
+
+    override_checks are "source:check" names exactly as a refused publish
+    reported them. Every failure must be named, every name must have failed,
+    and no override relaxes the observation-date regression guard.
+    """
     max_age = dict(MAX_AGE if max_age is None else max_age)
     if set(max_age) != set(m.SOURCES) or any(
         v.total_seconds() <= 0 for v in max_age.values()
@@ -296,25 +366,37 @@ def publish(
     )
     if set(quality_thresholds) != set(m.SOURCES):
         raise ValueError("quality policy must cover every source")
+    overridden: list[str] = []
     if override_reason is not None:
         override_reason = override_reason.strip()
         override_actor = (override_actor or "").strip()
-        if not override_reason or len(override_reason) > 500:
-            raise ValueError("override reason must be 1 to 500 characters")
-        if not override_actor or len(override_actor) > 200:
-            raise ValueError("override actor must be 1 to 200 characters")
-    elif override_actor is not None:
-        raise ValueError("override actor requires a reason")
+        _check_override_text(override_actor, override_reason)
+        valid = {f"{s}:{c}" for s in m.SOURCES for c in QUALITY_CHECKS}
+        if not override_checks or not set(override_checks) <= valid:
+            raise ValueError("override must name one or more known source:check names")
+        overridden = sorted(set(override_checks))
+    elif override_actor is not None or override_checks is not None:
+        raise ValueError("override actor and checks require a reason")
     now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         # Serialize pointer changes and compare against the actual prior publication.
-        conn.execute(text("SELECT pg_advisory_xact_lock(170099)"))
+        # Try, never wait: under the session lock_timeout a wait ends in an opaque
+        # driver error, and a second publisher has nothing to add anyway.
+        if not conn.execute(
+            text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": PUBLICATION_LOCK}
+        ).scalar_one():
+            raise PublicationInProgressError()
         runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age)
         source_audit, failed_checks = _quality_audit(
             conn, runs, batches, rows, quality_thresholds
         )
-        if failed_checks and override_reason is None:
+        if override_reason is None:
+            if failed_checks:
+                raise PublicationQualityError(failed_checks)
+        elif not set(failed_checks) <= set(overridden):
             raise PublicationQualityError(failed_checks)
+        elif set(overridden) - set(failed_checks):
+            raise PublicationError("override names checks that did not fail")
         prior = conn.execute(
             select(m.current_publication.c.publication_id).where(
                 m.current_publication.c.channel == "production"
@@ -345,32 +427,20 @@ def publish(
             for old in previous:
                 if runs[old.source]["collected_at"] < old.collected_at:
                     raise PublicationError("publication would regress collection time")
-                if (
-                    override_reason is None
-                    and old.source_as_of
-                    and (
-                        as_of[old.source] is None
-                        or as_of[old.source] < old.source_as_of.isoformat()
-                    )
+                if old.source_as_of and (
+                    as_of[old.source] is None
+                    or as_of[old.source] < old.source_as_of.isoformat()
                 ):
                     raise PublicationError("publication would regress observation date")
         symbols = candidate_symbols(rows)
         cap_data = _caps(observations, symbols, now)
-        quality_audit: dict[str, Any] = {"sources": source_audit}
         config = {
             **DEFAULT_CONFIG,
             "source_as_of": as_of,
             "freshness_seconds": {
                 s: int(age.total_seconds()) for s, age in max_age.items()
             },
-            "quality_audit": quality_audit,
         }
-        if override_reason is not None:
-            quality_audit["override"] = {
-                "actor": override_actor,
-                "reason": override_reason,
-                "checks": failed_checks,
-            }
         output = calculate(
             rows, {s: o["value"] for s, o in cap_data.items()}, now, config
         )
@@ -384,6 +454,22 @@ def publish(
             )
             .returning(m.publications.c.id)
         ).scalar_one()
+        conn.execute(
+            insert(m.publication_events).values(
+                publication_id=pub_id,
+                kind="quality_passed"
+                if override_reason is None
+                else "quality_override",
+                actor=override_actor,
+                reason=override_reason,
+                checks={
+                    "sources": source_audit,
+                    "failed": failed_checks,
+                    "overridden": overridden,
+                },
+                created_at=now,
+            )
+        )
         conn.execute(
             insert(m.publication_sources),
             [

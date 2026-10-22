@@ -39,6 +39,7 @@ SCHEMA = "perennial"
 SOURCES = ("congress_trades", "ark_holdings", "insider_trades", "short_interest")
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live")
+PUBLICATION_EVENT_KINDS = ("quality_passed", "quality_override", "degraded", "rollback")
 
 ERROR_SUMMARY_MAX = 1000
 DIAGNOSTICS_MAX_BYTES = 16384
@@ -305,6 +306,41 @@ publications = Table(
     Column("ranking_version", String(32), nullable=False),
     Column("ranking_config", JSONB, nullable=False),
     Column("output", JSONB, nullable=False),
+)
+
+# Append-only audit beside publications. ranking_config is a replay input, so
+# quality verdicts, degraded markers and rollbacks are recorded here instead.
+publication_events = Table(
+    "publication_events",
+    metadata,
+    _id(),
+    Column(
+        "publication_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.publications.id"),
+        nullable=False,
+    ),
+    Column("kind", String(32), nullable=False),
+    Column("actor", String(200)),
+    Column("reason", String(500)),
+    Column("checks", JSONB, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(_in("kind", PUBLICATION_EVENT_KINDS), name="kind"),
+    CheckConstraint("actor IS NULL OR btrim(actor) <> ''", name="actor_not_blank"),
+    CheckConstraint("reason IS NULL OR btrim(reason) <> ''", name="reason_not_blank"),
+    CheckConstraint(
+        "kind NOT IN ('quality_override', 'rollback') "
+        "OR (actor IS NOT NULL AND reason IS NOT NULL)",
+        name="decision_attributed",
+    ),
+    CheckConstraint("jsonb_typeof(checks) = 'object'", name="checks_object"),
+)
+Index("ix_publication_events_publication_id", publication_events.c.publication_id)
+Index(
+    "uq_publication_events_quality",
+    publication_events.c.publication_id,
+    unique=True,
+    postgresql_where=text("kind IN ('quality_passed', 'quality_override')"),
 )
 
 publication_sources = Table(

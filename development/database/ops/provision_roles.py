@@ -13,7 +13,7 @@ from sqlalchemy.engine import make_url
 
 IMMUTABLE = (
     "source_batches", "congress_trades", "ark_holdings", "insider_trades", "short_interest",
-    "run_dependencies", "publications", "publication_sources", "market_cap_observations",
+    "run_dependencies", "publications", "publication_events", "publication_sources", "market_cap_observations",
     "publication_market_caps",
 )
 MUTABLE = ("ingestion_runs", "current_publication")
