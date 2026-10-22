@@ -8,14 +8,14 @@ reviewed seed data applied outside this transaction (ops/seed_identity.py).
 market_cap_observations keeps its sector/industry columns until the contract step.
 Downgrade drops the new tables and columns, and with them any seeded identity.
 
-Placeholder 0008: chains from 0006 on this base; re-chain after M2's 0007 at merge.
+Numbered 0008 per roadmap §4; chains after M2's 0007.
 """
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision = '0008'
-down_revision = '0006'
+down_revision = '0007'
 branch_labels = None
 depends_on = None
 
