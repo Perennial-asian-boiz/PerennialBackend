@@ -195,7 +195,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "health":
             from src.pipeline.health import health
 
-            report = health(engine)
+            report = health(engine, settings=settings)
             _print(report)
             return 0 if report["healthy"] else 1
         if args.command == "recover-stale":
