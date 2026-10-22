@@ -261,3 +261,33 @@ def test_downgrade_refuses_while_gdelt_contract_rows_exist(db_url):
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+# ── health (G-b, G5) ──
+
+
+@pytest.mark.db
+def test_gdelt_staleness_is_an_advisory_not_a_watchlist_issue(engine):
+    from sqlalchemy import update
+
+    from src.pipeline.health import health
+
+    report = health(engine)
+    assert set(report["advisories"]) == {f"{s}:stale" for s in models.SUBJECTLESS_SOURCES}
+    assert not any("gdelt" in issue for issue in report["issues"])
+
+    run_contract(engine, client(), THEMES, datetime.now(timezone.utc))
+    assert health(engine)["advisories"] == []
+
+    with engine.begin() as conn:
+        conn.execute(
+            update(models.ingestion_runs)
+            .where(models.ingestion_runs.c.source == "gdelt_theme_volume")
+            .values(
+                started_at=datetime.now(timezone.utc) - timedelta(days=2, minutes=2),
+                finished_at=datetime.now(timezone.utc) - timedelta(days=2, minutes=1),
+            )
+        )
+    report = health(engine)
+    assert report["advisories"] == ["gdelt_theme_volume:stale"]
+    assert not any("gdelt" in issue for issue in report["issues"])
