@@ -243,20 +243,36 @@ def test_run_once_exit_codes(monkeypatch):
         scheduler.run_once("bogus", _settings())
 
 
-def test_run_once_gdelt_reports_its_own_exit_code(monkeypatch):
+def test_run_once_gdelt_fails_on_any_failed_theme(monkeypatch, caplog):
+    """M3-N3: a partial theme failure is not success; only counts and a code are logged."""
     from src.pipeline import scheduler
     from src.services.gdelt import job
 
-    monkeypatch.setattr(job, "main", lambda: 0)
-    assert scheduler.run_once("gdelt") == 0
-    monkeypatch.setattr(job, "main", lambda: 1)
-    assert scheduler.run_once("gdelt") == 1
+    monkeypatch.setattr(scheduler, "make_engine", lambda *a, **kwargs: _Engine())
 
-    def broken():
-        raise ConnectionError("synthetic")
+    def summary(succeeded, failed):
+        result = job.RunSummary(day="2026-10-22")
+        result.succeeded.extend(succeeded)
+        result.failed.update(failed)
+        return result
 
-    monkeypatch.setattr(job, "main", broken)
-    assert scheduler.run_once("gdelt") == 1
+    monkeypatch.setattr(job, "run_gdelt", lambda engine: summary(["A", "B"], {}))
+    assert scheduler.run_once("gdelt", _settings()) == 0
+
+    secret = "https://example.invalid/?apikey=SYNTHETIC_SECRET"
+    monkeypatch.setattr(job, "run_gdelt", lambda engine: summary(["A"], {"B": secret}))
+    with caplog.at_level("ERROR"):
+        assert scheduler.run_once("gdelt", _settings()) == 1
+    assert "code=gdelt_incomplete ok=1 failed=1" in caplog.text
+    assert "SYNTHETIC_SECRET" not in caplog.text
+
+    def broken(engine):
+        raise ConnectionError(secret)
+
+    monkeypatch.setattr(job, "run_gdelt", broken)
+    with caplog.at_level("ERROR"):
+        assert scheduler.run_once("gdelt", _settings()) == 1
+    assert "SYNTHETIC_SECRET" not in caplog.text
 
 
 @pytest.mark.db
@@ -271,10 +287,12 @@ def test_overlapping_scheduled_run_exits_1_not_success(engine, db_url, monkeypat
         assert scheduler.run_once("pipeline", settings) == 1
 
 
-def test_once_rejects_an_unknown_job_name():
+@pytest.mark.parametrize("job_args", [["--job", "bogus"], ["--job"]])
+def test_once_rejects_a_missing_or_unknown_job(job_args):
+    """M3-N4: argparse exits 2 instead of an IndexError traceback."""
     backend = Path(__file__).resolve().parents[1]
     result = subprocess.run(
-        [sys.executable, "-m", "src.pipeline.scheduler", "--once", "--job", "bogus"],
+        [sys.executable, "-m", "src.pipeline.scheduler", "--once", *job_args],
         cwd=backend,
         capture_output=True,
         text=True,
@@ -282,7 +300,7 @@ def test_once_rejects_an_unknown_job_name():
         env={"PATH": "", "PYTHONPATH": str(backend)},
     )
     assert result.returncode == 2
-    assert "--job must be pipeline or gdelt" in result.stderr
+    assert "--job" in result.stderr and "Traceback" not in result.stderr
 
 
 # ── missed-run monitor ──
@@ -303,3 +321,23 @@ def test_health_reports_a_missed_scheduled_run_as_sev2(engine, fixture_path):
     report = health(engine)
     assert "pipeline:missed_run" in report["issues"]
     assert report["issue_severity"]["pipeline:missed_run"] == "SEV2"
+
+
+# ── M3-N1: rolled-back state in health ──
+
+
+@pytest.mark.db
+def test_health_shows_a_rolled_back_publication_until_the_next_publish(
+    engine, fixture_path
+):
+    from src.pipeline.health import health
+
+    first, second = _two_publications(engine, fixture_path)
+    assert "publication:rolled_back" not in health(engine)["issues"]
+    rollback(engine, first, actor=ACTOR, reason=REASON)
+    report = health(engine)
+    assert "publication:rolled_back" in report["issues"]
+    assert report["issue_severity"]["publication:rolled_back"] == "SEV3"
+    third = run(engine, Feed(fixture_path))
+    assert current(engine)["id"] == third
+    assert "publication:rolled_back" not in health(engine)["issues"]

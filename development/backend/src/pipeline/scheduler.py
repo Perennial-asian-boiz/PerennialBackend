@@ -85,14 +85,40 @@ def run_once(job: str = "pipeline", settings: Settings | None = None) -> int:
         )
         return 0
     if job == "gdelt":
-        from src.services.gdelt.job import main as gdelt_main
-
-        try:
-            return int(gdelt_main())
-        except Exception as exc:
-            logger.error("gdelt run failed: %s", describe_exception(exc))
-            return 1
+        return _run_gdelt_once(settings)
     raise ValueError("unknown scheduled job")
+
+
+GDELT_INCOMPLETE = "gdelt_incomplete"
+
+
+def _run_gdelt_once(settings: Settings | None) -> int:
+    """Any failed theme fails the scheduled job; only counts and codes are logged."""
+    from src.services.gdelt.job import run_gdelt
+
+    engine = None
+    try:
+        engine = (
+            make_engine(settings.database_url.get_secret_value())
+            if settings is not None
+            else make_engine()
+        )
+        summary = run_gdelt(engine)
+    except Exception as exc:
+        logger.error("gdelt run failed: %s", describe_exception(exc))
+        return 1
+    finally:
+        if engine is not None:
+            engine.dispose()
+    if summary.failed:
+        logger.error(
+            "gdelt run incomplete code=%s ok=%d failed=%d",
+            GDELT_INCOMPLETE,
+            len(summary.succeeded),
+            len(summary.failed),
+        )
+        return 1
+    return 0
 
 
 def main() -> None:
@@ -134,16 +160,16 @@ def main() -> None:
 
 if __name__ == "__main__":
     if "--once" in sys.argv:
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="python -m src.pipeline.scheduler")
+        parser.add_argument("--once", action="store_true", required=True)
+        parser.add_argument("--job", choices=("pipeline", "gdelt"), default="pipeline")
+        args = parser.parse_args()  # exits 2 on a missing or unknown --job
         logging.basicConfig(
             level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
         )
-        name = (
-            sys.argv[sys.argv.index("--job") + 1] if "--job" in sys.argv else "pipeline"
-        )
-        if name not in ("pipeline", "gdelt"):
-            print("error: --job must be pipeline or gdelt", file=sys.stderr)
-            sys.exit(2)
-        sys.exit(run_once(name))
+        sys.exit(run_once(args.job))
     if "--test" in sys.argv:
         try:
             run_full_pipeline()

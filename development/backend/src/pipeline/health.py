@@ -38,7 +38,9 @@ def publication_window_start(now: datetime, holidays: Iterable[date]) -> datetim
 
 
 def _severity(issue: str, issues: list[str]) -> str:
-    if issue.startswith("publication:degraded"):
+    # Rolled back: a deliberate, audited operator decision, visible until the
+    # next publication; staleness it causes is still reported on its own.
+    if issue.startswith("publication:degraded") or issue == "publication:rolled_back":
         return SEV3
     source, _, state = issue.partition(":")
     if state in ("failed", "abandoned"):
@@ -167,6 +169,25 @@ def health(
                     m.publication_events.c.kind == "degraded",
                 )
             ).scalar_one_or_none()
+            # M3: production deliberately pinned by `cli rollback`. The pointer's
+            # promotion and the rollback event share one timestamp.
+            rolled_back = conn.execute(
+                select(func.count())
+                .select_from(m.publication_events)
+                .join(
+                    m.current_publication,
+                    m.current_publication.c.publication_id
+                    == m.publication_events.c.publication_id,
+                )
+                .where(
+                    m.current_publication.c.channel == "production",
+                    m.publication_events.c.kind == "rollback",
+                    m.publication_events.c.created_at
+                    == m.current_publication.c.promoted_at,
+                )
+            ).scalar_one()
+        if rolled_back:
+            issues.append("publication:rolled_back")
         if marker is not None:
             issues.append(
                 "publication:degraded:all_sources_reused"
