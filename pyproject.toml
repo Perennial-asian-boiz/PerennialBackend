@@ -58,7 +58,10 @@ exclude = [
 
 [tool.mypy]
 python_version = "3.12"
-mypy_path = "development/backend"
+# The fetchers load as top-level modules (fmp, ark, ...) next to paths.py, as
+# scheduler/cron.py and collectors._fetcher import them at runtime. They are
+# checked strictly through src/ingestion/adapters.py, which imports them.
+mypy_path = "development/backend,development/backend/src/services/consensus_watchlist,development/backend/src/services/consensus_watchlist/fetchers"
 files = [
     "development/backend/src/settings.py",
     "development/backend/src/db",
@@ -72,6 +75,11 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = ["src.services.*"]
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# Shared legacy path helpers: analyzed for the fetchers' types, not yet strict.
+module = ["paths"]
+follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = ["apscheduler.*"]

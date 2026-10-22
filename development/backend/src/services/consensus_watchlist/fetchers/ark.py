@@ -57,6 +57,7 @@ import json
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 # Support direct script execution as well as package imports.
 _sys.path.insert(
@@ -93,7 +94,7 @@ REQUEST_DELAY = 0.5  # seconds between API calls
 # ─────────────────────────────────────────────────────────
 
 
-def legacy_fetch_fund_holdings(symbol: str):
+def legacy_fetch_fund_holdings(symbol: str) -> List[Dict[str, Any]]:
     """
     Fetches current holdings for one ARK ETF fund.
     Returns list of holding dicts or empty list on failure.
@@ -110,7 +111,7 @@ def legacy_fetch_fund_holdings(symbol: str):
             return []
 
         data = resp.json()
-        holdings = data.get("holdings", [])
+        holdings: List[Dict[str, Any]] = data.get("holdings", [])
         logger.info("ark_collected holdings=%d", len(holdings))
         return holdings
 
@@ -124,7 +125,7 @@ def legacy_fetch_fund_holdings(symbol: str):
 # ─────────────────────────────────────────────────────────
 
 
-def parse_holdings(all_raw: dict):
+def parse_holdings(all_raw: Dict[str, List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """
     Combines holdings from all ARK funds.
     If a ticker appears in multiple funds, merges them.
@@ -133,7 +134,7 @@ def parse_holdings(all_raw: dict):
 
     Returns list of clean holding dicts.
     """
-    ticker_map = defaultdict(
+    ticker_map: defaultdict[str, Dict[str, Any]] = defaultdict(
         lambda: {
             "ticker": "",
             "company": "",
@@ -178,7 +179,9 @@ def parse_holdings(all_raw: dict):
 # ─────────────────────────────────────────────────────────
 
 
-def legacy_save_to_json(holdings: list, filename=None):
+def legacy_save_to_json(
+    holdings: List[Dict[str, Any]], filename: Optional[str | _Path] = None
+) -> None:
     """
     Saves ARK holdings to local JSON file.
     Replace with write_to_db() once DB is set up.
@@ -216,7 +219,7 @@ def legacy_save_to_json(holdings: list, filename=None):
 # ─────────────────────────────────────────────────────────
 
 
-def legacy_print_summary(holdings: list):
+def legacy_print_summary(holdings: List[Dict[str, Any]]) -> None:
     logger.info(
         "ark_summary holdings=%d multi_fund=%d",
         len(holdings),
@@ -229,7 +232,7 @@ def legacy_print_summary(holdings: list):
 # ─────────────────────────────────────────────────────────
 
 
-def legacy_run():
+def legacy_run() -> List[Dict[str, Any]]:
     """
     Main function called by scheduler/cron.py daily at 9:02am.
     Can also be run manually: py ark.py
@@ -239,7 +242,7 @@ def legacy_run():
     logger.info("ark_funds_planned")
 
     # Fetch all funds
-    all_raw = {}
+    all_raw: Dict[str, List[Dict[str, Any]]] = {}
     for symbol in ARK_FUNDS:
         holdings = legacy_fetch_fund_holdings(symbol)
         if holdings:

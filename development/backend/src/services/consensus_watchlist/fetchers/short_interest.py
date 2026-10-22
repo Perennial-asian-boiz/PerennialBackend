@@ -63,9 +63,9 @@ _sys.path.insert(
 )
 from paths import (  # noqa: F401 -- legacy module exports
     ENV_PATH,
-    LOCAL_DATA_DIR,
     local_data_dir,
 )
+from paths import LOCAL_DATA_DIR as LOCAL_DATA_DIR  # collectors read it
 from src.utils.logger import configure_logging, log_exception
 
 # ─────────────────────────────────────────────────────────
@@ -255,7 +255,9 @@ def _normalize_date(date_str: str) -> str:
         return date_str.strip()
 
 
-def parse_short_interest_strict(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
+def parse_short_interest_strict(
+    ticker: str, raw: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     """
     Parses Nasdaq short interest response into canonical schema.
     Takes the MOST RECENT settlement row (rows[0]) as current value,
@@ -309,7 +311,9 @@ def parse_short_interest_strict(ticker: str, raw: dict) -> Optional[Dict[str, An
         return None
 
 
-def legacy_parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
+def legacy_parse_short_interest(
+    ticker: str, raw: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     """Lenient legacy file parser: fab7188 fields and null-on-malformed numbers.
 
     The database collector calls parse_short_interest_strict explicitly, so
