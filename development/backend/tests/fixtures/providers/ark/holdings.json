@@ -1,0 +1,18 @@
+{
+  "holdings": [
+    {
+      "ticker": "ZZAA",
+      "company": "Synthetic Company",
+      "weight": 1.5,
+      "share_price": 25.0,
+      "date": "2026-10-01"
+    },
+    {
+      "ticker": "ZZBB",
+      "company": "Synthetic Other",
+      "weight": 2.0,
+      "share_price": null,
+      "date": "2026-10-01"
+    }
+  ]
+}
