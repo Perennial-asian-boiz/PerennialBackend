@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping, Sequence
 import requests
 from sqlalchemy.engine import Connection, Engine
 
+from src.db import models as m
 from src.db.queries import batch_rows, latest_successful_run
 from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
@@ -97,6 +98,8 @@ def select_sources(
         else:
             chosen.pinned(prior, source, Reuse(result.error_code, result.run_id))
     for source in DOWNSTREAM:
+        if source in chosen.reuse:
+            continue  # already taken from the prior cohort below
         upstream = {s: chosen.batches[s] for s in UPSTREAM}
         result = attempt(source, upstream)
         if result.ok and dict(result.dependencies) == upstream:
@@ -107,8 +110,32 @@ def select_sources(
         if pin is not None and pin.dependencies == upstream:
             chosen.pinned(prior, source, Reuse(code, result.run_id))
         else:
-            raise RequiredSourceUnavailableError(source, code)
+            _reuse_prior_cohort(chosen, prior, source, Reuse(code, result.run_id))
     return chosen
+
+
+def _reuse_prior_cohort(
+    chosen: Selection,
+    prior: PriorPublication | None,
+    source: str,
+    why: Reuse,
+) -> None:
+    """Pin the prior publication's whole cohort around a reused downstream run.
+
+    Today's upstream batches differ from the ones the reused run was planned
+    from, so lineage needs that publication's Congress, ARK and sibling batches
+    too. They passed lineage together when published, so this costs no provider
+    calls; a sibling collected fresh today stays recorded but unpublished.
+    """
+    chosen.pinned(prior, source, why)
+    for other in m.SOURCES:
+        if other == source or other in chosen.reuse:
+            continue
+        chosen.pinned(
+            prior,
+            other,
+            Reuse(None, cohort=True, unpublished_run_id=chosen.runs.get(other)),
+        )
 
 
 def _upstream(

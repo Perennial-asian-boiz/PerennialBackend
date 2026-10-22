@@ -62,7 +62,7 @@ class Feed:
             extra.pop("representative", None)
             rows.append(extra)
         elif source == "ark_holdings":
-            rows[0]["weight"] = round(float(rows[0].get("weight") or 1) + 0.5, 2)
+            rows[0]["total_weight"] = round(rows[0]["total_weight"] + 0.5, 2)
         self.records[source] = rows
 
     def as_of(self, source):
@@ -407,4 +407,101 @@ def test_degraded_run_fails_fast_while_another_publisher_holds_the_lock(
         with pytest.raises(PublicationError) as caught:
             run(engine, feed)
     assert caught.value.code == "publication_in_progress"
+    assert current(engine)["id"] == baseline
+
+
+# ── Gate M2 tests 1 and 11: cohort reuse when upstream content changed ──
+
+
+def _reused(engine, publication_id):
+    checks = degraded(engine, publication_id)["checks"]
+    return checks, {s: e for s, e in checks["reused"].items()}
+
+
+@pytest.mark.db
+def test_insider_failure_with_changed_upstream_reuses_the_whole_prior_cohort(
+    engine, fixture_path
+):
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    feed.change("congress_trades")
+    feed.fail = {"insider_trades"}
+    feed.calls.clear()
+    second = run(engine, feed)
+
+    assert pins(engine, second) == pins(engine, baseline)
+    # The cohort costs no provider calls: short interest is never collected.
+    assert feed.calls == ["congress_trades", "ark_holdings", "insider_trades"]
+    checks, reused = _reused(engine, second)
+    assert checks["cohort"] == ["ark_holdings", "congress_trades", "short_interest"]
+    assert checks["all_sources_reused"] is True
+    assert reused["insider_trades"]["failure_code"] == "collection_failed"
+    assert reused["congress_trades"]["failure_code"] is None
+    # Today's changed Congress batch was collected but is not published.
+    assert reused["congress_trades"]["unpublished_run_id"] is not None
+    assert replay(engine, second) == current(engine)["output"]
+
+
+@pytest.mark.db
+def test_short_interest_failure_with_changed_upstream_reuses_pinned_insider(
+    engine, fixture_path
+):
+    """M2-5: no second insider pass when the cohort is decided after insider ran."""
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    feed.change("congress_trades")
+    feed.fail = {"short_interest"}
+    feed.calls.clear()
+    second = run(engine, feed)
+
+    assert feed.calls.count("insider_trades") == 1
+    assert pins(engine, second)["insider_trades"] == pins(engine, baseline)["insider_trades"]
+    checks, reused = _reused(engine, second)
+    assert checks["cohort"] == ["ark_holdings", "congress_trades", "insider_trades"]
+    assert reused["insider_trades"]["unpublished_run_id"] is not None
+    assert reused["short_interest"]["failure_code"] == "collection_failed"
+    assert replay(engine, second) == current(engine)["output"]
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    "failing,changed,expect_cohort",
+    [
+        # Congress reused for its own failure; ARK unchanged keeps lineage intact.
+        ({"congress_trades", "insider_trades"}, set(), []),
+        # ARK changed too, so the reused insider needs the prior ARK and sibling.
+        ({"congress_trades", "insider_trades"}, {"ark_holdings"}, ["ark_holdings", "short_interest"]),
+        # ARK reused; insider planned fresh from it; short's pin needs the prior Congress.
+        ({"ark_holdings", "short_interest"}, {"congress_trades"}, ["congress_trades", "insider_trades"]),
+    ],
+)
+def test_two_failed_sources_compose(engine, fixture_path, failing, changed, expect_cohort):
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    for source in changed:
+        feed.change(source)
+    feed.fail = set(failing)
+    second = run(engine, feed)
+
+    checks, reused = _reused(engine, second)
+    assert checks["cohort"] == expect_cohort
+    assert set(reused) == set(failing) | set(expect_cohort)
+    before, after = pins(engine, baseline), pins(engine, second)
+    for source in reused:
+        assert after[source] == before[source]
+    for source in set(FILES) - set(reused):
+        assert after[source][0] != before[source][0]
+    assert replay(engine, second) == current(engine)["output"]
+
+
+@pytest.mark.db
+def test_cohort_member_past_its_limit_aborts(engine, fixture_path):
+    feed = Feed(fixture_path)
+    baseline = run(engine, feed)
+    age_run(engine, pins(engine, baseline)["short_interest"][0], timedelta(days=16))
+    feed.change("congress_trades")
+    feed.fail = {"insider_trades"}
+    with pytest.raises(RequiredSourceUnavailableError) as caught:
+        run(engine, feed)
+    assert caught.value.source == "short_interest"
     assert current(engine)["id"] == baseline
