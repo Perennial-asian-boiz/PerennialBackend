@@ -381,6 +381,103 @@ from incident start (default: drill start) against `rto_target_seconds` 3600, an
 `rpo_seconds` against 900. A local synthetic timing is not the hosted RTO, which
 the Bryan-operated drill above must measure.
 
+### Backup key custody (Bryan-owned; draft options)
+
+Archives are encrypted to a recipient **certificate**: the public half, which
+the backup host holds. Only the matching **private key** decrypts them. Losing
+the key makes every archive unreadable; leaking it, together with storage access,
+exposes every archive. Agents never create, hold or see the real key. The
+commands below are for Bryan, on his own machine.
+
+**Key and certificate.** Generate an RSA-3072 key that is encrypted at rest from
+the start, plus a self-signed certificate for it:
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -aes-256-cbc -out perennial-backup-key.pem
+openssl req -x509 -new -key perennial-backup-key.pem -days 400 \
+  -subj "/CN=perennial-backup-YYYY" -out perennial-backup-cert.pem
+openssl x509 -noout -fingerprint -sha256 -in perennial-backup-cert.pem
+```
+
+`genpkey` prompts for the passphrase, so it never enters argv or shell history.
+Record the fingerprint: every manifest stores it as
+`recipient_sha256_fingerprint`, which is how you tell which key opens an archive.
+Encryption does **not** check the certificate's validity dates, so an expired
+certificate keeps working. Rotation is a schedule, not an expiry event. Only the
+certificate goes to the backup host and its config; the key never does.
+
+**Where the private key lives.** Options, all within D14's free tiers:
+
+| Option | Strength | Weakness |
+|---|---|---|
+| A. Encrypted key file as an attachment in Bryan's password manager | Available anywhere Bryan is; synced copies | One account compromise exposes the key file (it is still passphrase-protected) |
+| B. Encrypted key file on two offline media, kept in separate places | Outside every online failure boundary | Slow to reach during an incident; the media themselves need checking |
+| C. Cloud secret manager in the hosting provider | Scriptable | Shares a failure and compromise boundary with the backups; may cost money; unnecessary for one operator |
+| D. Hardware token (key generated on device) | Key cannot be copied | OpenSSL needs a PKCS#11 provider; not tested here; losing the token loses the archives unless a second recipient exists |
+
+**Recommendation: A plus one copy of B.** Keep the passphrase-encrypted key file
+in the password manager and one encrypted copy offline. Keep the **passphrase
+only in the password manager** as a separate item, with a sealed paper copy kept
+with the offline media. Then no single place holds both the file and the
+passphrase except the password manager. Never put the key or passphrase on the
+backup host, in CI secrets, the repository, Supabase, chat, or any
+agent-readable directory.
+
+**Passphrase handling during a drill.** `restore_drill.py --from-store` passes
+the passphrase to OpenSSL as `-passin env:BACKUP_KEY_PASSPHRASE`, so it never
+appears in argv or reports. Enter it without echo or history, and clear it
+afterwards:
+
+```bash
+read -rs BACKUP_KEY_PASSPHRASE && export BACKUP_KEY_PASSPHRASE
+# ... run the drill ...
+unset BACKUP_KEY_PASSPHRASE
+```
+
+Other processes of the same OS user can read a process's environment. Run the
+drill on Bryan's own trusted machine, in a fresh shell that is closed afterwards.
+
+**Decrypting during a drill** (fits step 2 of the timed drill above):
+
+1. Copy the encrypted key file from custody into a new private directory
+   (`mkdir -m 700`). The file is still passphrase-encrypted on disk.
+2. Before restoring, check that the key matches the archive. The certificate
+   fingerprint must equal the manifest's `recipient_sha256_fingerprint`, and the
+   key must match that certificate (the two hashes must be equal):
+   ```bash
+   openssl x509 -noout -fingerprint -sha256 -in perennial-backup-cert.pem
+   openssl pkey -in perennial-backup-key.pem -pubout | openssl sha256
+   openssl x509 -in perennial-backup-cert.pem -noout -pubkey | openssl sha256
+   ```
+3. Run the drill with `--key` pointing at that file. An archive that does not
+   decrypt and authenticate is never restored.
+4. Delete the directory, then `unset` the passphrase. The deleted file was
+   ciphertext; the decrypted dump was only ever in the drill's own output
+   directory, which is deleted once its evidence is recorded.
+
+**Rotation.** Rotate yearly with the restore drill, immediately on suspected
+compromise, and when custody changes hands.
+
+1. Generate a new key and certificate as above, and store the key per the
+   chosen option.
+2. Put the new certificate on the backup host. The next run's manifest shows the
+   new fingerprint.
+3. Run a drill on a new-key archive with the new key before retiring anything.
+4. Keep the old key until no stored archive uses its fingerprint. Under the
+   retention above, that is about seven days after the first new-key backup.
+   Then destroy every copy and record the date and fingerprint.
+5. On compromise, also decide whether to delete old-key archives once new
+   verified backups exist. Anyone holding the old key and storage access can read
+   them. Re-encryption is not supported.
+
+Changing only the passphrase (`openssl pkey -in old.pem -aes-256-cbc -out
+new.pem`, with prompts) leaves the key and every archive unchanged. A
+compromised passphrase alone, with the file still safe, can be handled this way.
+
+**Not built:** encrypting to a second escrow recipient. OpenSSL CMS supports
+several recipient certificates, but `backup.py --recipient` takes one. Add it if
+Bryan wants a second custodian or a hardware-token primary.
+
 ## Phase 0 quality gates
 
 The baseline is Python **3.12** (`.python-version` pins 3.12.13) and PostgreSQL
