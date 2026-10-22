@@ -398,7 +398,7 @@ def _upstream_row_ok(key: str, row: Any) -> bool:
 
 
 def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]:
-    """Same selection as insider.load_congress_tickers / load_ark_tickers / run()."""
+    """Same selection as insider.legacy_load_congress_tickers / legacy_load_ark_tickers / legacy_run()."""
     purchases = [
         t["ticker"]
         for t in upstream["trades"]
@@ -418,7 +418,7 @@ def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]
 
 
 def _short_interest_plan(si: Any, upstream: UpstreamRows) -> List[str]:
-    """Same universe as short_interest.get_candidate_tickers()."""
+    """Same universe as short_interest.legacy_get_candidate_tickers()."""
     tickers = {
         si.normalize_ticker(r["ticker"])
         for r in upstream["trades"] + upstream["holdings"]

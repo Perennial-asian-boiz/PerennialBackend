@@ -49,15 +49,15 @@ def test_legacy_fetcher_error_logs_are_safe(name, monkeypatch, caplog, capsys):
         monkeypatch.setattr(module.time, "sleep", lambda _: None)
     with caplog.at_level(logging.INFO):
         if name == "fmp":
-            assert module.fetch_chamber_trades("house", api_key=SECRET) == []
+            assert module.legacy_fetch_chamber_trades("house", api_key=SECRET) == []
         elif name == "ark":
-            assert module.fetch_fund_holdings("ARKK") == []
+            assert module.legacy_fetch_fund_holdings("ARKK") == []
         elif name == "insider":
             monkeypatch.setattr(module, "FINNHUB_API_KEY", SECRET)
-            _, outcomes = module.scan_tickers(["ZZAA"], "popular_stable", "synthetic")
+            _, outcomes = module.legacy_scan_tickers(["ZZAA"], "popular_stable", "synthetic")
             assert outcomes[0]["status"] == module.STATUS_FAILED
         else:
-            assert module.fetch_short_interest("ZZAA", session) is None
+            assert module.legacy_fetch_short_interest("ZZAA", session) is None
     out = capsys.readouterr()
     combined = caplog.text + out.out + out.err
     assert SECRET not in combined and URL not in combined

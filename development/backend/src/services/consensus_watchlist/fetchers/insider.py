@@ -168,7 +168,7 @@ ERROR_CATEGORY = {
 REQUEST_TIMEOUT = 15  # seconds
 
 
-def has_api_key():
+def legacy_has_api_key():
     """True when .env holds a real key, not empty or the .env.example placeholder."""
     return bool(FINNHUB_API_KEY) and not FINNHUB_API_KEY.lower().startswith("your_")
 
@@ -195,7 +195,7 @@ def provider_symbol(ticker: str):
     return PROVIDER_ALIASES.get(symbol, symbol)
 
 
-def rate_limit_wait(resp):
+def legacy_rate_limit_wait(resp):
     """
     Seconds until Finnhub's 60-call window resets, from X-Ratelimit-Reset
     (epoch seconds). Falls back to RATE_LIMIT_WAIT when the header is
@@ -221,7 +221,7 @@ def lookback_cutoff():
 # ─────────────────────────────────────────────────────────
 
 
-def load_congress_tickers():
+def legacy_load_congress_tickers():
     """
     Reads trades_congress.json produced by fmp.py.
     Returns (tickers, error) — error is None on a clean read. An empty list
@@ -259,7 +259,7 @@ def load_congress_tickers():
 # ─────────────────────────────────────────────────────────
 
 
-def load_ark_tickers():
+def legacy_load_ark_tickers():
     """
     Reads ark_holdings.json produced by ark.py.
     Returns (tickers, error) for Bucket 2 (Affordable & Growing).
@@ -301,7 +301,7 @@ def load_ark_tickers():
 # ─────────────────────────────────────────────────────────
 
 
-def fetch_insider_activity(ticker: str):
+def legacy_fetch_insider_activity(ticker: str):
     """
     Fetches insider transactions for one ticker from Finnhub, asking for
     provider_symbol(ticker). Callers skip tickers that map to None.
@@ -320,7 +320,7 @@ def fetch_insider_activity(ticker: str):
             "error_detail": detail,
         }
 
-    if not has_api_key():
+    if not legacy_has_api_key():
         return failure(ERR_CREDENTIAL, "FINNHUB_API_KEY is not set in .env")
 
     def request():
@@ -343,7 +343,7 @@ def fetch_insider_activity(ticker: str):
         for attempt in range(1, RATE_LIMIT_RETRIES + 1):
             if resp.status_code != 429:
                 break
-            wait = rate_limit_wait(resp)
+            wait = legacy_rate_limit_wait(resp)
             logger.warning(
                 "insider_rate_limited wait_seconds=%s attempt=%d max_attempts=%d",
                 wait,
@@ -466,7 +466,7 @@ def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
 # ─────────────────────────────────────────────────────────
 
 
-def scan_tickers(tickers: list, bucket: str, label: str):
+def legacy_scan_tickers(tickers: list, bucket: str, label: str):
     """
     Loops through tickers checking each for insider buying.
     Returns (all_buys, outcomes) where outcomes carries one status record
@@ -503,7 +503,7 @@ def scan_tickers(tickers: list, bucket: str, label: str):
 
         # A missing or rejected key fails every request the same way, so
         # stop calling the provider and mark the remaining tickers unknown.
-        result = credential_failure or fetch_insider_activity(ticker)
+        result = credential_failure or legacy_fetch_insider_activity(ticker)
         status = result["status"]
         code = result["error_code"]
         detail = result["error_detail"]
@@ -569,7 +569,7 @@ def scan_tickers(tickers: list, bucket: str, label: str):
 # ─────────────────────────────────────────────────────────
 
 
-def analyze_insider_buys(all_buys: list):
+def legacy_analyze_insider_buys(all_buys: list):
     """
     Groups buys by ticker and calculates signal metrics.
     Multiple insiders buying same stock = cluster buy signal.
@@ -607,7 +607,7 @@ def analyze_insider_buys(all_buys: list):
 # ─────────────────────────────────────────────────────────
 
 
-def build_coverage(outcomes: list, inputs: dict):
+def legacy_build_coverage(outcomes: list, inputs: dict):
     """
     Summarizes what this run actually established.
 
@@ -630,7 +630,7 @@ def build_coverage(outcomes: list, inputs: dict):
     bad_inputs = [name for name, i in inputs.items() if i.get("error_code")]
 
     success_rate = (succeeded / checked) if checked else 0.0
-    errors = summarize_errors(outcomes)
+    errors = legacy_summarize_errors(outcomes)
 
     if checked == 0 or success_rate < MIN_USABLE_SUCCESS_RATE:
         run_status = STATUS_FAILED
@@ -666,7 +666,7 @@ def build_coverage(outcomes: list, inputs: dict):
     }
 
 
-def summarize_errors(outcomes: list):
+def legacy_summarize_errors(outcomes: list):
     """
     Groups failures by error code so a dev can tell WHY a run degraded
     without reading console scrollback: which cause, what to do about it
@@ -700,13 +700,13 @@ def summarize_errors(outcomes: list):
     return {"by_code": groups, "failed_tickers": tickers}
 
 
-def build_attempt(coverage: dict, outcomes: list, retained: bool):
+def legacy_build_attempt(coverage: dict, outcomes: list, retained: bool):
     """
     One record of 'we tried to collect, here is what happened' — the
     human-readable diagnostic, so the ticker list is truncated here. The
     authoritative full list lives in coverage.failed_tickers.
     """
-    errors = summarize_errors(outcomes)
+    errors = legacy_summarize_errors(outcomes)
     errors.pop("failed_tickers")  # authoritative copy lives in coverage
     for group in errors["by_code"].values():
         listed = group["tickers"][:MAX_LISTED_FAILED_TICKERS]
@@ -727,7 +727,7 @@ def build_attempt(coverage: dict, outcomes: list, retained: bool):
     }
 
 
-def _write_json(path, payload):
+def _legacy_write_json(path, payload):
     """Atomic write — a crash mid-save must not leave a truncated file."""
     tmp = Path(f"{path}.tmp")
     with open(tmp, "w") as f:
@@ -735,7 +735,7 @@ def _write_json(path, payload):
     os.replace(tmp, path)
 
 
-def retain_previous_data(filename, attempt: dict):
+def legacy_retain_previous_data(filename, attempt: dict):
     """
     A failed run establishes nothing, so it must not overwrite data a
     previous run did establish. Keep the existing payload and stamp the
@@ -755,7 +755,7 @@ def retain_previous_data(filename, attempt: dict):
         # No good data to protect. Write a data-less record so consensus.py
         # sees an explicit failure rather than a missing file.
         attempt["retained_previous_data"] = False
-        _write_json(
+        _legacy_write_json(
             filename,
             {
                 "source": SOURCE_NAME,
@@ -769,7 +769,7 @@ def retain_previous_data(filename, attempt: dict):
         return False
 
     previous["last_attempt"] = attempt
-    _write_json(filename, previous)
+    _legacy_write_json(filename, previous)
     logger.warning(
         "Collection failed kept existing data from ( %s buys) and recorded the failed attempt",
         len(previous.get("transactions", [])),
@@ -777,7 +777,7 @@ def retain_previous_data(filename, attempt: dict):
     return True
 
 
-def save_to_json(
+def legacy_save_to_json(
     all_buys: list, summary: list, outcomes: list, inputs: dict, filename=None
 ):
     """
@@ -790,10 +790,12 @@ def save_to_json(
         output_dir.mkdir(parents=True, exist_ok=True)
         filename = output_dir / "trades_insider.json"
 
-    coverage = build_coverage(outcomes, inputs)
+    coverage = legacy_build_coverage(outcomes, inputs)
 
     if coverage["run_status"] == STATUS_FAILED:
-        retain_previous_data(filename, build_attempt(coverage, outcomes, True))
+        legacy_retain_previous_data(
+            filename, legacy_build_attempt(coverage, outcomes, True)
+        )
         return
 
     popular = [s for s in summary if s["bucket"] == "popular_stable"]
@@ -821,7 +823,7 @@ def save_to_json(
             "absence may just mean we never got an answer."
         ),
         "coverage": coverage,
-        "last_attempt": build_attempt(coverage, outcomes, retained=False),
+        "last_attempt": legacy_build_attempt(coverage, outcomes, retained=False),
         "popular_stable": {
             "count": len(popular),
             "tickers": popular,
@@ -833,7 +835,7 @@ def save_to_json(
         "transactions": all_buys,
     }
 
-    _write_json(filename, output)
+    _legacy_write_json(filename, output)
 
     logger.info("Saved %s insider buys (run_status=)", len(all_buys))
 
@@ -843,7 +845,7 @@ def save_to_json(
 # ─────────────────────────────────────────────────────────
 
 
-def print_summary(summary: list, all_buys: list, coverage: dict):
+def legacy_print_summary(summary: list, all_buys: list, coverage: dict):
     logger.info(
         "insider_summary checked=%d no_buys=%d failed=%d skipped=%d buys=%d signals=%d",
         coverage["tickers_checked"],
@@ -860,11 +862,11 @@ def print_summary(summary: list, all_buys: list, coverage: dict):
 # ─────────────────────────────────────────────────────────
 
 
-def run():
+def legacy_run():
     logger.info("Starting insider trades fetch...")
     logger.info("Reads from: trades_congress.json + ark_holdings.json")
     logger.info("insider_provider_finnhub")
-    if not has_api_key():
+    if not legacy_has_api_key():
         logger.info(
             "FINNHUB_API_KEY is not set in development/backend/.env no ticker can be checked"
         )
@@ -874,14 +876,14 @@ def run():
     inputs = {}
 
     # ── BUCKET 1: Congress tickers ───────────────────────
-    congress_tickers, congress_error = load_congress_tickers()
+    congress_tickers, congress_error = legacy_load_congress_tickers()
     inputs["trades_congress.json"] = {
         "tickers_loaded": len(congress_tickers),
         "error_code": congress_error,
         "category": ERROR_CATEGORY.get(congress_error),
     }
     if congress_tickers:
-        stable_buys, stable_outcomes = scan_tickers(
+        stable_buys, stable_outcomes = legacy_scan_tickers(
             congress_tickers,
             bucket="popular_stable",
             label="BUCKET 1 — Popular & Stable",
@@ -890,7 +892,7 @@ def run():
         outcomes.extend(stable_outcomes)
 
     # ── BUCKET 2: ARK tickers ────────────────────────────
-    ark_tickers, ark_error = load_ark_tickers()
+    ark_tickers, ark_error = legacy_load_ark_tickers()
     inputs["ark_holdings.json"] = {
         "tickers_loaded": len(ark_tickers),
         "error_code": ark_error,
@@ -905,7 +907,7 @@ def run():
             len(ark_tickers) - len(unique_growth),
         )
 
-        growth_buys, growth_outcomes = scan_tickers(
+        growth_buys, growth_outcomes = legacy_scan_tickers(
             unique_growth,
             bucket="affordable_growing",
             label="BUCKET 2 — Affordable & Growing",
@@ -914,10 +916,10 @@ def run():
         outcomes.extend(growth_outcomes)
 
     # ── Analyze + Print + Save ───────────────────────────
-    summary = analyze_insider_buys(all_buys)
-    coverage = build_coverage(outcomes, inputs)
-    print_summary(summary, all_buys, coverage)
-    save_to_json(all_buys, summary, outcomes, inputs)
+    summary = legacy_analyze_insider_buys(all_buys)
+    coverage = legacy_build_coverage(outcomes, inputs)
+    legacy_print_summary(summary, all_buys, coverage)
+    legacy_save_to_json(all_buys, summary, outcomes, inputs)
 
     if coverage["run_status"] == STATUS_FAILED:
         logger.info("Done, but nothing was established this run.")
@@ -929,6 +931,10 @@ def run():
     return all_buys
 
 
+# scheduler/cron.py calls run() and cannot change; delete with cron.py (M7).
+run = legacy_run
+
+
 if __name__ == "__main__":
     configure_logging()
-    run()
+    legacy_run()

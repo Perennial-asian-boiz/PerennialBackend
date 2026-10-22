@@ -98,16 +98,16 @@ REQUEST_DELAY = 0.5  # be respectful to the public endpoint
 # ─────────────────────────────────────────────────────────
 
 
-def resolve_data_dir() -> Path:
+def legacy_resolve_data_dir() -> Path:
     """
     Returns the database/local_data directory, creating it if needed.
     """
     return local_data_dir()
 
 
-def get_input_file(filename: str) -> Optional[Path]:
+def legacy_get_input_file(filename: str) -> Optional[Path]:
     """Finds an input JSON file in the data directory."""
-    path = resolve_data_dir() / filename
+    path = legacy_resolve_data_dir() / filename
     return path if path.exists() else None
 
 
@@ -126,7 +126,7 @@ def normalize_ticker(ticker: str) -> Optional[str]:
     return cleaned
 
 
-def get_candidate_tickers() -> List[str]:
+def legacy_get_candidate_tickers() -> List[str]:
     """
     Builds deduplicated union of tickers from:
       - trades_congress.json
@@ -136,7 +136,7 @@ def get_candidate_tickers() -> List[str]:
     candidates: Set[str] = set()
 
     # Congress tickers
-    c_path = get_input_file("trades_congress.json")
+    c_path = legacy_get_input_file("trades_congress.json")
     if c_path:
         try:
             with open(c_path, "r", encoding="utf-8") as f:
@@ -150,7 +150,7 @@ def get_candidate_tickers() -> List[str]:
             log_exception(logger, "short_interest_get_candidate_tickers_failed", e)
 
     # ARK tickers
-    a_path = get_input_file("ark_holdings.json")
+    a_path = legacy_get_input_file("ark_holdings.json")
     if a_path:
         try:
             with open(a_path, "r", encoding="utf-8") as f:
@@ -225,7 +225,7 @@ def _to_float_strict(value: Any) -> Optional[float]:
     return number
 
 
-def _to_int(value: Any) -> Optional[int]:
+def _legacy_to_int(value: Any) -> Optional[int]:
     """Legacy fab7188 conversion: malformed values mean unknown, not a dropped ticker."""
     if value is None:
         return None
@@ -235,7 +235,7 @@ def _to_int(value: Any) -> Optional[int]:
         return None
 
 
-def _to_float(value: Any) -> Optional[float]:
+def _legacy_to_float(value: Any) -> Optional[float]:
     """Legacy fab7188 conversion; database adapters use _to_float_strict only."""
     if value is None:
         return None
@@ -309,7 +309,7 @@ def parse_short_interest_strict(ticker: str, raw: dict) -> Optional[Dict[str, An
         return None
 
 
-def parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
+def legacy_parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
     """Lenient legacy file parser: fab7188 fields and null-on-malformed numbers.
 
     The database collector calls parse_short_interest_strict explicitly, so
@@ -326,17 +326,17 @@ def parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
         history = [
             {
                 "settlement_date": _normalize_date(r.get("settlementDate", "")),
-                "short_interest": _to_int(r.get("interest")),
-                "avg_daily_volume": _to_int(r.get("avgDailyShareVolume")),
-                "days_to_cover": _to_float(r.get("daysToCover")),
+                "short_interest": _legacy_to_int(r.get("interest")),
+                "avg_daily_volume": _legacy_to_int(r.get("avgDailyShareVolume")),
+                "days_to_cover": _legacy_to_float(r.get("daysToCover")),
             }
             for r in rows
         ]
         return {
             "ticker": ticker,
-            "short_interest": _to_int(latest.get("interest")),
-            "avg_daily_volume": _to_int(latest.get("avgDailyShareVolume")),
-            "days_to_cover": _to_float(latest.get("daysToCover")),
+            "short_interest": _legacy_to_int(latest.get("interest")),
+            "avg_daily_volume": _legacy_to_int(latest.get("avgDailyShareVolume")),
+            "days_to_cover": _legacy_to_float(latest.get("daysToCover")),
             "settlement_date": _normalize_date(latest.get("settlementDate", "")),
             "history": history,
             "data_source": "nasdaq",
@@ -352,7 +352,7 @@ def parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────
 
 
-def fetch_short_interest(
+def legacy_fetch_short_interest(
     ticker: str, session: requests.Session
 ) -> Optional[Dict[str, Any]]:
     """
@@ -379,7 +379,7 @@ def fetch_short_interest(
             if not data.get("data"):
                 return None
 
-            return parse_short_interest(ticker, data)
+            return legacy_parse_short_interest(ticker, data)
 
         except requests.exceptions.Timeout:
             logger.warning(
@@ -404,9 +404,9 @@ def fetch_short_interest(
 # ─────────────────────────────────────────────────────────
 
 
-def save_to_json(records: List[Dict[str, Any]], errors: List[str]) -> None:
+def legacy_save_to_json(records: List[Dict[str, Any]], errors: List[str]) -> None:
     """Saves short interest records to database/local_data/short_interest.json"""
-    output_dir = resolve_data_dir()
+    output_dir = legacy_resolve_data_dir()
     output_file = output_dir / "short_interest.json"
 
     payload = {
@@ -433,7 +433,7 @@ def save_to_json(records: List[Dict[str, Any]], errors: List[str]) -> None:
 # ─────────────────────────────────────────────────────────
 
 
-def print_summary(records: List[Dict[str, Any]]) -> None:
+def legacy_print_summary(records: List[Dict[str, Any]]) -> None:
     logger.info("short_interest_summary records=%d", len(records))
 
 
@@ -442,17 +442,17 @@ def print_summary(records: List[Dict[str, Any]]) -> None:
 # ─────────────────────────────────────────────────────────
 
 
-def run() -> Dict[str, Any]:
+def legacy_run() -> Dict[str, Any]:
     """
     Main entry point. Called by scheduler/cron.py bi-weekly.
     Can also be run manually: py short_interest.py
     """
     logger.info("Starting Nasdaq Short Interest fetcher...")
 
-    tickers = get_candidate_tickers()
+    tickers = legacy_get_candidate_tickers()
     if not tickers:
         logger.info("No candidate tickers found run fmp.py and ark.py first")
-        save_to_json([], [])
+        legacy_save_to_json([], [])
         return {"records": [], "errors": []}
 
     records: List[Dict[str, Any]] = []
@@ -464,7 +464,7 @@ def run() -> Dict[str, Any]:
     logger.info("short_interest_rate_limited")
 
     for i, ticker in enumerate(tickers, 1):
-        record = fetch_short_interest(ticker, session)
+        record = legacy_fetch_short_interest(ticker, session)
         if record:
             records.append(record)
 
@@ -479,8 +479,8 @@ def run() -> Dict[str, Any]:
 
     records.sort(key=lambda r: r["ticker"])
 
-    print_summary(records)
-    save_to_json(records, errors)
+    legacy_print_summary(records)
+    legacy_save_to_json(records, errors)
 
     logger.info(
         "Short interest complete. %s records, %s errors.", len(records), len(errors)
@@ -488,6 +488,10 @@ def run() -> Dict[str, Any]:
     return {"records": records, "errors": errors}
 
 
+# scheduler/cron.py calls run() and cannot change; delete with cron.py (M7).
+run = legacy_run
+
+
 if __name__ == "__main__":
     configure_logging()
-    run()
+    legacy_run()

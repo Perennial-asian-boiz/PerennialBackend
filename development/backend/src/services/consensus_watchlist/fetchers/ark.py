@@ -93,7 +93,7 @@ REQUEST_DELAY = 0.5  # seconds between API calls
 # ─────────────────────────────────────────────────────────
 
 
-def fetch_fund_holdings(symbol: str):
+def legacy_fetch_fund_holdings(symbol: str):
     """
     Fetches current holdings for one ARK ETF fund.
     Returns list of holding dicts or empty list on failure.
@@ -178,7 +178,7 @@ def parse_holdings(all_raw: dict):
 # ─────────────────────────────────────────────────────────
 
 
-def save_to_json(holdings: list, filename=None):
+def legacy_save_to_json(holdings: list, filename=None):
     """
     Saves ARK holdings to local JSON file.
     Replace with write_to_db() once DB is set up.
@@ -216,7 +216,7 @@ def save_to_json(holdings: list, filename=None):
 # ─────────────────────────────────────────────────────────
 
 
-def print_summary(holdings: list):
+def legacy_print_summary(holdings: list):
     logger.info(
         "ark_summary holdings=%d multi_fund=%d",
         len(holdings),
@@ -229,7 +229,7 @@ def print_summary(holdings: list):
 # ─────────────────────────────────────────────────────────
 
 
-def run():
+def legacy_run():
     """
     Main function called by scheduler/cron.py daily at 9:02am.
     Can also be run manually: py ark.py
@@ -241,7 +241,7 @@ def run():
     # Fetch all funds
     all_raw = {}
     for symbol in ARK_FUNDS:
-        holdings = fetch_fund_holdings(symbol)
+        holdings = legacy_fetch_fund_holdings(symbol)
         if holdings:
             all_raw[symbol] = holdings
         time.sleep(REQUEST_DELAY)
@@ -257,15 +257,19 @@ def run():
     logger.info("%s unique tickers across all funds", len(holdings))
 
     # Print summary
-    print_summary(holdings)
+    legacy_print_summary(holdings)
 
     # Save
-    save_to_json(holdings)
+    legacy_save_to_json(holdings)
 
     logger.info("Done. ark_holdings.json ready for insider.py")
     return holdings
 
 
+# scheduler/cron.py calls run() and cannot change; delete with cron.py (M7).
+run = legacy_run
+
+
 if __name__ == "__main__":
     configure_logging()
-    run()
+    legacy_run()

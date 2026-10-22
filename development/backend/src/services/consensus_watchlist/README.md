@@ -75,7 +75,7 @@ Ranking is deterministic: same inputs, same order, every run.
 
 The legacy JSON path keeps the `fab7188` Congress dedup key:
 `(politician_name.lower(), ticker, transaction_date, trade_type.lower())`,
-keeping the first row. `fmp.deduplicate` serves that legacy writer; the database
+keeping the first row. `fmp.legacy_deduplicate` serves that legacy writer; the database
 collector uses `deduplicate_proven_repeats`, which retains cross-provider
 observations and unidentified repeated rows. The legacy short-interest parser
 keeps a ticker when a number is malformed and sets that field to null. The

@@ -60,7 +60,7 @@ MAX_PAGES = 50  # Safety cap per chamber; full final page is not a complete resu
 # ─────────────────────────────────────────────────────────
 
 
-def fetch_chamber_trades(
+def legacy_fetch_chamber_trades(
     chamber: str, *, api_key: str | None = None, max_pages: int | None = None
 ):
     """
@@ -186,7 +186,7 @@ def parse_trades(raw_data: list, *, preserve_provenance: bool = True):
     return trades
 
 
-def deduplicate(trades: list):
+def legacy_deduplicate(trades: list):
     """
     Removes repeated trades from the legacy JSON output.
     Key: politician + ticker + transaction_date + trade_type
@@ -274,7 +274,7 @@ def filter_recent(trades: list, years: int = 2):
 # ─────────────────────────────────────────────────────────
 
 
-def analyze_trades(trades: list):
+def legacy_analyze_trades(trades: list):
     """
     Counts purchase mentions per ticker.
     This is the only signal Perennial needs from Congress data.
@@ -298,7 +298,7 @@ def analyze_trades(trades: list):
 # ─────────────────────────────────────────────────────────
 
 
-def save_to_json(trades: list, filename=None):
+def legacy_save_to_json(trades: list, filename=None):
     if filename is None:
         output_dir = LOCAL_DATA_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -321,7 +321,7 @@ def save_to_json(trades: list, filename=None):
 # ─────────────────────────────────────────────────────────
 
 
-def print_summary(trades: list, analysis: dict):
+def legacy_print_summary(trades: list, analysis: dict):
     logger.info(
         "congress_summary trades=%d purchases=%d sales=%d tickers=%d",
         analysis["total_trades"],
@@ -336,7 +336,7 @@ def print_summary(trades: list, analysis: dict):
 # ─────────────────────────────────────────────────────────
 
 
-def run(provider_settings: "ProviderSettings | None" = None):
+def legacy_run(provider_settings: "ProviderSettings | None" = None):
     # The compatibility branch is only for existing JSON callers that set the
     # module symbol themselves. Normal runs resolve settings at invocation.
     legacy_key = provider_settings is None and FMP_API_KEY is not None
@@ -355,11 +355,15 @@ def run(provider_settings: "ProviderSettings | None" = None):
 
     # Fetch both chambers
     if legacy_key:
-        fmp_senate = fetch_chamber_trades("senate")
-        fmp_house = fetch_chamber_trades("house")
+        fmp_senate = legacy_fetch_chamber_trades("senate")
+        fmp_house = legacy_fetch_chamber_trades("house")
     else:
-        fmp_senate = fetch_chamber_trades("senate", api_key=key, max_pages=page_limit)
-        fmp_house = fetch_chamber_trades("house", api_key=key, max_pages=page_limit)
+        fmp_senate = legacy_fetch_chamber_trades(
+            "senate", api_key=key, max_pages=page_limit
+        )
+        fmp_house = legacy_fetch_chamber_trades(
+            "house", api_key=key, max_pages=page_limit
+        )
 
     all_raw = fmp_senate + fmp_house
     logger.info("Total raw records: %s", len(all_raw))
@@ -368,7 +372,7 @@ def run(provider_settings: "ProviderSettings | None" = None):
     # provider transaction identity and provenance via the default parsers.
     fmp_trades = parse_trades(all_raw, preserve_provenance=False)
 
-    trades = deduplicate(fmp_trades)
+    trades = legacy_deduplicate(fmp_trades)
 
     # Filter to recent 2 years only
     trades = filter_recent(trades, years=2)
@@ -378,14 +382,18 @@ def run(provider_settings: "ProviderSettings | None" = None):
         return
 
     # Analyze + print + save
-    analysis = analyze_trades(trades)
-    print_summary(trades, analysis)
-    save_to_json(trades)
+    analysis = legacy_analyze_trades(trades)
+    legacy_print_summary(trades, analysis)
+    legacy_save_to_json(trades)
 
     logger.info("Done.")
     return trades
 
 
+# scheduler/cron.py calls run() and cannot change; delete with cron.py (M7).
+run = legacy_run
+
+
 if __name__ == "__main__":
     configure_logging()
-    run()
+    legacy_run()
