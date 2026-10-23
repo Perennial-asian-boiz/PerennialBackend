@@ -17,7 +17,7 @@ from functools import partial
 
 import pytest
 import requests
-from sqlalchemy import func, insert, select, text
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.exc import DBAPIError
 from src.db import models
 from src.ingestion.importer import import_collection
@@ -1022,3 +1022,114 @@ def test_market_cap_adapter_setting_defaults_to_none_and_is_validated(monkeypatc
     assert _settings(monkeypatch, MARKET_CAP_ADAPTER="fixture").market_cap_adapter == "fixture"
     with pytest.raises(SettingsError):
         _settings(monkeypatch, MARKET_CAP_ADAPTER="nope")
+
+
+# ── Edge cases found after the build (d1498c6) ───────────
+
+
+@pytest.mark.db
+def test_a_lookup_only_import_never_edits_securities(engine):
+    """A cap's currency is the provider's reporting currency, not the listing's."""
+    from src.ingestion.market_caps import collect
+
+    seed(engine, "ZZAA", "ZZBB")
+    with engine.begin() as conn:
+        conn.execute(
+            update(models.securities)
+            .where(models.securities.c.symbol == "ZZBB")
+            .values(currency="CAD", exchange="TSX")
+        )
+        before = conn.execute(select(models.securities).order_by("id")).all()
+    adapter = StubAdapter({"ZZAA": quote(), "ZZBB": quote()})
+    result = import_collection(
+        engine, collect(adapter, upstream=upstream(holdings=["ZZAA", "ZZBB"]))
+    )
+    assert result.succeeded
+    with engine.connect() as conn:
+        assert conn.execute(select(models.securities).order_by("id")).all() == before
+    assert {r["currency"] for r in stored_caps(engine).values()} == {"USD"}
+
+
+@pytest.mark.db
+def test_value_that_rounds_up_to_the_bound_is_refused_not_overflowed(engine):
+    from src.ingestion.market_caps import collect
+
+    seed(engine, "ZZAA")
+    adapter = StubAdapter({"ZZAA": bad_quote(value=Decimal("9999999999999999999999.995"))})
+    result = import_collection(engine, collect(adapter, upstream=upstream(holdings=["ZZAA"])))
+    assert_failed(engine, result, "collection_failed", "malformed_response")
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    "fields",
+    [{"value": Decimal("sNaN")}, {"value": Decimal("-0")}, {"issuer_level": "yes"}],
+)
+def test_other_malformed_quote_fields_fail_cleanly(engine, fields):
+    from src.ingestion.market_caps import collect
+
+    seed(engine, "ZZAA")
+    adapter = StubAdapter({"ZZAA": bad_quote(**fields)})
+    result = import_collection(engine, collect(adapter, upstream=upstream(holdings=["ZZAA"])))
+    assert_failed(engine, result, "collection_failed", "malformed_response")
+
+
+@pytest.mark.db
+def test_a_value_that_is_not_a_quote_is_refused(engine):
+    from src.ingestion.market_caps import collect
+
+    seed(engine, "ZZAA")
+    adapter = StubAdapter({"ZZAA": {"value": "1000.00", "currency": "USD"}})
+    result = import_collection(engine, collect(adapter, upstream=upstream(holdings=["ZZAA"])))
+    assert_failed(engine, result, "collection_failed", "malformed_response")
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("ahead, ok", [(timedelta(minutes=1), True), (timedelta(minutes=10), False)])
+def test_observed_at_tolerates_the_same_clock_skew_as_publishing(engine, ahead, ok):
+    """MCA-3f matches _caps, whose _time_ok allows 5 minutes ahead."""
+    from src.ingestion.market_caps import collect
+
+    seed(engine, "ZZAA")
+    observed = datetime.now(timezone.utc) + ahead
+    adapter = StubAdapter({"ZZAA": quote(observed_at=observed)})
+    result = import_collection(engine, collect(adapter, upstream=upstream(holdings=["ZZAA"])))
+    if ok:
+        assert result.succeeded and stored_caps(engine)["ZZAA"]["observed_at"] == observed
+    else:
+        assert_failed(engine, result, "collection_failed", "malformed_response")
+
+
+@pytest.mark.db
+def test_naive_observed_at_is_refused(engine):
+    from src.ingestion.market_caps import collect
+
+    seed(engine, "ZZAA")
+    adapter = StubAdapter({"ZZAA": quote(observed_at=datetime(2026, 10, 22, 20, 0))})
+    result = import_collection(engine, collect(adapter, upstream=upstream(holdings=["ZZAA"])))
+    assert_failed(engine, result, "collection_failed", "malformed_response")
+
+
+@pytest.mark.db
+def test_an_adapter_error_code_is_untrusted(engine, caplog):
+    """A code outside the vocabulary is stored as a generic failure, never verbatim."""
+    from src.ingestion.market_caps import MarketCapAdapterError, collect
+
+    caplog.set_level(logging.DEBUG)
+    seed(engine, "ZZAA")
+    adapter = StubAdapter(error=MarketCapAdapterError(f"{SECRET} at https://x.invalid/?key=1"))
+    result = import_collection(engine, collect(adapter, upstream=upstream(holdings=["ZZAA"])))
+    row = assert_failed(engine, result, "collection_failed")
+    stored = json.dumps([row.error_summary, row.diagnostics], default=str)
+    assert SECRET not in stored and "x.invalid" not in stored
+    assert SECRET not in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["file", "derived", "", None, "LIVE"])
+def test_an_unknown_collection_mode_fails_closed_without_fetching(mode):
+    from src.ingestion.market_caps import collect
+
+    adapter = StubAdapter({"ZZAA": quote()}, mode=mode)
+    outcome = collect(adapter, upstream=upstream(holdings=["ZZAA"]), record_mode="fixture")
+    assert not outcome.succeeded and outcome.error_code == "fixture_adapter_not_allowed"
+    assert adapter.calls == []
