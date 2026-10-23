@@ -16,7 +16,7 @@ import re
 import secrets
 import sys
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1069,3 +1069,29 @@ def test_more_unsafe_logins_are_refused_the_same_way(engine, groups, caplog, cas
             assert outcome == reference  # the same fixed error as every other clause
     finally:
         _drop_roles(engine, [intermediate])
+
+
+@pytest.mark.db
+def test_bodies_do_not_depend_on_the_session_time_zone(engine, fixture_path, groups):
+    """MR1-1: the same ETag must mean the same bytes; timestamps are served in UTC."""
+    f = feed(fixture_path)
+    publish_run(engine, f)
+    f.fail = {"insider_trades"}  # degraded, so stale_sources timestamps are served too
+    pub = publish_run(engine, f)
+    bodies = {}
+    for zone in ("UTC", "America/Los_Angeles", "Asia/Kolkata"):
+        with login(engine, groups) as (api_engine, name, _):
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER ROLE \"{name}\" SET timezone = '{zone}'"))
+            with client(api_engine, groups) as c:
+                watchlist = c.get("/v1/watchlist")
+                security = c.get("/v1/securities/ZZAA")
+        bodies[zone] = (watchlist.headers["etag"], watchlist.content, security.content)
+    assert len(set(bodies.values())) == 1, "a session time zone changed the served bytes"
+    meta = json.loads(bodies["UTC"][1])["publication"]
+    assert meta["id"] == pub
+    assert meta["created_at"] == row(engine, pub).created_at.astimezone(timezone.utc).isoformat()
+    assert meta["created_at"].endswith("+00:00")
+    assert meta["stale_sources"] and all(
+        s["collected_at"].endswith("+00:00") for s in meta["stale_sources"]
+    )
