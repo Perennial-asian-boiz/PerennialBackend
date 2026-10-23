@@ -292,9 +292,17 @@ run_dependencies = Table(
     ),
     Column("source", String(32), primary_key=True),
     Column("batch_id", BigInteger, nullable=False),
+    # For a downstream run's Congress dependency: the accumulated history it
+    # was planned from (congress_trade_history ids <= this). Publication pins it.
+    Column("history_through_id", BigInteger),
     ForeignKeyConstraint(
         ["batch_id", "source"],
         [f"{SCHEMA}.source_batches.id", f"{SCHEMA}.source_batches.source"],
+    ),
+    CheckConstraint(
+        "history_through_id IS NULL "
+        "OR (source = 'congress_trades' AND history_through_id >= 0)",
+        name="history_through_id",
     ),
 )
 

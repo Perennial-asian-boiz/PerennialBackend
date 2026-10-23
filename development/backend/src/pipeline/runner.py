@@ -148,13 +148,17 @@ def _reuse_prior_cohort(
 
 
 def _upstream(
-    conn: Connection, batches: Mapping[str, int]
+    conn: Connection, batches: Mapping[str, int], history_through: int
 ) -> dict[str, list[dict[str, Any]]]:
-    result = {}
-    for source, key in (("congress_trades", "trades"), ("ark_holdings", "holdings")):
-        rows = batch_rows(conn, source, batches[source])
-        result[key] = [dict(r, ticker=r["symbol"]) for r in rows]
-    return result
+    """Downstream plans cover what publish ranks: windowed Congress history (CI-1)."""
+    congress = congress_history.ranking_rows(
+        conn, history_through, datetime.now(timezone.utc)
+    )
+    holdings = batch_rows(conn, "ark_holdings", batches["ark_holdings"])
+    return {
+        "trades": [dict(r, ticker=r["symbol"]) for r in congress],
+        "holdings": [dict(r, ticker=r["symbol"]) for r in holdings],
+    }
 
 
 def _accepts_settings(collector: Callable[..., CollectionOutcome]) -> bool:
@@ -189,7 +193,8 @@ def collect_source(
         dependencies = {}
         missing = False
         downstream = source in ("insider_trades", "short_interest")
-        with engine.connect() as conn:
+        history_through = None
+        with engine.begin() as conn:
             if downstream:
                 if upstream_batches is None:
                     selected = {s: latest_successful_run(conn, s) for s in UPSTREAM}
@@ -205,8 +210,18 @@ def collect_source(
                     if set(upstream_batches) != set(UPSTREAM):
                         raise ValueError("both upstream batch IDs are required")
                     dependencies = dict(upstream_batches)
-            upstream = _upstream(conn, dependencies) if dependencies else None
-        run_id = begin_run(engine, source, "live", dependencies=dependencies)
+            upstream = None
+            if dependencies:
+                congress_history.fold_batch(conn, dependencies["congress_trades"])
+                history_through = congress_history.watermark(conn)
+                upstream = _upstream(conn, dependencies, history_through)
+        run_id = begin_run(
+            engine,
+            source,
+            "live",
+            dependencies=dependencies,
+            history_through=history_through,
+        )
         with heartbeat_worker(engine, run_id):
             if missing:
                 outcome = CollectionOutcome.failure(source, "live", "missing_upstream")
@@ -530,12 +545,16 @@ def _run_pipeline(
     cap_cache: dict[tuple[str, ...], tuple[Mapping[str, dict[str, Any]], bool]] = {}
 
     def publish_selection(selection: Selection) -> int:
-        # Candidates must match what publish() ranks: accumulated Congress history.
+        # Candidates must match what publish() ranks: the history the
+        # downstream runs were planned from.
         with engine.begin() as conn:
             rows = {s: batch_rows(conn, s, b) for s, b in selection.batches.items()}
             congress_history.derive(conn, selection.runs["congress_trades"])
+            through = congress_history.planned_watermark(conn, selection.runs)
+            if through is None:
+                through = congress_history.watermark(conn)
             rows["congress_trades"] = congress_history.ranking_rows(
-                conn, congress_history.watermark(conn), datetime.now(timezone.utc)
+                conn, through, datetime.now(timezone.utc)
             )
         symbols = tuple(candidate_symbols(rows))
         if symbols not in cap_cache:  # a Q7 retry must not call FMP again

@@ -29,9 +29,13 @@ def begin_run(
     mode: str = "live",
     *,
     dependencies: Mapping[str, int] | None = None,
+    history_through: int | None = None,
 ) -> int:
+    """history_through: the Congress history watermark a downstream plan used."""
     if source not in SOURCES or mode not in COLLECTION_MODES:
         raise ValueError("invalid source or collection mode")
+    if history_through is not None and "congress_trades" not in (dependencies or {}):
+        raise ValueError("a history watermark needs a Congress dependency")
     with engine.begin() as conn:
         run_id = conn.execute(
             insert(ingestion_runs)
@@ -52,7 +56,12 @@ def begin_run(
                 raise ValueError("dependency batch does not match source")
             conn.execute(
                 insert(run_dependencies).values(
-                    run_id=run_id, source=upstream, batch_id=batch_id
+                    run_id=run_id,
+                    source=upstream,
+                    batch_id=batch_id,
+                    history_through_id=history_through
+                    if upstream == "congress_trades"
+                    else None,
                 )
             )
     return cast(int, run_id)

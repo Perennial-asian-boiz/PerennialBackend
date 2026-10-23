@@ -94,7 +94,7 @@ def gaps(engine):
         return conn.execute(select(models.congress_history_gaps)).mappings().all()
 
 
-def full_pipeline(engine, fixture_path, congress_rows=None, served=None):
+def full_pipeline(engine, fixture_path, congress_rows=None, served=None, through=None):
     """Live runs for every source with downstream lineage on this Congress batch."""
     congress = congress_run(
         engine,
@@ -113,7 +113,13 @@ def full_pipeline(engine, fixture_path, congress_rows=None, served=None):
             if source in ("insider_trades", "short_interest")
             else {}
         )
-        run = begin_run(engine, source, "live", dependencies=deps)
+        run = begin_run(
+            engine,
+            source,
+            "live",
+            dependencies=deps,
+            history_through=(through or {}).get(source),
+        )
         result = import_collection(
             engine,
             CollectionOutcome.success(
@@ -439,3 +445,122 @@ def test_run_pipeline_publishes_on_the_free_plan(engine, monkeypatch):
     assert ranked["ZZCC"]["signals"]["congress"]["buy_count"] == 40
     assert replay(engine, first) == first_output
     assert replay(engine, second) == output
+
+
+def test_downstream_sources_are_planned_from_history(engine, monkeypatch):
+    """
+    CI-1: a Congress-only ticker that has scrolled off today's page still ranks
+    from history, so insider and short interest must be requested for it, and
+    the downstream runs must record the history watermark the publication pins.
+    """
+    import requests
+    from src.ingestion import collectors
+    from src.pipeline.runner import run_pipeline
+    from test_pipeline_contract import Provider, StubResponse, stub_market_caps
+
+    class FreePlan(Provider):
+        day = 0
+
+        def fmp_trades(self, chamber):
+            base = self.today - timedelta(days=5 - self.day)
+            return [
+                {
+                    "symbol": "ZZQQ" if self.day == 0 else "ZZCC",
+                    "firstName": "Synthetic",
+                    "lastName": f"{chamber} {self.day} {i}",
+                    "type": "Purchase",
+                    "amount": "$1,001 - $15,000",
+                    "transactionDate": (base - timedelta(days=i)).isoformat(),
+                    "disclosureDate": (base - timedelta(days=i)).isoformat(),
+                    "assetDescription": "Synthetic Corp",
+                    "assetType": "Stock",
+                    "district": "",
+                    "link": f"https://disclosures.example.invalid/{chamber}/{i}",
+                }
+                for i in range(20)
+            ]
+
+        def get(self, session, url, params=None, **kwargs):
+            params = params or {}
+            if "financialmodelingprep.com" in url and url.endswith("-latest"):
+                if int(params["page"]) > 0 or int(params["limit"]) > 20:
+                    return StubResponse({}, status=402)
+            return super().get(session, url, params=params, **kwargs)
+
+    stub = FreePlan()
+    monkeypatch.setattr(
+        requests.Session,
+        "get",
+        lambda self, url, params=None, **kw: stub.get(self, url, params, **kw),
+    )
+    for name in ("ark", "insider", "short_interest"):
+        monkeypatch.setattr(collectors._fetcher(name), "REQUEST_DELAY", 0)
+    monkeypatch.setattr(collectors._fetcher("fmp"), "FMP_API_KEY", "synthetic-test-key")
+
+    run_pipeline(engine, market_cap_collector=stub_market_caps)
+    stub.day = 1
+    stub.requested = {"insider_trades": [], "short_interest": []}
+    pub = run_pipeline(engine, market_cap_collector=stub_market_caps)
+
+    assert "ZZQQ" in stub.requested["insider_trades"]
+    assert "ZZQQ" in stub.requested["short_interest"]
+    output = current(engine)["output"]
+    ranked = {
+        row["ticker"]: row
+        for name in ("popular_stable", "affordable_growing", "unresolved")
+        for row in output[name]
+    }
+    assert ranked["ZZQQ"]["signals"]["congress"]["buy_count"] == 40
+    assert ranked["ZZQQ"]["signals"]["insider"] is not None
+    assert ranked["ZZQQ"]["signals"]["short_interest"] is not None
+
+    d, w, p = (
+        models.run_dependencies,
+        models.publication_history_watermarks,
+        models.publication_sources,
+    )
+    with engine.connect() as conn:
+        pinned = conn.execute(
+            select(w.c.through_history_id).where(w.c.publication_id == pub)
+        ).scalar_one()
+        planned = conn.execute(
+            select(p.c.source, d.c.history_through_id)
+            .join(d, d.c.run_id == p.c.run_id)
+            .where(p.c.publication_id == pub, d.c.source == "congress_trades")
+        ).all()
+    assert sorted(planned) == [("insider_trades", pinned), ("short_interest", pinned)]
+
+
+def test_publish_refuses_downstream_runs_planned_from_different_history(
+    engine, fixture_path
+):
+    from src.pipeline.publication import PublicationError
+
+    derive(engine, congress_run(engine, page("a", 10)).run_id)
+    with engine.begin() as conn:
+        w = congress_history.watermark(conn)
+    runs, batches = full_pipeline(
+        engine,
+        fixture_path,
+        page("a", 10),
+        through={"insider_trades": w, "short_interest": w - 1},
+    )
+    with pytest.raises(PublicationError, match="different Congress history"):
+        publish(engine, runs, caps_for(engine, batches))
+
+
+def test_publish_refuses_plans_that_predate_the_selected_batch(engine, fixture_path):
+    from src.pipeline.publication import PublicationError
+
+    derive(engine, congress_run(engine, page("a", 10)).run_id)
+    with engine.begin() as conn:
+        stale = congress_history.watermark(conn)
+    # New trades arrive, but the downstream plans recorded the older watermark.
+    runs, batches = full_pipeline(
+        engine,
+        fixture_path,
+        page("b", 0),
+        through={"insider_trades": stale, "short_interest": stale},
+    )
+    with pytest.raises(PublicationError, match="predate the selected Congress batch"):
+        publish(engine, runs, caps_for(engine, batches))

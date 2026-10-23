@@ -254,3 +254,53 @@ def summary(
         },
         "gaps_in_window": {"count": int(count), "max_days": int(max_days)},
     }
+
+
+def fold_batch(conn: Connection, batch_id: int) -> None:
+    """Make sure a selected Congress batch is in history before planning from it."""
+    r = m.ingestion_runs
+    run_id = conn.execute(
+        select(r.c.id)
+        .where(
+            r.c.source == SOURCE,
+            r.c.batch_id == batch_id,
+            r.c.status == "succeeded",
+            r.c.collection_mode == "live",
+        )
+        .order_by(r.c.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if run_id is not None:
+        derive(conn, run_id)
+
+
+def planned_watermark(conn: Connection, run_ids: Mapping[str, int]) -> Optional[int]:
+    """
+    The history watermark both downstream runs were planned from, or None when
+    neither recorded one (runs planned before CI-1). Disagreement is refused:
+    the publication must rank exactly the history its downstream plans covered.
+    """
+    d = m.run_dependencies
+    recorded = {
+        source: conn.execute(
+            select(d.c.history_through_id).where(
+                d.c.run_id == run_ids[source], d.c.source == SOURCE
+            )
+        ).scalar_one_or_none()
+        for source in ("insider_trades", "short_interest")
+    }
+    values = set(recorded.values())
+    if len(values) != 1:
+        raise ValueError("downstream runs were planned from different Congress history")
+    (value,) = values
+    return None if value is None else int(value)
+
+
+def covers_batch(conn: Connection, through: int, batch_id: int) -> bool:
+    """True when every history row first seen in batch_id is within `through`."""
+    h = m.congress_trade_history
+    return not conn.execute(
+        select(func.count()).where(
+            h.c.first_seen_batch_id == batch_id, h.c.history_id > through
+        )
+    ).scalar_one()

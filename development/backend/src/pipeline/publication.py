@@ -646,7 +646,19 @@ def publish(
         # Quality checks above judge the day's observation batch; ranking reads
         # the accumulated Congress history it was folded into (v3).
         congress_history.derive(conn, runs["congress_trades"]["id"])
-        through = congress_history.watermark(conn)
+        try:
+            planned = congress_history.planned_watermark(conn, run_ids)
+        except ValueError:
+            raise PublicationError(
+                "downstream runs were planned from different Congress history"
+            ) from None
+        # Pin the history the downstream plans covered. Runs planned before
+        # CI-1 recorded none; they rank the history visible now, as before.
+        through = congress_history.watermark(conn) if planned is None else planned
+        if not congress_history.covers_batch(conn, through, batches["congress_trades"]):
+            raise PublicationError(
+                "downstream plans predate the selected Congress batch"
+            )
         ranked = {
             **rows,
             "congress_trades": congress_history.ranking_rows(conn, through, now),

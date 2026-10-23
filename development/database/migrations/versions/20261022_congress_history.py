@@ -4,7 +4,8 @@ Expand only. The free FMP plan serves only the latest 20 disclosures per
 chamber, so live Congress batches are folded into an append-only history that
 publications pin by watermark (docs/work-items/congress-incremental-design-note.md).
 Publications made before this revision have no watermark and replay from their
-pinned batch. Downgrade drops the history; observation batches are untouched,
+pinned batch. Downstream runs record the history watermark they were planned
+from on their Congress run_dependencies row (nullable; older runs have none). Downgrade drops the history; observation batches are untouched,
 so it can be re-derived from them.
 
 Placeholder revision id: renumber and re-chain at merge per roadmap §4.
@@ -65,6 +66,10 @@ def upgrade():
     schema='perennial'
     )
     op.create_index('ix_congress_history_gaps_detected_run_id', 'congress_history_gaps', ['detected_run_id'], schema='perennial')
+    op.add_column('run_dependencies', sa.Column('history_through_id', sa.BigInteger(), nullable=True), schema='perennial')
+    op.create_check_constraint(op.f('ck_run_dependencies_history_through_id'), 'run_dependencies',
+                               "history_through_id IS NULL OR (source = 'congress_trades' AND history_through_id >= 0)",
+                               schema='perennial')
     op.create_table('publication_history_watermarks',
     sa.Column('publication_id', sa.BigInteger(), nullable=False),
     sa.Column('source', sa.String(length=32), nullable=False),
@@ -80,6 +85,8 @@ def upgrade():
 def downgrade():
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.drop_table('publication_history_watermarks', schema='perennial')
+    op.drop_constraint(op.f('ck_run_dependencies_history_through_id'), 'run_dependencies', type_='check', schema='perennial')
+    op.drop_column('run_dependencies', 'history_through_id', schema='perennial')
     op.drop_index('ix_congress_history_gaps_detected_run_id', table_name='congress_history_gaps', schema='perennial')
     op.drop_table('congress_history_gaps', schema='perennial')
     op.drop_index('ix_congress_trade_history_first_seen_batch_id', table_name='congress_trade_history', schema='perennial')
