@@ -64,7 +64,12 @@ from src.ingestion.diagnostics import (
     safe_diagnostics,
 )
 from src.ingestion.identity import ALIAS_COLLISION, UNRESOLVED, resolve_tickers
-from src.ingestion.schemas import ONE_ROW_PER_SECURITY, RECORD_MODELS, SourceRecord
+from src.ingestion.schemas import (
+    ONE_ROW_PER_SECURITY,
+    RECORD_MODELS,
+    ContractRecord,
+    SourceRecord,
+)
 from src.pipeline.lifecycle import (
     RunIdentityError,
     RunInactive,
@@ -173,7 +178,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
+def validate_records(source: str, raw_records: Any) -> List[ContractRecord]:
     """Validate every record; raise ImportFailure describing (without values) what failed."""
     if not isinstance(raw_records, list):
         raise ImportFailure("malformed_input")
@@ -181,7 +186,7 @@ def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
         raise ImportFailure("input_too_large", {"input_count": len(raw_records)})
     model = RECORD_MODELS[source]
     found = _Errors()
-    parsed: List[SourceRecord] = []
+    parsed: List[ContractRecord] = []
     exchanges: Dict[str, str] = {}
     seen: set[str] = set()
     for index, raw in enumerate(raw_records):
@@ -196,6 +201,9 @@ def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
             ):
                 loc = ".".join(str(part) for part in err.get("loc", ()))
                 found.add(index, loc, err.get("type", "invalid"))
+            continue
+        if not isinstance(record, SourceRecord):
+            parsed.append(record)
             continue
         if source in ONE_ROW_PER_SECURITY:
             if record.ticker in seen:
@@ -393,14 +401,19 @@ def _write_batch(
         ).scalar_one()
         return existing, True, 0
 
-    security_ids, registered = _resolve_securities(conn, batch.source, batch.records)
+    # Subject-less sources (SUBJECTLESS_SOURCES) never touch securities.
+    subjects = [r for r in batch.records if isinstance(r, SourceRecord)]
+    security_ids, registered = (
+        _resolve_securities(conn, batch.source, subjects) if subjects else ({}, 0)
+    )
     table = SOURCE_TABLES[batch.source]
     has_row_number = "row_number" in table.c
     rows = []
     for position, record in enumerate(batch.records, start=1):
         values = record.db_values()
         values["batch_id"] = batch_id
-        values["security_id"] = security_ids[record.ticker]
+        if isinstance(record, SourceRecord):
+            values["security_id"] = security_ids[record.ticker]
         if has_row_number:
             values["row_number"] = position
         rows.append(values)

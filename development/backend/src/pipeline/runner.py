@@ -136,7 +136,7 @@ def _reuse_prior_cohort(
     calls; a sibling collected fresh today stays recorded but unpublished.
     """
     chosen.pinned(prior, source, why)
-    for other in m.SOURCES:
+    for other in m.WATCHLIST_SOURCES:
         if other == source or other in chosen.reuse:
             continue
         chosen.pinned(

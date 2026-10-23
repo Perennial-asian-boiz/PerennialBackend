@@ -42,6 +42,8 @@ ERROR_SUMMARIES = {
     "reuse_not_current": "a reused run is no longer pinned by the current publication or is too old",
     "observation_regressed": "a source's observation date would go backwards",
     "lineage_mismatch": "a downstream run was planned from different upstream batches",
+    "rollback_rejected": "rollback target is missing, already current or not reproducible",
+    "gdelt_incomplete": "one or more GDELT themes failed in the scheduled run",
     "worker_abandoned": "Worker heartbeat expired.",
     "collection_failed": "collection did not complete",
     "partial_collection": "collection was incomplete; some units failed",
