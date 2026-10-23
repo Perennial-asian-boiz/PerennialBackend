@@ -121,6 +121,20 @@ class Settings(ProviderSettings):
         default=MARKET_CAP_MAX_REUSE_AGE, gt=timedelta(0)
     )
     trading_holidays: tuple[date, ...] = TRADING_HOLIDAYS
+    # A name in src.ingestion.market_caps.ADAPTERS. None keeps the legacy
+    # market-cap path (M4 MC-A); no production adapter exists yet.
+    market_cap_adapter: str | None = None
+
+    @field_validator("market_cap_adapter")
+    @classmethod
+    def known_market_cap_adapter(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from src.ingestion.market_caps import ADAPTERS  # the registry imports Settings
+
+        if value not in ADAPTERS:
+            raise ValueError("unknown market-cap adapter")
+        return value
 
     @field_validator("source_policies")
     @classmethod
