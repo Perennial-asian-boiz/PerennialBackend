@@ -79,6 +79,12 @@ def _parser() -> argparse.ArgumentParser:
         help="a failed check to override, as reported (repeatable; needs --override)",
     )
     manual.add_argument("--actor", help="operator identity for the override audit")
+    back = sub.add_parser(
+        "rollback", help="serve an earlier publication again, with an audited reason"
+    )
+    back.add_argument("--to", dest="to_publication_id", type=int, required=True)
+    back.add_argument("--reason", required=True, help="why production goes back")
+    back.add_argument("--actor", help="operator identity for the rollback audit")
     sub.add_parser("current", help="show the published watchlist")
     sub.add_parser("health", help="machine-readable health; exits 1 when unhealthy")
     replay = sub.add_parser(
@@ -183,6 +189,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 }
             )
             return 0
+        if args.command == "rollback":
+            from src.pipeline.publication import rollback
+
+            previous = rollback(
+                engine,
+                args.to_publication_id,
+                actor=args.actor or getpass.getuser(),
+                reason=args.reason,
+            )
+            _print(
+                {"publication_id": args.to_publication_id, "rolled_back_from": previous}
+            )
+            return 0
         if args.command == "current":
             from src.pipeline.publication import current
 
@@ -258,13 +277,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             OverrideInputError,
             PublicationInProgressError,
             PublicationQualityError,
+            RollbackError,
         )
+        from src.pipeline.runner import RequiredSourceUnavailableError
 
         if isinstance(exc, PublicationQualityError):
             _print({"error_code": exc.code, "checks": list(exc.checks)})
             return 1
-        if isinstance(exc, PublicationInProgressError):
+        if isinstance(exc, (PublicationInProgressError, RollbackError)):
             _print({"error_code": exc.code})
+            return 1
+        if isinstance(exc, RequiredSourceUnavailableError):
+            _print({"error_code": exc.code, "source": exc.source})
             return 1
         if isinstance(exc, OverrideInputError):
             # Fixed text only: the rejected input may itself hold a secret.
