@@ -35,9 +35,9 @@ Every field comes from immutable data: the `publications` row, its quality event
 |---|---|---|
 | `id` | integer | publication id |
 | `created_at` | string | ISO 8601 creation time, UTC |
-| `ranking_version` | string | ranking algorithm version, e.g. `watchlist-v2` |
+| `ranking_version` | string | ranking algorithm version, e.g. `watchlist-v3` |
 | `demo` | boolean | true only when the quality event marks a demo publication |
-| `degraded` | boolean | true when the publication has a `degraded` event (some source was reused) |
+| `degraded` | boolean | true when the publication has a `degraded` event: a reused source, Congress history gaps or a market-cap fallback. `stale_sources` can be `[]` while this is true |
 | `stale_sources` | array | the reused sources, sorted by `source`: `{source, collected_at, age_seconds}`. `[]` when not degraded |
 | `market_caps_unavailable` | integer | records in `watchlist`, across all buckets, whose `warnings` contain `market_cap_unavailable`. This doesn't imply `degraded` |
 | `congress_history_gaps` | integer | the degraded event's Congress gap count, else `0` |
@@ -86,3 +86,5 @@ The profile's `legal_name`, `cik` and other columns are never served.
 ## Mounting in #22's app
 
 `router` already carries the `/v1` prefix: `app.include_router(read.router)`. The app must set `app.state.engine` (an engine for the `api` workload) and call `read.check_startup(engine, "perennial_api")` before serving. It also needs the error handlers `create_app()` installs, so that errors keep the `{"detail", "code"}` shape.
+
+Serve with uvicorn's access log off (`log_config=None` or `access_log=False`): it prints raw request lines, query strings included, and bypasses the JSON log redaction.

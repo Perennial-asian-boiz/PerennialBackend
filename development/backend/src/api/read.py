@@ -17,6 +17,7 @@ Design: docs/work-items/m5-read-api-design-note.md. Schemas: docs/technical-spec
 import json
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
+from datetime import timezone
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request, Response
@@ -81,7 +82,10 @@ class Publication(BaseModel):
     created_at: str = Field(description="ISO 8601, UTC")
     ranking_version: str
     demo: bool = Field(description="True only for a demo publication")
-    degraded: bool = Field(description="True when any source was reused")
+    degraded: bool = Field(
+        description="True when the publication has a degraded event: a reused source,"
+        " Congress history gaps or a market-cap fallback; stale_sources may be empty"
+    )
     stale_sources: list[StaleSource] = Field(description="Reused sources, by source")
     market_caps_unavailable: int = Field(
         description="Records warning market_cap_unavailable, across all buckets"
@@ -206,7 +210,8 @@ def _envelope(conn: Connection, publication_id: int) -> tuple[dict[str, Any], An
     as_of = (pub.ranking_config or {}).get("source_as_of") or {}
     meta = {
         "id": int(pub.id),
-        "created_at": pub.created_at.isoformat(),
+        # MR1-1: UTC, so the body never depends on the session time zone.
+        "created_at": pub.created_at.astimezone(timezone.utc).isoformat(),
         "ranking_version": pub.ranking_version,
         "demo": quality.get("demo") is True,
         "degraded": degraded is not None,
@@ -261,13 +266,14 @@ def _etag_matches(header: str | None, etag: str) -> bool:
     return "*" in tags or etag in tags or f"W/{etag}" in tags
 
 
-ERRORS = {
+ERRORS: dict[int | str, dict[str, Any]] = {
     404: {
         "model": ErrorBody,
         "description": "No current publication, or unknown security",
     },
     422: {"model": ErrorBody, "description": "invalid_request"},
 }
+WATCHLIST_404 = {"model": ErrorBody, "description": "No current publication"}
 
 router = APIRouter(prefix="/v1")
 
@@ -277,7 +283,7 @@ router = APIRouter(prefix="/v1")
     response_model=WatchlistResponse,
     responses={
         304: {"description": "Not modified (If-None-Match matched)"},
-        404: ERRORS[404],
+        404: WATCHLIST_404,
     },
 )
 def get_watchlist(request: Request) -> Response:

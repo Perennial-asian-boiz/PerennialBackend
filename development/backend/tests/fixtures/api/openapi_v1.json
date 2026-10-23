@@ -76,7 +76,7 @@
                 }
               }
             },
-            "description": "No current publication, or unknown security"
+            "description": "No current publication"
           }
         },
         "summary": "Get Watchlist"
@@ -115,7 +115,7 @@
           "type": "string"
         },
         "degraded": {
-          "description": "True when any source was reused",
+          "description": "True when the publication has a degraded event: a reused source, Congress history gaps or a market-cap fallback; stale_sources may be empty",
           "title": "Degraded",
           "type": "boolean"
         },
