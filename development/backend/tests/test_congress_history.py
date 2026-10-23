@@ -18,6 +18,18 @@ from src.pipeline.runner import collect_source
 
 pytestmark = pytest.mark.db
 
+
+@pytest.fixture(autouse=True)
+def leave_no_history(engine):
+    """Other modules downgrade the shared session database; history blocks that."""
+    yield
+    from sqlalchemy import text
+
+    names = ", ".join(f"perennial.{t.name}" for t in models.metadata.sorted_tables)
+    with engine.begin() as conn:
+        conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+
+
 TODAY = datetime.now(timezone.utc).date()
 FILES = {
     "congress_trades": ("trades_congress.json", "trades"),
@@ -564,3 +576,87 @@ def test_publish_refuses_plans_that_predate_the_selected_batch(engine, fixture_p
     )
     with pytest.raises(PublicationError, match="predate the selected Congress batch"):
         publish(engine, runs, caps_for(engine, batches))
+
+
+# ── migration: downgrade must not destroy replay lineage (SEC-CONGRESS-01) ──
+
+
+def _version(conn):
+    from sqlalchemy import text
+
+    return conn.execute(text("SELECT version_num FROM public.alembic_version")).scalar()
+
+
+def _populate(engine, fixture_path, state):
+    """One kind of history-dependent state at a time."""
+    if state == "watermark":
+        return publish_now(engine, fixture_path)
+    if state == "history":
+        derive(engine, congress_run(engine, [trade("A", 1)]).run_id)
+    elif state == "gap":
+        derive(engine, congress_run(engine, page("old", 30), {"Senate": 20}).run_id)
+        derive(engine, congress_run(engine, page("new", 0), {"Senate": 20}).run_id)
+        assert gaps(engine)
+    elif state == "dependency":
+        congress = congress_run(engine, [trade("A", 1)])
+        begin_run(
+            engine,
+            "insider_trades",
+            "live",
+            dependencies={"congress_trades": congress.batch_id, **_ark(engine)},
+            history_through=0,
+        )
+    return None
+
+
+def _ark(engine):
+    from tests.conftest import FIXTURES
+
+    rows = json.loads((FIXTURES / "ark_holdings.json").read_text())["holdings"]
+    run = begin_run(engine, "ark_holdings", "live")
+    result = import_collection(
+        engine,
+        CollectionOutcome.success("ark_holdings", "live", rows),
+        run_id=run,
+    )
+    return {"ark_holdings": result.batch_id}
+
+
+@pytest.mark.parametrize("state", ["watermark", "history", "gap", "dependency"])
+def test_downgrade_refuses_while_history_state_exists(engine, fixture_path, state):
+    from alembic import command
+    from tests.conftest import alembic_config
+
+    pub = _populate(engine, fixture_path, state)
+    stored = current(engine)["output"] if pub else None
+    with engine.connect() as conn:
+        head = _version(conn)
+        with pytest.raises(RuntimeError, match="Congress history"):
+            command.downgrade(alembic_config(conn), "0007")
+        conn.rollback()
+        # Atomic: still at head, and every history table and column is intact.
+        assert _version(conn) == head == "congress_history_v1"
+        for table in (
+            "congress_trade_history",
+            "congress_history_gaps",
+            "publication_history_watermarks",
+        ):
+            assert (
+                conn.execute(select(func.to_regclass(f"perennial.{table}"))).scalar()
+                is not None
+            )
+    if pub:
+        assert replay(engine, pub) == stored
+
+
+def test_downgrade_still_works_without_history(engine):
+    from alembic import command
+    from tests.conftest import alembic_config
+
+    with engine.connect() as conn:
+        command.downgrade(alembic_config(conn), "0007")
+        conn.commit()
+        assert _version(conn) == "0007"
+        command.upgrade(alembic_config(conn), "head")
+        conn.commit()
+        assert _version(conn) == "congress_history_v1"

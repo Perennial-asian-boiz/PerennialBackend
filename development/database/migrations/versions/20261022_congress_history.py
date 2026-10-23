@@ -5,8 +5,10 @@ chamber, so live Congress batches are folded into an append-only history that
 publications pin by watermark (docs/work-items/congress-incremental-design-note.md).
 Publications made before this revision have no watermark and replay from their
 pinned batch. Downstream runs record the history watermark they were planned
-from on their Congress run_dependencies row (nullable; older runs have none). Downgrade drops the history; observation batches are untouched,
-so it can be re-derived from them.
+from on their Congress run_dependencies row (nullable; older runs have none).
+Downgrade refuses while any history-dependent state exists (watermarks,
+recorded plan watermarks, history or gap rows): dropping it would change how
+retained publications replay. It only runs on a database with none of that.
 
 Placeholder revision id: renumber and re-chain at merge per roadmap §4.
 """
@@ -83,6 +85,16 @@ def upgrade():
 
 
 def downgrade():
+    # Dropping this state is lossy: a publication that ranked accumulated history
+    # would replay from one batch afterwards, and re-deriving history cannot
+    # restore its original membership or watermark. Refuse before any change.
+    if op.get_bind().execute(sa.text(
+        "SELECT EXISTS (SELECT 1 FROM perennial.publication_history_watermarks)"
+        " OR EXISTS (SELECT 1 FROM perennial.run_dependencies WHERE history_through_id IS NOT NULL)"
+        " OR EXISTS (SELECT 1 FROM perennial.congress_trade_history)"
+        " OR EXISTS (SELECT 1 FROM perennial.congress_history_gaps)"
+    )).scalar():
+        raise RuntimeError("Congress history state exists; downgrade would lose publication lineage")
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.drop_table('publication_history_watermarks', schema='perennial')
     op.drop_constraint(op.f('ck_run_dependencies_history_through_id'), 'run_dependencies', type_='check', schema='perennial')
