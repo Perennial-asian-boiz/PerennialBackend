@@ -36,9 +36,13 @@ page, ticker) as completed or failed. Policy:
   * Failure details are unit names and fixed codes. URLs, query strings (the
     FMP key travels in one) and exception messages are never recorded or printed.
 
-Congress: any parsed trade without an ISO transaction date fails the
-collection (parse_error) before fmp.filter_recent, which would otherwise drop
-it silently. filter_recent's two-year window itself is kept as is.
+Congress: the free FMP plan serves only page 0 (20 rows) per chamber, so a
+run reads at most settings.fmp_max_pages pages (default 1) and a full final
+page ends the chamber instead of failing. Stored history accumulates across
+runs and possible gaps are detected there (src/pipeline/congress_history.py).
+Trades of every age are stored (D13); the 2-year window is applied in ranking.
+Any parsed trade without an ISO transaction date fails the collection
+(parse_error).
 
 The production database scheduler calls this COLLECTORS interface through
 src.pipeline.runner. The legacy JSON scheduler and fetchers' file run() entry
@@ -517,6 +521,8 @@ def collect_ark(
 
 # ── Congress (FMP) ───────────────────────────────────────
 
+FREE_PLAN_PAGES = 1  # the free plan answers deeper pages with HTTP 402
+
 
 def _string_fields_ok(item: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
     return all(item.get(k) is None or isinstance(item.get(k), str) for k in keys)
@@ -543,6 +549,7 @@ def collect_congress(
     sleep: Callable[[float], None] = time.sleep,
     *,
     settings: Optional[Settings] = None,
+    max_pages: Optional[int] = None,
 ) -> CollectionOutcome:
     fmp: FmpAdapter = _fetcher("fmp")
     key: Optional[str]
@@ -556,16 +563,28 @@ def collect_congress(
         return CollectionOutcome.failure(
             "congress_trades", "live", "missing_credential"
         )
-    page_limit = settings.fmp_max_pages if settings is not None else fmp.MAX_PAGES
+    if max_pages is not None:
+        page_limit = max_pages
+    elif settings is not None:
+        page_limit = settings.fmp_max_pages
+    else:
+        page_limit = FREE_PLAN_PAGES
     session = session or requests.Session()
-    # Initially one request per chamber. Full pages discover further required
-    # units; terminated pagination is not unattempted work.
-    page_counts = {"senate_pages_fetched": 0, "house_pages_fetched": 0}
+    # Initially one request per chamber. Full pages discover further units up
+    # to page_limit; a full final page is the end of what this run can see.
+    page_counts = {
+        "senate_pages_fetched": 0,
+        "house_pages_fetched": 0,
+        "senate_rows_served": 0,
+        "house_rows_served": 0,
+        "fmp_calls": 0,
+    }
     tracker = _Tracker("Congress requests", planned=2, extra_counts=page_counts)
     raw_fmp: List[Dict[str, Any]] = []
     for chamber in ("senate", "house"):
         for page in range(page_limit):
             unit = f"{chamber} page {page}"
+            page_counts["fmp_calls"] += 1
             resp = _get_json(
                 session,
                 f"{fmp.BASE_URL}/{chamber}-latest",
@@ -585,24 +604,20 @@ def collect_congress(
                 tracker.fail(unit, "malformed_response")
                 return tracker.outcome("congress_trades", [])
             page_counts[f"{chamber}_pages_fetched"] += 1
-            if len(items) == 20 and page == page_limit - 1:
-                tracker.fail(unit, "pagination_exhausted")
-                return tracker.outcome("congress_trades", [])
+            page_counts[f"{chamber}_rows_served"] += len(items)
             tracker.ok()
             for item in items:
                 item["_chamber"] = chamber.capitalize()
             raw_fmp.extend(items)
-            if len(items) < 20:
+            if len(items) < 20 or page == page_limit - 1:
                 break
             if tracker.planned is not None:
                 tracker.planned += 1
     try:
         trades = fmp.parse_trades(raw_fmp)
-        # filter_recent silently drops rows whose date does not parse, so a
-        # malformed required date must fail the collection before it runs.
         if not all(_is_iso_date(t.get("transaction_date")) for t in trades):
             return tracker.parse_failure("congress_trades")
-        trades = fmp.filter_recent(fmp.deduplicate_proven_repeats(trades), years=2)
+        trades = fmp.deduplicate_proven_repeats(trades)
     except (TypeError, ValueError, AttributeError, KeyError):
         return tracker.parse_failure("congress_trades")
     envelope = {

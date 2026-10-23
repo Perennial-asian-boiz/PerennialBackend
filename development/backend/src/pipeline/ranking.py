@@ -10,7 +10,9 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence, cast
 
-VERSION = "watchlist-v2"
+# v3 ranks accumulated Congress history (2-year window) instead of one batch;
+# the scoring itself is unchanged from v2.
+VERSION = "watchlist-v3"
 DEFAULT_CONFIG = {"market_cap_threshold": "10000000000"}
 
 
@@ -72,14 +74,14 @@ def calculate(
     *,
     version: str = VERSION,
 ) -> dict[str, Any]:
-    if version not in ("watchlist-v1", "watchlist-v2"):
+    if version not in ("watchlist-v1", "watchlist-v2", "watchlist-v3"):
         raise ValueError("unsupported ranking version")
     config = dict(DEFAULT_CONFIG if config is None else config)
     threshold = Decimal(config["market_cap_threshold"])
     congress: dict[str, list[dict[str, Any]]] = defaultdict(list)
     insiders: dict[str, list[dict[str, Any]]] = defaultdict(list)
     congress_rows = rows["congress_trades"]
-    if version == "watchlist-v2":
+    if version in ("watchlist-v2", "watchlist-v3"):
         congress_rows = _cross_provider_purchases(congress_rows)
     for row in congress_rows:
         if "purchase" in row["trade_type"].lower():

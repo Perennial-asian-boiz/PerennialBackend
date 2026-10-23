@@ -17,6 +17,7 @@ from src.db import models as m
 from src.db.queries import batch_rows, latest_successful_run
 from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
+from src.pipeline import congress_history
 from src.pipeline.demo_guard import DEMO_MODES, LIVE_MODES, check_demo_database
 from src.pipeline.lifecycle import (
     abandon_stale_runs,
@@ -148,13 +149,17 @@ def _reuse_prior_cohort(
 
 
 def _upstream(
-    conn: Connection, batches: Mapping[str, int]
+    conn: Connection, batches: Mapping[str, int], history_through: int
 ) -> dict[str, list[dict[str, Any]]]:
-    result = {}
-    for source, key in (("congress_trades", "trades"), ("ark_holdings", "holdings")):
-        rows = batch_rows(conn, source, batches[source])
-        result[key] = [dict(r, ticker=r["symbol"]) for r in rows]
-    return result
+    """Downstream plans cover what publish ranks: windowed Congress history (CI-1)."""
+    congress = congress_history.ranking_rows(
+        conn, history_through, datetime.now(timezone.utc)
+    )
+    holdings = batch_rows(conn, "ark_holdings", batches["ark_holdings"])
+    return {
+        "trades": [dict(r, ticker=r["symbol"]) for r in congress],
+        "holdings": [dict(r, ticker=r["symbol"]) for r in holdings],
+    }
 
 
 def _accepts_settings(collector: Callable[..., CollectionOutcome]) -> bool:
@@ -193,7 +198,8 @@ def collect_source(
         dependencies = {}
         missing = False
         downstream = source in ("insider_trades", "short_interest")
-        with engine.connect() as conn:
+        history_through = None
+        with engine.begin() as conn:
             if downstream:
                 if upstream_batches is None:
                     selected = {s: latest_successful_run(conn, s) for s in UPSTREAM}
@@ -209,8 +215,24 @@ def collect_source(
                     if set(upstream_batches) != set(UPSTREAM):
                         raise ValueError("both upstream batch IDs are required")
                     dependencies = dict(upstream_batches)
-            upstream = _upstream(conn, dependencies) if dependencies else None
-        run_id = begin_run(engine, source, record_mode, dependencies=dependencies)
+            upstream = None
+            if dependencies:
+                if record_mode != "live":
+                    check_demo_database(conn)  # fixture history: demo DB only
+                congress_history.fold_batch(
+                    conn,
+                    dependencies["congress_trades"],
+                    LIVE_MODES if record_mode == "live" else DEMO_MODES,
+                )
+                history_through = congress_history.watermark(conn)
+                upstream = _upstream(conn, dependencies, history_through)
+        run_id = begin_run(
+            engine,
+            source,
+            record_mode,
+            dependencies=dependencies,
+            history_through=history_through,
+        )
         with heartbeat_worker(engine, run_id):
             if missing:
                 outcome = CollectionOutcome.failure(
@@ -244,6 +266,24 @@ def collect_source(
                         diagnostics=exception_diagnostics(exc),
                     )
             result = import_collection(engine, outcome, run_id=run_id)
+        if source == "congress_trades" and result.succeeded:
+            # Fold every live page into history now: an unpublished (evening)
+            # run's rows would otherwise scroll off the free page unseen.
+            with engine.begin() as conn:
+                if record_mode != "live":
+                    check_demo_database(conn)  # fixture history: demo DB only
+                derived = congress_history.derive(
+                    conn,
+                    result.run_id,
+                    LIVE_MODES if record_mode == "live" else DEMO_MODES,
+                )
+            logger.info(
+                "congress history run_id=%s added=%s possible_gaps=%s gap_days=%s",
+                result.run_id,
+                derived["history_added"],
+                derived["possible_gaps"],
+                derived["gap_days"],
+            )
         logger.info(
             "collection source=%s run_id=%s status=%s code=%s",
             source,
@@ -544,8 +584,17 @@ def _run_pipeline(
     cap_cache: dict[tuple[str, ...], tuple[Mapping[str, dict[str, Any]], bool]] = {}
 
     def publish_selection(selection: Selection) -> int:
-        with engine.connect() as conn:
+        # Candidates must match what publish() ranks: the history the
+        # downstream runs were planned from.
+        with engine.begin() as conn:
             rows = {s: batch_rows(conn, s, b) for s, b in selection.batches.items()}
+            congress_history.derive(conn, selection.runs["congress_trades"], modes)
+            through = congress_history.planned_watermark(conn, selection.runs)
+            if through is None:
+                through = congress_history.watermark(conn)
+            rows["congress_trades"] = congress_history.ranking_rows(
+                conn, through, datetime.now(timezone.utc)
+            )
         symbols = tuple(candidate_symbols(rows))
         if symbols not in cap_cache:  # a Q7 retry must not call FMP again
             cap_cache[symbols] = market_caps_or_fallback(

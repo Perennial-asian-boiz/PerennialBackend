@@ -18,6 +18,7 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from src.db import models as m
 from src.db.queries import batch_rows
 from src.ingestion.diagnostics import safe_code
+from src.pipeline import congress_history
 from src.pipeline.demo_guard import (
     DEMO_MODES,
     LIVE_MODES,
@@ -668,21 +669,50 @@ def publish(
                     or as_of[old.source] < old.source_as_of.isoformat()
                 ):
                     raise PublicationRegressionError(old.source)
-        symbols = candidate_symbols(rows)
+        # Quality checks above judge the day's observation batch; ranking reads
+        # the accumulated Congress history it was folded into (v3).
+        congress_history.derive(conn, runs["congress_trades"]["id"], modes)
+        try:
+            planned = congress_history.planned_watermark(conn, run_ids)
+        except ValueError:
+            raise PublicationError(
+                "downstream runs were planned from different Congress history"
+            ) from None
+        # Pin the history the downstream plans covered. Runs planned before
+        # CI-1 recorded none; they rank the history visible now, as before.
+        through = congress_history.watermark(conn) if planned is None else planned
+        if not congress_history.covers_batch(conn, through, batches["congress_trades"]):
+            raise PublicationError(
+                "downstream plans predate the selected Congress batch"
+            )
+        ranked = {
+            **rows,
+            "congress_trades": congress_history.ranking_rows(conn, through, now),
+        }
+        history = congress_history.summary(conn, through, now)
+        symbols = candidate_symbols(ranked)
         cap_data = _caps(
             observations, symbols, now, market_cap_fallback or timedelta(days=1)
         )
         if market_cap_fallback is not None:
             degraded = _with_market_cap_fallback(degraded, cap_data)
+        if history["gaps_in_window"]["count"]:
+            degraded = degraded or {
+                "reused": {},
+                "cohort": [],
+                "all_sources_reused": False,
+            }
+            degraded["congress_gaps"] = history["gaps_in_window"]
         config = {
             **DEFAULT_CONFIG,
+            "congress_window_years": congress_history.WINDOW_YEARS,
             "source_as_of": as_of,
             "freshness_seconds": {
                 s: int(age.total_seconds()) for s, age in max_age.items()
             },
         }
         output = calculate(
-            rows, {s: o["value"] for s, o in cap_data.items()}, now, config
+            ranked, {s: o["value"] for s, o in cap_data.items()}, now, config
         )
         pub_id = conn.execute(
             insert(m.publications)
@@ -706,6 +736,7 @@ def publish(
                     "sources": source_audit,
                     "failed": failed_checks,
                     "overridden": overridden,
+                    "congress_history": history,
                     # Demo publications are marked in their audit event, not in
                     # ranking_config (ranking inputs only).
                     **({"demo": True} if demo else {}),
@@ -733,6 +764,13 @@ def publish(
                 )
                 for s in m.WATCHLIST_SOURCES
             ],
+        )
+        conn.execute(
+            insert(m.publication_history_watermarks).values(
+                publication_id=pub_id,
+                source="congress_trades",
+                through_history_id=through,
+            )
         )
         security_ids = dict(
             conn.execute(
@@ -868,6 +906,19 @@ def replay(engine: Engine, publication_id: int) -> dict[str, Any]:
         rows = {
             s["source"]: batch_rows(conn, s["source"], s["batch_id"]) for s in sources
         }
+        through = conn.execute(
+            select(m.publication_history_watermarks.c.through_history_id).where(
+                m.publication_history_watermarks.c.publication_id == publication_id,
+                m.publication_history_watermarks.c.source == "congress_trades",
+            )
+        ).scalar_one_or_none()
+        if through is not None:  # v3: the pinned history, not one batch
+            rows["congress_trades"] = congress_history.ranking_rows(
+                conn,
+                through,
+                pub["created_at"],
+                pub["ranking_config"]["congress_window_years"],
+            )
         caps = dict(
             conn.execute(
                 select(m.securities.c.symbol, m.market_cap_observations.c.value)

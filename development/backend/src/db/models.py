@@ -449,9 +449,17 @@ run_dependencies = Table(
     ),
     Column("source", String(32), primary_key=True),
     Column("batch_id", BigInteger, nullable=False),
+    # For a downstream run's Congress dependency: the accumulated history it
+    # was planned from (congress_trade_history ids <= this). Publication pins it.
+    Column("history_through_id", BigInteger),
     ForeignKeyConstraint(
         ["batch_id", "source"],
         [f"{SCHEMA}.source_batches.id", f"{SCHEMA}.source_batches.source"],
+    ),
+    CheckConstraint(
+        "history_through_id IS NULL "
+        "OR (source = 'congress_trades' AND history_through_id >= 0)",
+        name="history_through_id",
     ),
 )
 
@@ -648,4 +656,95 @@ gdelt_spike_checks = Table(
     Column("is_spike", Boolean, nullable=False),
     Column("checked_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("theme", "day"),
+)
+
+# Accumulated Congress history (src/pipeline/congress_history.py). Append-only:
+# each row is one distinct trade first seen in a live Congress batch.
+congress_trade_history = Table(
+    "congress_trade_history",
+    metadata,
+    Column("history_id", BigInteger, Identity(always=True), primary_key=True),
+    Column("trade_key", String(64), nullable=False),
+    Column("occurrence", Integer, nullable=False),
+    _security_fk(),
+    Column("politician_name", String(200), nullable=False),
+    Column("chamber", String(16)),
+    Column("trade_type", String(100), nullable=False),
+    Column("transaction_date", Date, nullable=False),
+    Column("disclosure_date", Date),
+    Column("amount_label", String(100)),
+    Column("asset_description", String(500)),
+    Column("asset_type", String(100)),
+    Column("district", String(20)),
+    Column("source_link", String(2048)),
+    Column("data_source", String(32)),
+    Column(
+        "first_seen_batch_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.source_batches.id"),
+        nullable=False,
+    ),
+    UniqueConstraint("trade_key", "occurrence"),
+    CheckConstraint("trade_key ~ '^[0-9a-f]{64}$'", name="trade_key_format"),
+    CheckConstraint("occurrence >= 1", name="occurrence"),
+)
+Index("ix_congress_trade_history_security_id", congress_trade_history.c.security_id)
+Index(
+    "ix_congress_trade_history_chamber_disclosure",
+    congress_trade_history.c.chamber,
+    congress_trade_history.c.disclosure_date,
+)
+Index(
+    "ix_congress_trade_history_first_seen_batch_id",
+    congress_trade_history.c.first_seen_batch_id,
+)
+
+# A full free page that shared no row with stored history: trades may be missing.
+congress_history_gaps = Table(
+    "congress_history_gaps",
+    metadata,
+    _id(),
+    Column("chamber", String(16), nullable=False),
+    Column("newest_stored_date", Date, nullable=False),
+    Column("oldest_seen_date", Date, nullable=False),
+    Column("gap_days", Integer, nullable=False),
+    Column(
+        "detected_batch_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.source_batches.id"),
+        nullable=False,
+    ),
+    Column(
+        "detected_run_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.ingestion_runs.id"),
+        nullable=False,
+    ),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    UniqueConstraint("detected_batch_id", "chamber"),
+    CheckConstraint("gap_days >= 0", name="gap_days"),
+)
+Index(
+    "ix_congress_history_gaps_detected_run_id", congress_history_gaps.c.detected_run_id
+)
+
+# The history a publication ranked: every row with history_id <= through.
+publication_history_watermarks = Table(
+    "publication_history_watermarks",
+    metadata,
+    Column(
+        "publication_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.publications.id"),
+        primary_key=True,
+    ),
+    Column("source", String(32), primary_key=True),
+    Column("through_history_id", BigInteger, nullable=False),
+    CheckConstraint("source = 'congress_trades'", name="source"),
+    CheckConstraint("through_history_id >= 0", name="through_history_id"),
 )
