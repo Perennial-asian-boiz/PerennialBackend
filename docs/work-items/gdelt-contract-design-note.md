@@ -1,5 +1,7 @@
 # GDELT through the ingestion contract: design note
 
+> Built in #33 and #40 (both merged 2026-10-23 UTC, migration `0009`); the legacy-table drop, #41, is on hold. See `docs/roadmap/database-roadmap.md` for current state.
+
 **Branch:** `docs/gdelt-contract` · **Author:** db-implementer · **Status:** proposal, no code changed · **Plan of record:** `docs/roadmap/database-roadmap.md` §3 M6 (GDELT follow-up), design rules 1, 2 and 6 · **Builds on:** `docs/work-items/gdelt-design-note.md` (AalindCS), Option A
 
 The roadmap has already chosen the direction for the original note's questions:

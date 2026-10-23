@@ -178,7 +178,7 @@ The Phase 1/2 packets from `docs/work-items/phase-1-2-kickoff.md` that are **mer
 - a test that a reused batch past its limit aborts the run
 - replay of a degraded publication is byte-identical
 
-**State (2026-10-23):** **merged** in #29 (2026-10-22), with migration `0007` (at most one `degraded` event per publication), and in #31, where `cli run-pipeline` reports `required_source_unavailable`. #29 carries the gate tests: fault injection per source, the abort when a reused batch is past its limit, and byte-identical replay of a degraded publication. The checker ACCEPTED it and the auditor signed it off at `929ad88`.
+**State (2026-10-23):** **merged** in #29 (2026-10-22), with migration `0007` (at most one `degraded` event per publication), and in #31, where `cli run-pipeline` reports `required_source_unavailable`. #29 carries the gate tests: fault injection per source, the abort when a reused batch is past its limit, and byte-identical replay of a degraded publication. The checker ACCEPTED it and the auditor signed it off at `929ad88`, and Bryan signed off the gate by merging #29. Design note: `docs/work-items/m2-degraded-publishing-design-note.md`.
 
 ### M3: Platform (about 1 week; old Phase 3)
 
@@ -234,7 +234,7 @@ Migration (security identity; numbered at merge):
 
 **Gate M4:** every symbol in the current publication resolves to exactly one security. The #18 alias cases (`RKLB UQ`, `BRK.B`, `GOOG`) are regression tests, and the mapping code in `insider.py` is replaced by stored identifiers.
 
-**State (2026-10-23):** security identity is **merged** in #36 (2026-10-23), with migration `0008`:
+**State (2026-10-23):** security identity is **merged** in #36 (2026-10-23), with migration `0008`. Design note: `docs/work-items/m4-identity-design-note.md`. What it added:
 - the new `securities` columns, `security_identifiers` and `company_profiles`, including `sector` and `industry`
 - seeded aliases for RKLB, BRK.B and BRK-B, GOOG and GOOGL, with tests
 - resolution through the aliases. Congress and ARK register an unknown plain ticker as a new security and count it in run diagnostics. Insider and short interest only look tickers up, and fail with `unresolved_security`.
@@ -243,7 +243,7 @@ The sector and industry backfill is seed data applied by `ops/seed_identity.py`,
 
 Still open:
 - `insider.py` keeps its ticker-mapping function; a test proves the seeds reproduce it
-- the `market_caps` source is not started. Its design note (MC-1 to MC-6) is accepted on the local branch `docs/m4-market-caps`, not yet in a PR, and the build waits on the shared FMP budget question in the decision register
+- the `market_caps` source is not started. Its design note, `docs/work-items/m4-market-caps-design-note.md` (MC-1 to MC-6), is accepted, and the build waits on the shared FMP budget question in the decision register
 - whether every symbol in a current publication resolves to exactly one security needs a live publication to check
 
 ### M5: App data model and read API (1–1.5 weeks; issues #2 and #3; runs in parallel with M4 after M3)
@@ -290,7 +290,7 @@ These are the new sources and derivations from `DECISIONS.md`. Each source follo
 - send GDELT through the ingestion contract, with an expand migration that adds batch lineage to the GDELT tables
 - turn spike checks into a derivation run
 
-**State (2026-10-23):** GDELT PR 1 (#33) split the source vocabulary from the watchlist set and allowed records with no security. GDELT PR 2 (#40) sent theme volume, tone and evidence articles through the ingestion contract, with migration `0009`, and made spike detection a derivation (spike-v2). The 0005 tables are no longer written. GDELT PR 3 (#41) drops them as the contract step, and is on hold until #40 has shipped for one release. `company_profiles` now has the sector and industry columns (#36). Company-level `event_company_impacts` is not started, and neither are fundamentals, news and sentiment, or scores.
+**State (2026-10-23):** the rework's design note is `docs/work-items/gdelt-contract-design-note.md`. GDELT PR 1 (#33) split the source vocabulary from the watchlist set and allowed records with no security. GDELT PR 2 (#40) sent theme volume, tone and evidence articles through the ingestion contract, with migration `0009`, and made spike detection a derivation (spike-v2). The 0005 tables are no longer written. GDELT PR 3 (#41) drops them as the contract step, and is on hold until #40 has shipped for one release. `company_profiles` now has the sector and industry columns (#36). Company-level `event_company_impacts` is not started, and neither are fundamentals, news and sentiment, or scores.
 
 Recommended answers to the note's four questions:
 1. **Option A.** Extend the ingestion contract to sources that have no security, as its own PR before the GDELT tables.

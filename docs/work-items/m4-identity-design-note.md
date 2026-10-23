@@ -1,5 +1,7 @@
 # M4: lean security identity and reference data
 
+> Built in #36 (merged 2026-10-23, migration `0008`); see `docs/roadmap/database-roadmap.md` for current state.
+
 Status: proposed design for Bryan and checker review; no implementation or migration.
 Date: 2026-10-20. Branch: `docs/m4-identity`, rebased onto `origin/main` at `98381eb` after GDELT merged.
 

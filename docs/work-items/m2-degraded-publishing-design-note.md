@@ -1,5 +1,7 @@
 # M2 degraded publishing: design note
 
+> Built in #29 (merged 2026-10-22, migration `0007`); see `docs/roadmap/database-roadmap.md` for current state.
+
 **Branch:** `docs/m2-design` · **Author:** db-implementer · **Status:** proposal, no code changed · **Plan of record:** `docs/roadmap/database-roadmap.md` §3 M2; decisions D6 and D7 (settled by Bryan 2026-10-21)
 
 **Goal (roadmap M2):** one provider outage makes one source stale, not the whole watchlist.
