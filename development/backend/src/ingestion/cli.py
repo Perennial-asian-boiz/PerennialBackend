@@ -278,12 +278,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             PublicationQualityError,
             RollbackError,
         )
+        from src.pipeline.runner import RequiredSourceUnavailableError
 
         if isinstance(exc, PublicationQualityError):
             _print({"error_code": exc.code, "checks": list(exc.checks)})
             return 1
         if isinstance(exc, (PublicationInProgressError, RollbackError)):
             _print({"error_code": exc.code})
+            return 1
+        if isinstance(exc, RequiredSourceUnavailableError):
+            _print({"error_code": exc.code, "source": exc.source})
             return 1
         if isinstance(exc, OverrideInputError):
             # Fixed text only: the rejected input may itself hold a secret.

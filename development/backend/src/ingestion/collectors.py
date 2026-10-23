@@ -17,7 +17,8 @@ page, ticker) as completed or failed. Policy:
     partial results. A unit whose data would be dropped by such a swallowed
     error fails instead.
   * A collection that completed every unit with zero records is a successful
-    empty result (e.g. no insider buys in the window).
+    empty result (e.g. no insider buys in the window), except short interest:
+    an entirely empty Nasdaq universe fails with empty_short_interest.
   * Insider and short-interest plans use explicit upstream={trades, holdings}
     rows from pinned database batches. Only callers omitting upstream use the
     legacy bounded file fallback. Malformed supplied rows or missing/malformed
@@ -325,6 +326,17 @@ def _single_iso_date(values: List[Any]) -> Optional[date]:
     return date.fromisoformat(values[0])
 
 
+def _latest_iso_date(values: List[Any]) -> Optional[date]:
+    """Latest retained content date; empty or incomplete dates stay unknown.
+
+    Never substitute collection time: the date participates in batch identity.
+    Mixed settlement dates use the latest, retaining each row's own date.
+    """
+    if not values or not all(_is_iso_date(value) for value in values):
+        return None
+    return max(date.fromisoformat(value) for value in values)
+
+
 def _read_upstream(
     source: str, data_dir: Path
 ) -> Tuple[Optional[UpstreamRows], Optional[CollectionOutcome]]:
@@ -594,6 +606,7 @@ def collect_congress(
         trades,
         envelope=envelope,
         coverage={"complete": True, "scope": "recent_window"},
+        source_as_of=_latest_iso_date([t.get("disclosure_date") for t in trades]),
     )
 
 
@@ -698,10 +711,6 @@ def collect_insider(
             tracker.fail(ticker, "malformed_response")
             break
         else:
-            # insider.py returns (buys, error_code, error_detail). Its detail
-            # can contain provider data; only the fixed code crosses this
-            # boundary. A parser failure leaves the ticker unknown. Records
-            # keep the planned ticker, not the provider symbol.
             parsed_buys, parse_code, _parse_detail = insider.parse_finnhub_buys(
                 ticker, resp.data, bucket
             )
@@ -724,6 +733,10 @@ def collect_insider(
         "insider_trades",
         buys,
         envelope=envelope,
+        # Coverage through the exact UTC date sent in every request, not the
+        # newest buy in a changing universe. Pinned by the importer in batch
+        # identity; same content on a later query day intentionally differs.
+        source_as_of=date.fromisoformat(today),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 
@@ -807,6 +820,13 @@ def collect_short_interest(
                 records.append(record)
                 tracker.ok()
         sleep(si.REQUEST_DELAY)
+    if not records and not tracker.failure_count:
+        return CollectionOutcome.failure(
+            "short_interest",
+            "live",
+            "empty_short_interest",
+            diagnostics=tracker.diagnostics(),
+        )
     records.sort(key=lambda r: r["ticker"])
     envelope = {
         "schema_version": "1.0",
@@ -818,6 +838,7 @@ def collect_short_interest(
         "short_interest",
         records,
         envelope=envelope,
+        source_as_of=_latest_iso_date([r.get("settlement_date") for r in records]),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 

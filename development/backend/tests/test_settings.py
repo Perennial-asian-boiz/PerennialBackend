@@ -23,7 +23,8 @@ def test_settings_hide_secrets_and_supply_source_quality_defaults(monkeypatch):
     assert "synthetic-provider-secret" not in repr(settings)
     assert settings.fmp_max_pages == 50
     assert settings.quality_thresholds["short_interest"].allow_equal_as_of
-    assert not settings.quality_thresholds["congress_trades"].allow_equal_as_of
+    assert settings.quality_thresholds["congress_trades"].allow_equal_as_of
+    assert settings.quality_thresholds["insider_trades"].allow_equal_as_of
 
 
 def test_missing_database_setting_names_field_without_value(monkeypatch):

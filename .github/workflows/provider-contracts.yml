@@ -1,0 +1,20 @@
+name: Provider contracts (synthetic; live drift blocked on D3)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+# Deliberately no weekly trigger: staging keys and audited capture/scrubbing
+# must be approved before enabling live provider checks or issue creation.
+jobs:
+  synthetic-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - name: Install locked test requirements
+        run: python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Offline synthetic shape contracts
+        run: python -m pytest development/backend/tests/test_provider_contracts.py -q
