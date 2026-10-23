@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -293,6 +294,93 @@ def _no_plaintext(output):
     assert b"PGDMP" not in (output / "report.json").read_bytes()
 
 
+CONNECTION_KEYS = {"host", "hostaddr", "port", "user", "username", "password", "passfile",
+                   "dbname", "database", "dsn", "url", "conninfo", "sslmode"}
+
+
+def _no_connection_details(manifest_text, url):
+    """The manifest names nothing about the database connection.
+
+    Nothing here can match by chance: a bare port number can occur in the
+    archive sha256, sizes and timestamps, and a bare user, password, database or
+    host name can occur inside the backup's own name (the documented local user
+    is "perennial"), so those are only matched as whole JSON values or in forms
+    that need an "@" or ":" no manifest field has.
+    """
+    def walk(value):
+        if isinstance(value, dict):
+            for k, v in value.items():
+                yield "key", k.lower()
+                yield from walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                yield from walk(v)
+        elif isinstance(value, str):
+            yield "value", value.lower()
+
+    lowered = manifest_text.lower()
+    found = ["scheme"] if re.search(r"postgres(ql)?(\+\w+)?://", lowered) else []
+    pieces = [(marker, marker) for marker in ("host=", "port=", "user=", "password=", "dbname=")]
+    pieces += [("url", url.render_as_string(hide_password=False)),
+               ("masked url", url.render_as_string()), ("host:port", f"{url.host}:{url.port}"),
+               ("user:password@", f"{url.username}:{url.password}@"), ("@host", f"@{url.host}")]
+    # Labels only, so a failure never prints the credential itself.
+    found += [label for label, piece in pieces if piece.lower() in lowered]
+    whole = {str(v).lower(): label for label, v in [
+        ("host", url.host), ("user", url.username), ("password", url.password),
+        ("database", url.database)] if v}
+    for kind, item in walk(json.loads(manifest_text)):
+        if kind == "key" and item in CONNECTION_KEYS:
+            found.append(f"key {item}")
+        elif kind == "value" and item in whole:
+            found.append(whole[item])
+    assert found == []
+
+
+@pytest.mark.parametrize("raw", [
+    # CI (run 40020378732: the archive sha256 held CI's port)
+    "postgresql+psycopg://perennial_test:synthetic_ci_only@127.0.0.1:5432/perennial_test_0a1b2c3d",
+    # development/backend/.env.example: user and password are the prefix of every backup name
+    "postgresql+psycopg://perennial:perennial@localhost:5433/perennial_test",
+])
+def test_connection_check_ignores_chance_matches_but_catches_real_leaks(raw):
+    from sqlalchemy.engine import make_url
+    url = make_url(raw)
+    port = str(url.port)
+    digest = port + "a" * 60
+    name = f"perennial-20261023T201405Z-{port}ab"
+    manifest = {"format": 1, "name": name, "archive": name + ".dump.cms",
+                "snapshot_time": f"2026-10-23T20:14:05.{port}12+00:00",
+                "archive_bytes": int(port + "1"), "archive_sha256": digest,
+                "recipient_sha256_fingerprint": HEX, "pg_dump_version": "PostgreSQL 17.7",
+                "storage_receipt": {"store": "local-stub", "name": name + ".dump.cms",
+                                    "bytes": int(port + "1"), "sha256": digest},
+                "tables": {"ark_holdings": {"rows": int(port), "sha256": digest}}}
+    text = json.dumps(manifest, indent=2)
+    assert port in text  # the bare-port check failed here
+    _no_connection_details(text, url)
+
+    leaks = [
+        {"note": url.render_as_string(hide_password=False)},
+        {"note": url.render_as_string()},
+        {"note": f"postgresql://elsewhere/{url.database}x"},
+        {"note": f"restored from {url.host}:{port}"},
+        {"note": f"host={url.host} port={port} dbname=x"},
+        {"note": f"{url.username}:{url.password}@"},
+        {"note": f"via @{url.host}"},
+        {"note": url.password},
+        {"note": url.username.upper()},
+        {"source": [url.database]},
+        {"origin": url.host},
+        {"port": url.port},
+        {"storage_receipt": {**manifest["storage_receipt"], "Host": "x"}},
+        {"tables": {"ark_holdings": {"rows": 1, "sha256": HEX, "dsn": "x"}}},
+    ]
+    for leak in leaks:
+        with pytest.raises(AssertionError):
+            _no_connection_details(json.dumps({**manifest, **leak}, indent=2), url)
+
+
 @pytest.mark.db
 def test_backup_is_encrypted_verified_and_restores_within_rto(engine, loaded, keypair, tmp_path):
     from backup import LocalStore, run_backup
@@ -310,7 +398,7 @@ def test_backup_is_encrypted_verified_and_restores_within_rto(engine, loaded, ke
     manifest = json.loads(manifest_text)
     assert manifest["tables"]["ark_holdings"]["rows"] > 0
     assert manifest["storage_receipt"]["sha256"] == manifest["archive_sha256"]
-    assert str(engine.url.port) not in manifest_text and "postgresql" not in manifest_text
+    _no_connection_details(manifest_text, engine.url)
 
     drill = run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "drill")
     assert drill["verified"] is True and drill["target_dropped"] is True
