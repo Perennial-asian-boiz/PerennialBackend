@@ -143,10 +143,15 @@ class LocalStore:
 
 
 def _backup_time(name):
+    """When a canonical backup name was taken; None for any other name."""
     match = BACKUP_NAME.fullmatch(name)
     if match is None:
         return None
-    return datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    try:
+        taken = datetime.strptime(match.group(1), "%Y%m%dT%H%M%SZ")
+    except ValueError:  # fits the pattern but is not a real time, e.g. month 13
+        return None
+    return taken.replace(tzinfo=timezone.utc)
 
 
 def validate_manifest(filename, data):
