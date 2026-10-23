@@ -178,10 +178,25 @@ def heartbeat_worker(
         worker.join(timeout=2)
 
 
+# Advisory lock key per workflow. Explicit, never derived from a source's
+# position: two branches appending sources must not shift each other's keys
+# during a rolling deploy (checker MC-5). A new source takes the next unused key.
+SOURCE_LOCK_KEYS = {
+    "congress_trades": 170010,
+    "ark_holdings": 170011,
+    "insider_trades": 170012,
+    "short_interest": 170013,
+    "gdelt_theme_volume": 170014,
+    "gdelt_theme_articles": 170015,
+    "gdelt_spike_results": 170016,
+    "pipeline": 170098,
+}
+
+
 @contextmanager
 def source_lock(engine: Engine, source: str) -> Iterator[None]:
     """Session advisory lock: no open transaction while network calls run."""
-    key = 170098 if source == "pipeline" else 170010 + SOURCES.index(source)
+    key = SOURCE_LOCK_KEYS[source]
     with engine.connect() as conn:
         acquired = conn.execute(
             text("SELECT pg_try_advisory_lock(:key)"), {"key": key}

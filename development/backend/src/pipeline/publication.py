@@ -19,6 +19,11 @@ from src.db import models as m
 from src.db.queries import batch_rows
 from src.ingestion.diagnostics import safe_code
 from src.pipeline import congress_history
+from src.pipeline.demo_guard import (
+    DEMO_MODES,
+    LIVE_MODES,
+    check_demo_database,
+)
 from src.pipeline.ranking import DEFAULT_CONFIG, VERSION, calculate, candidate_symbols
 from src.settings import QualityThreshold, _quality_defaults, _source_policy_defaults
 
@@ -141,6 +146,12 @@ class PriorPublication:
     pins: dict[str, PinnedRun]
 
 
+class RollbackError(PublicationError):
+    """A rollback target is missing, already current, or not reproducible."""
+
+    code = "rollback_rejected"
+
+
 class PublicationInProgressError(PublicationError):
     """Another publisher holds the pointer lock; fail fast instead of queueing."""
 
@@ -199,10 +210,11 @@ def _quality_audit(
     rows: Mapping[str, list[dict[str, Any]]],
     thresholds: Mapping[str, QualityThreshold],
     reused: frozenset[str] = frozenset(),
+    modes: Sequence[str] = LIVE_MODES,
 ) -> tuple[dict[str, Any], list[str]]:
     audit: dict[str, Any] = {}
     failed: list[str] = []
-    for source in m.SOURCES:
+    for source in m.WATCHLIST_SOURCES:
         if source in reused:
             # Already passed when first published; comparing it against newer,
             # unpublished batches would only produce spurious failures.
@@ -219,7 +231,7 @@ def _quality_audit(
                 .where(
                     m.ingestion_runs.c.source == source,
                     m.ingestion_runs.c.status == "succeeded",
-                    m.ingestion_runs.c.collection_mode == "live",
+                    m.ingestion_runs.c.collection_mode.in_(modes),
                     m.ingestion_runs.c.id != candidate["id"],
                     m.ingestion_runs.c.finished_at <= candidate["finished_at"],
                     m.source_batches.c.id != batches[source],
@@ -269,7 +281,12 @@ def _time_ok(value: Any, now: datetime, max_age: timedelta) -> bool:
 
 
 def _check_run(
-    conn: Connection, source: str, run_id: int, now: datetime, max_age: timedelta
+    conn: Connection,
+    source: str,
+    run_id: int,
+    now: datetime,
+    max_age: timedelta,
+    modes: Sequence[str] = LIVE_MODES,
 ) -> tuple[RowMapping, list[dict[str, Any]], date | None]:
     """Every per-source publication rule; shared by publishing and reuse planning."""
     run = (
@@ -279,7 +296,7 @@ def _check_run(
     )
     if not run or run["source"] != source or run["status"] != "succeeded":
         raise PublicationError("source run is not successful")
-    if run["collection_mode"] != "live":
+    if run["collection_mode"] not in modes:
         raise PublicationError("production requires live collection mode")
     if not _time_ok(run["collected_at"], now, max_age):
         raise PublicationError("source collection is stale or future-dated")
@@ -341,6 +358,7 @@ def prior_publication(
     now: datetime,
     max_age: Mapping[str, timedelta],
     reuse_limits: Mapping[str, timedelta],
+    modes: Sequence[str] = LIVE_MODES,
 ) -> PriorPublication | None:
     """The current production publication's pins, marking which may be reused.
 
@@ -354,7 +372,7 @@ def prior_publication(
         result = {}
         for source, pin in pins.items():
             try:
-                _check_run(conn, source, pin.run_id, now, max_age[source])
+                _check_run(conn, source, pin.run_id, now, max_age[source], modes)
                 reusable = now - pin.collected_at <= reuse_limits[source]
             except PublicationError:
                 reusable = False
@@ -378,21 +396,22 @@ def _selected(
     run_ids: Mapping[str, int],
     now: datetime,
     max_age: Mapping[str, timedelta],
+    modes: Sequence[str] = LIVE_MODES,
 ) -> tuple[
     dict[str, RowMapping],
     dict[str, int],
     dict[str, list[dict[str, Any]]],
     dict[str, str | None],
 ]:
-    if set(run_ids) != set(m.SOURCES):
+    if set(run_ids) != set(m.WATCHLIST_SOURCES):
         raise PublicationError("all source run IDs are required")
     runs: dict[str, RowMapping] = {}
     batches: dict[str, int] = {}
     rows: dict[str, list[dict[str, Any]]] = {}
     as_of: dict[str, str | None] = {}
-    for source in m.SOURCES:
+    for source in m.WATCHLIST_SOURCES:
         run, source_rows, day = _check_run(
-            conn, source, run_ids[source], now, max_age[source]
+            conn, source, run_ids[source], now, max_age[source], modes
         )
         runs[source], batches[source] = run, run["batch_id"]
         rows[source] = source_rows
@@ -506,14 +525,14 @@ def _validate_reuse(
     return {
         "reused": reused,
         "cohort": sorted(s for s, why in reuse.items() if why.cohort),
-        "all_sources_reused": set(reuse) == set(m.SOURCES),
+        "all_sources_reused": set(reuse) == set(m.WATCHLIST_SOURCES),
         "policy": {
             s: {
                 "required": True,
                 "max_reuse_age_seconds": int(reuse_limits[s].total_seconds()),
                 "max_age_seconds": int(max_age[s].total_seconds()),
             }
-            for s in m.SOURCES
+            for s in m.WATCHLIST_SOURCES
         },
     }
 
@@ -545,6 +564,7 @@ def publish(
     reuse: Mapping[str, Reuse] | None = None,
     reuse_limits: Mapping[str, timedelta] | None = None,
     market_cap_fallback: timedelta | None = None,
+    demo: bool = False,
 ) -> int:
     """Publish and promote; an override skips only the named failed checks.
 
@@ -564,24 +584,26 @@ def publish(
         reuse_limits = {
             s: p.max_reuse_age for s, p in _source_policy_defaults().items()
         }
-    if set(reuse) - set(m.SOURCES) or set(reuse_limits) != set(m.SOURCES):
+    if set(reuse) - set(m.WATCHLIST_SOURCES) or set(reuse_limits) != set(
+        m.WATCHLIST_SOURCES
+    ):
         raise ValueError("reuse must name known sources with limits for every source")
     max_age = dict(MAX_AGE if max_age is None else max_age)
-    if set(max_age) != set(m.SOURCES) or any(
+    if set(max_age) != set(m.WATCHLIST_SOURCES) or any(
         v.total_seconds() <= 0 for v in max_age.values()
     ):
         raise ValueError("freshness policy must cover every source with positive ages")
     quality_thresholds = (
         _quality_defaults() if quality_thresholds is None else quality_thresholds
     )
-    if set(quality_thresholds) != set(m.SOURCES):
+    if set(quality_thresholds) != set(m.WATCHLIST_SOURCES):
         raise ValueError("quality policy must cover every source")
     overridden: list[str] = []
     if override_reason is not None:
         override_reason = override_reason.strip()
         override_actor = (override_actor or "").strip()
         _check_override_text(override_actor, override_reason)
-        valid = {f"{s}:{c}" for s in m.SOURCES for c in QUALITY_CHECKS}
+        valid = {f"{s}:{c}" for s in m.WATCHLIST_SOURCES for c in QUALITY_CHECKS}
         if not override_checks or not set(override_checks) <= valid:
             raise ValueError("override must name one or more known source:check names")
         overridden = sorted(set(override_checks))
@@ -596,10 +618,14 @@ def publish(
             text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": PUBLICATION_LOCK}
         ).scalar_one():
             raise PublicationInProgressError()
-        runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age)
+        if demo:
+            # Only the marked local demo database may pin fixture-mode runs.
+            check_demo_database(conn)
+        modes = DEMO_MODES if demo else LIVE_MODES
+        runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age, modes)
         degraded = _validate_reuse(conn, reuse, runs, now, max_age, reuse_limits)
         source_audit, failed_checks = _quality_audit(
-            conn, runs, batches, rows, quality_thresholds, frozenset(reuse)
+            conn, runs, batches, rows, quality_thresholds, frozenset(reuse), modes
         )
         if override_reason is None:
             if failed_checks:
@@ -645,7 +671,7 @@ def publish(
                     raise PublicationRegressionError(old.source)
         # Quality checks above judge the day's observation batch; ranking reads
         # the accumulated Congress history it was folded into (v3).
-        congress_history.derive(conn, runs["congress_trades"]["id"])
+        congress_history.derive(conn, runs["congress_trades"]["id"], modes)
         try:
             planned = congress_history.planned_watermark(conn, run_ids)
         except ValueError:
@@ -711,6 +737,9 @@ def publish(
                     "failed": failed_checks,
                     "overridden": overridden,
                     "congress_history": history,
+                    # Demo publications are marked in their audit event, not in
+                    # ranking_config (ranking inputs only).
+                    **({"demo": True} if demo else {}),
                 },
                 created_at=now,
             )
@@ -733,7 +762,7 @@ def publish(
                     run_id=run_ids[s],
                     batch_id=batches[s],
                 )
-                for s in m.SOURCES
+                for s in m.WATCHLIST_SOURCES
             ],
         )
         conn.execute(
@@ -774,6 +803,68 @@ def publish(
             )
         )
         return cast(int, pub_id)
+
+
+def rollback(engine: Engine, to_publication_id: int, *, actor: str, reason: str) -> int:
+    """Point production back at an earlier publication (roadmap M3).
+
+    This is the only way to serve older observations: publish() keeps refusing
+    any observation date older than the current publication's. The target must
+    replay byte-identically, the actor and reason pass the override text policy,
+    and a `rollback` event on the target records who moved the pointer from where.
+    """
+    actor, reason = actor.strip(), reason.strip()
+    _check_override_text(actor, reason)
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        if not conn.execute(
+            text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": PUBLICATION_LOCK}
+        ).scalar_one():
+            raise PublicationInProgressError()
+        prior = conn.execute(
+            select(m.current_publication.c.publication_id).where(
+                m.current_publication.c.channel == "production"
+            )
+        ).scalar_one_or_none()
+        target = (
+            conn.execute(
+                select(m.publications.c.output).where(
+                    m.publications.c.id == to_publication_id
+                )
+            )
+            .tuples()
+            .one_or_none()
+        )
+        if target is None:
+            raise RollbackError("rollback target does not exist")
+        if prior == to_publication_id:
+            raise RollbackError("rollback target is already the current publication")
+        if replay(engine, to_publication_id) != target[0]:
+            raise RollbackError("rollback target does not replay identically")
+        conn.execute(
+            pg_insert(m.current_publication)
+            .values(
+                channel="production", publication_id=to_publication_id, promoted_at=now
+            )
+            .on_conflict_do_update(
+                index_elements=["channel"],
+                set_={"publication_id": to_publication_id, "promoted_at": now},
+            )
+        )
+        conn.execute(
+            insert(m.publication_events).values(
+                publication_id=to_publication_id,
+                kind="rollback",
+                actor=actor,
+                reason=reason,
+                checks={
+                    "from_publication_id": prior,
+                    "to_publication_id": to_publication_id,
+                },
+                created_at=now,
+            )
+        )
+    return prior if prior is not None else to_publication_id
 
 
 def current(engine: Engine) -> dict[str, Any] | None:

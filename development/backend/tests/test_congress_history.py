@@ -632,10 +632,10 @@ def test_downgrade_refuses_while_history_state_exists(engine, fixture_path, stat
     with engine.connect() as conn:
         head = _version(conn)
         with pytest.raises(RuntimeError, match="Congress history"):
-            command.downgrade(alembic_config(conn), "0007")
+            command.downgrade(alembic_config(conn), "0009")
         conn.rollback()
         # Atomic: still at head, and every history table and column is intact.
-        assert _version(conn) == head == "congress_history_v1"
+        assert _version(conn) == head == "0010"
         for table in (
             "congress_trade_history",
             "congress_history_gaps",
@@ -654,9 +654,64 @@ def test_downgrade_still_works_without_history(engine):
     from tests.conftest import alembic_config
 
     with engine.connect() as conn:
-        command.downgrade(alembic_config(conn), "0007")
+        command.downgrade(alembic_config(conn), "0009")
         conn.commit()
-        assert _version(conn) == "0007"
+        assert _version(conn) == "0009"
         command.upgrade(alembic_config(conn), "head")
         conn.commit()
-        assert _version(conn) == "congress_history_v1"
+        assert _version(conn) == "0010"
+
+
+# ── demo mode: fixture runs feed history only in the guarded demo database ──
+
+from test_demo import demo_engine  # noqa: E402,F401  (pytest fixture)
+
+
+def test_demo_publication_ranks_history_from_fixture_runs(demo_engine):  # noqa: F811
+    from src.pipeline.demo import DemoReplay, run_demo
+
+    pub = run_demo(demo_engine, DemoReplay())
+    stored = current(demo_engine)["output"]
+    assert stored["ranking_version"] == "watchlist-v3"
+    d, w, p = (
+        models.run_dependencies,
+        models.publication_history_watermarks,
+        models.publication_sources,
+    )
+    with demo_engine.connect() as conn:
+        history = conn.execute(
+            select(func.count()).select_from(models.congress_trade_history)
+        ).scalar_one()
+        pinned = conn.execute(
+            select(w.c.through_history_id).where(w.c.publication_id == pub)
+        ).scalar_one()
+        planned = set(
+            conn.execute(
+                select(d.c.history_through_id)
+                .join(p, p.c.run_id == d.c.run_id)
+                .where(p.c.publication_id == pub, d.c.source == "congress_trades")
+            ).scalars()
+        )
+    assert history > 0 and pinned == history and planned == {pinned}
+    assert json.dumps(replay(demo_engine, pub), sort_keys=True) == json.dumps(
+        stored, sort_keys=True
+    )
+
+
+def test_fixture_runs_never_feed_history_outside_demo_mode(engine):
+    from src.pipeline.demo_guard import DEMO_MODES, DemoGuardError
+
+    run = begin_run(engine, "congress_trades", "fixture")
+    result = import_collection(
+        engine,
+        CollectionOutcome.success("congress_trades", "fixture", [trade("A", 1)]),
+        run_id=run,
+    )
+    with pytest.raises(ValueError):
+        derive(engine, result.run_id)  # default: live only
+    # The runner only widens modes after the demo guard, which this DB fails.
+    from src.pipeline.demo_guard import check_demo_database
+
+    with engine.connect() as conn, pytest.raises(DemoGuardError):
+        check_demo_database(conn)
+    assert "fixture" in DEMO_MODES and history_count(engine) == 0

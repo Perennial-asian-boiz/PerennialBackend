@@ -1,7 +1,7 @@
 """Machine-readable checks for a supervisor/monitor. No credentials or payloads."""
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
@@ -19,6 +19,10 @@ from src.settings import (
 
 # M2: degraded publishing is visible but not an outage; everything else is.
 SEV2, SEV3 = "SEV2", "SEV3"
+
+# GDELT (G5, provisional): informational until M6 scores consume it. Staleness
+# is an advisory: visible, never a watchlist issue, never unhealthy.
+GDELT_MAX_AGE = timedelta(days=2)
 
 
 def publication_window_start(now: datetime, holidays: Iterable[date]) -> datetime:
@@ -39,8 +43,11 @@ def publication_window_start(now: datetime, holidays: Iterable[date]) -> datetim
 
 
 def _severity(issue: str, issues: list[str]) -> str:
+    # Rolled back: a deliberate, audited operator decision, visible until the
+    # next publication; staleness it causes is still reported on its own.
     if (
         issue.startswith("publication:degraded")
+        or issue == "publication:rolled_back"
         or issue == "congress_trades:possible_gap"
     ):
         return SEV3
@@ -66,19 +73,22 @@ def health(
     *,
     settings: Settings | None = None,
     now: datetime | None = None,
+    modes: Sequence[str] = ("live",),
 ) -> dict[str, Any]:
+    """modes: which collection modes count as runs; only the demo widens it."""
     now = datetime.now(timezone.utc) if now is None else now
     holidays = settings.trading_holidays if settings is not None else TRADING_HOLIDAYS
+    window_start = publication_window_start(now, holidays)
     issues: list[str] = []
     sources: dict[str, dict[str, Any] | None] = {}
     with engine.connect() as conn:
-        for source in m.SOURCES:
+        for source in m.WATCHLIST_SOURCES:
             run = (
                 conn.execute(
                     select(m.ingestion_runs)
                     .where(
                         m.ingestion_runs.c.source == source,
-                        m.ingestion_runs.c.collection_mode == "live",
+                        m.ingestion_runs.c.collection_mode.in_(modes),
                     )
                     .order_by(
                         m.ingestion_runs.c.started_at.desc(),
@@ -95,7 +105,7 @@ def health(
                     .where(
                         m.ingestion_runs.c.source == source,
                         m.ingestion_runs.c.status == "succeeded",
-                        m.ingestion_runs.c.collection_mode == "live",
+                        m.ingestion_runs.c.collection_mode.in_(modes),
                     )
                     .order_by(
                         m.ingestion_runs.c.collected_at.desc().nullslast(),
@@ -161,13 +171,39 @@ def health(
             "since": since.isoformat() if since else None,
             "warming": since is None or since > congress_history.window_start(now),
         }
+    # M3 missed-run monitor: the scheduled job never started for the trading day
+    # whose deadline passed (distinct from a run that started and failed). Only
+    # watchlist sources count: a GDELT run must not mask a missed pipeline run.
+    with engine.connect() as conn:
+        started = conn.execute(
+            select(func.count())
+            .select_from(m.ingestion_runs)
+            .where(
+                m.ingestion_runs.c.collection_mode == "live",
+                m.ingestion_runs.c.source.in_(m.WATCHLIST_SOURCES),
+                m.ingestion_runs.c.started_at >= window_start,
+            )
+        ).scalar_one()
+    if not started:
+        issues.append("pipeline:missed_run")
+    advisories: list[str] = []
+    with engine.connect() as conn:
+        for source in m.SUBJECTLESS_SOURCES:
+            finished = conn.execute(
+                select(func.max(m.ingestion_runs.c.finished_at)).where(
+                    m.ingestion_runs.c.source == source,
+                    m.ingestion_runs.c.status == "succeeded",
+                )
+            ).scalar_one()
+            if finished is None or now - finished > GDELT_MAX_AGE:
+                advisories.append(f"{source}:stale")
     pub = current(engine)
     if pub is None:
         issues.append("publication:missing")
     else:
         if now - pub["created_at"] > timedelta(days=3):
             issues.append("publication:stale")
-        if pub["created_at"] < publication_window_start(now, holidays):
+        if pub["created_at"] < window_start:
             issues.append("publication:missed")
         with engine.connect() as conn:
             marker = conn.execute(
@@ -176,6 +212,25 @@ def health(
                     m.publication_events.c.kind == "degraded",
                 )
             ).scalar_one_or_none()
+            # M3: production deliberately pinned by `cli rollback`. The pointer's
+            # promotion and the rollback event share one timestamp.
+            rolled_back = conn.execute(
+                select(func.count())
+                .select_from(m.publication_events)
+                .join(
+                    m.current_publication,
+                    m.current_publication.c.publication_id
+                    == m.publication_events.c.publication_id,
+                )
+                .where(
+                    m.current_publication.c.channel == "production",
+                    m.publication_events.c.kind == "rollback",
+                    m.publication_events.c.created_at
+                    == m.current_publication.c.promoted_at,
+                )
+            ).scalar_one()
+        if rolled_back:
+            issues.append("publication:rolled_back")
         if marker is not None:
             issues.append(
                 "publication:degraded:all_sources_reused"
@@ -237,6 +292,7 @@ def health(
         "issue_severity": severities,
         "checked_at": now,
         "issues": issues,
+        "advisories": advisories,
         "sources": sources,
         "publication_id": pub["id"] if pub else None,
         "database_bytes": size,

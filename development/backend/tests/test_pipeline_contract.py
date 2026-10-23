@@ -237,7 +237,7 @@ def test_real_collectors_accept_exactly_what_runner_passes(engine, fixture_path)
 
     batches = seed_live_upstream(engine, fixture_path)
     mismatches = {}
-    for source in models.SOURCES:
+    for source in models.WATCHLIST_SOURCES:
         calls = []
 
         def spy(*args, _source=source, **kwargs):

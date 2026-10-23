@@ -25,12 +25,13 @@ publication's created_at, so stored history is never trimmed.
 import hashlib
 import json
 from datetime import date, datetime
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from sqlalchemy import func, insert, select, text
 from sqlalchemy.engine import Connection
 
 from src.db import models as m
+from src.pipeline.demo_guard import LIVE_MODES
 
 HISTORY_LOCK = 170100
 WINDOW_YEARS = 2
@@ -89,11 +90,14 @@ def _batch_rows(conn: Connection, batch_id: int) -> List[Dict[str, Any]]:
     ]
 
 
-def derive(conn: Connection, run_id: int) -> Dict[str, int]:
+def derive(
+    conn: Connection, run_id: int, modes: Sequence[str] = LIVE_MODES
+) -> Dict[str, int]:
     """
-    Fold one succeeded live Congress run's batch into history. Idempotent:
+    Fold one succeeded Congress run's batch into history. Idempotent:
     deriving the same batch again adds nothing and records no new gap.
-    Runs inside the caller's transaction.
+    Runs inside the caller's transaction. `modes` follows publication: live
+    only, except demo mode (DEMO_MODES) on the guarded demo database.
     """
     run = (
         conn.execute(select(m.ingestion_runs).where(m.ingestion_runs.c.id == run_id))
@@ -103,9 +107,11 @@ def derive(conn: Connection, run_id: int) -> Dict[str, int]:
     if (
         run["source"] != SOURCE
         or run["status"] != "succeeded"
-        or run["collection_mode"] != "live"
+        or run["collection_mode"] not in modes
     ):
-        raise ValueError("history derives only from succeeded live Congress runs")
+        raise ValueError(
+            "history derives only from succeeded publishable Congress runs"
+        )
     _lock(conn)
     batch_id = run["batch_id"]
     rows = _batch_rows(conn, batch_id)
@@ -256,7 +262,9 @@ def summary(
     }
 
 
-def fold_batch(conn: Connection, batch_id: int) -> None:
+def fold_batch(
+    conn: Connection, batch_id: int, modes: Sequence[str] = LIVE_MODES
+) -> None:
     """Make sure a selected Congress batch is in history before planning from it."""
     r = m.ingestion_runs
     run_id = conn.execute(
@@ -265,13 +273,13 @@ def fold_batch(conn: Connection, batch_id: int) -> None:
             r.c.source == SOURCE,
             r.c.batch_id == batch_id,
             r.c.status == "succeeded",
-            r.c.collection_mode == "live",
+            r.c.collection_mode.in_(modes),
         )
         .order_by(r.c.id.desc())
         .limit(1)
     ).scalar_one_or_none()
     if run_id is not None:
-        derive(conn, run_id)
+        derive(conn, run_id, modes)
 
 
 def planned_watermark(conn: Connection, run_ids: Mapping[str, int]) -> Optional[int]:

@@ -3,7 +3,7 @@
 import inspect
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import partial
@@ -18,6 +18,7 @@ from src.db.queries import batch_rows, latest_successful_run
 from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline import congress_history
+from src.pipeline.demo_guard import DEMO_MODES, LIVE_MODES, check_demo_database
 from src.pipeline.lifecycle import (
     abandon_stale_runs,
     begin_run,
@@ -137,7 +138,7 @@ def _reuse_prior_cohort(
     calls; a sibling collected fresh today stays recorded but unpublished.
     """
     chosen.pinned(prior, source, why)
-    for other in m.SOURCES:
+    for other in m.WATCHLIST_SOURCES:
         if other == source or other in chosen.reuse:
             continue
         chosen.pinned(
@@ -176,8 +177,12 @@ def collect_source(
     upstream_batches: Mapping[str, int] | None = None,
     collector: Callable[..., CollectionOutcome] | None = None,
     settings: Settings | None = None,
+    record_mode: str = "live",
 ) -> ImportResult:
     """Collect and import one source; settings reach collectors that declare them.
+
+    record_mode "fixture" (demo only) records the run as fixture-mode: the
+    collector ran, but against recorded provider responses, not a provider.
 
     Collectors that need no credential (ARK, short interest) do not take
     settings, so they are not passed. Fetcher module keys are only a fallback
@@ -199,7 +204,7 @@ def collect_source(
                 if upstream_batches is None:
                     selected = {s: latest_successful_run(conn, s) for s in UPSTREAM}
                     missing = any(
-                        r is None or r.collection_mode != "live"
+                        r is None or r.collection_mode != record_mode
                         for r in selected.values()
                     )
                     if not missing:
@@ -212,19 +217,27 @@ def collect_source(
                     dependencies = dict(upstream_batches)
             upstream = None
             if dependencies:
-                congress_history.fold_batch(conn, dependencies["congress_trades"])
+                if record_mode != "live":
+                    check_demo_database(conn)  # fixture history: demo DB only
+                congress_history.fold_batch(
+                    conn,
+                    dependencies["congress_trades"],
+                    LIVE_MODES if record_mode == "live" else DEMO_MODES,
+                )
                 history_through = congress_history.watermark(conn)
                 upstream = _upstream(conn, dependencies, history_through)
         run_id = begin_run(
             engine,
             source,
-            "live",
+            record_mode,
             dependencies=dependencies,
             history_through=history_through,
         )
         with heartbeat_worker(engine, run_id):
             if missing:
-                outcome = CollectionOutcome.failure(source, "live", "missing_upstream")
+                outcome = CollectionOutcome.failure(
+                    source, record_mode, "missing_upstream"
+                )
             else:
                 try:
                     if downstream:
@@ -236,6 +249,8 @@ def collect_source(
                         or outcome.mode != "live"
                     ):
                         raise ValueError("collector returned mismatched outcome")
+                    if record_mode != "live":
+                        outcome = replace(outcome, mode=record_mode)
                 except Exception as exc:
                     # Known transport failures differ from bugs in the collector contract.
                     # The importer allowlists class names and never stores messages.
@@ -245,14 +260,23 @@ def collect_source(
                         else "internal_error"
                     )
                     outcome = CollectionOutcome.failure(
-                        source, "live", code, diagnostics=exception_diagnostics(exc)
+                        source,
+                        record_mode,
+                        code,
+                        diagnostics=exception_diagnostics(exc),
                     )
             result = import_collection(engine, outcome, run_id=run_id)
         if source == "congress_trades" and result.succeeded:
             # Fold every live page into history now: an unpublished (evening)
             # run's rows would otherwise scroll off the free page unseen.
             with engine.begin() as conn:
-                derived = congress_history.derive(conn, result.run_id)
+                if record_mode != "live":
+                    check_demo_database(conn)  # fixture history: demo DB only
+                derived = congress_history.derive(
+                    conn,
+                    result.run_id,
+                    LIVE_MODES if record_mode == "live" else DEMO_MODES,
+                )
             logger.info(
                 "congress history run_id=%s added=%s possible_gaps=%s gap_days=%s",
                 result.run_id,
@@ -478,8 +502,16 @@ def run_pipeline(
     | None = None,
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
     settings: Settings | None = None,
+    demo: bool = False,
 ) -> int:
-    """Stop on a failed stage; all publication writes commit together at the end."""
+    """Stop on a failed stage; all publication writes commit together at the end.
+
+    demo=True records fixture-mode runs and publishes only into the marked local
+    demo database (checked here and again inside publish()).
+    """
+    if demo:
+        with engine.connect() as conn:
+            check_demo_database(conn)
     with source_lock(engine, "pipeline"):
         return _run_pipeline(
             engine,
@@ -487,6 +519,7 @@ def run_pipeline(
             market_cap_collector=market_cap_collector,
             quality_thresholds=quality_thresholds,
             settings=settings,
+            demo=demo,
         )
 
 
@@ -498,8 +531,11 @@ def _run_pipeline(
     | None = None,
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
     settings: Settings | None = None,
+    demo: bool = False,
 ) -> int:
     from src.ingestion.collectors import COLLECTORS
+
+    record_mode, modes = ("fixture", DEMO_MODES) if demo else ("live", LIVE_MODES)
 
     collectors = COLLECTORS if collectors is None else collectors
     if market_cap_collector is None:
@@ -512,7 +548,9 @@ def _run_pipeline(
     max_age = {s: p.max_age for s, p in policies.items()}
     reuse_limits = {s: p.max_reuse_age for s, p in policies.items()}
     abandon_stale_runs(engine)
-    prior = prior_publication(engine, datetime.now(timezone.utc), max_age, reuse_limits)
+    prior = prior_publication(
+        engine, datetime.now(timezone.utc), max_age, reuse_limits, modes
+    )
 
     attempts: dict[str, Attempt] = {}
 
@@ -523,6 +561,7 @@ def _run_pipeline(
             upstream_batches=upstream,
             collector=collectors[source],
             settings=settings,
+            record_mode=record_mode,
         )
         if not result.succeeded:
             outcome = Attempt(
@@ -549,7 +588,7 @@ def _run_pipeline(
         # downstream runs were planned from.
         with engine.begin() as conn:
             rows = {s: batch_rows(conn, s, b) for s, b in selection.batches.items()}
-            congress_history.derive(conn, selection.runs["congress_trades"])
+            congress_history.derive(conn, selection.runs["congress_trades"], modes)
             through = congress_history.planned_watermark(conn, selection.runs)
             if through is None:
                 through = congress_history.watermark(conn)
@@ -571,6 +610,7 @@ def _run_pipeline(
             reuse=selection.reuse,
             reuse_limits=reuse_limits,
             market_cap_fallback=cap_limit if cap_fallback else None,
+            demo=demo,
         )
 
     def record_count(batch_id: int) -> int:

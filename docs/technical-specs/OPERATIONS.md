@@ -320,6 +320,213 @@ loss, or production RTO. The M3 logical exercise above must separately establish
 evidence; neither exercise establishes PITR. Synthetic archives may be deleted after their evidence is recorded;
 production backup retention is separately owned by the deployment.
 
+### Local scheduled backup job and timed archive restore
+
+`development/database/ops/backup.py` is one run of the scheduled job above,
+local-first: the same loopback/`test`-name guards and `--synthetic-only`
+attestation as the drill, `pg_dump`/`pg_restore` 17 and `openssl` (3.x) on PATH.
+
+```bash
+.venv/bin/python development/database/ops/backup.py --synthetic-only \
+  --recipient synthetic-cert.pem --spool /private/tmp/perennial-backup-spool \
+  --store /private/tmp/perennial-backup-store
+```
+
+It takes a repeatable-read snapshot under advisory lock 170097 (one backup at a
+time) and streams a custom-format `pg_dump` of that snapshot straight into
+OpenSSL CMS public-key encryption (AES-256-GCM). No plaintext dump is written,
+and the backup host holds only the recipient certificate; the private key is
+needed only to restore. The archive is uploaded, its stored SHA-256 is checked
+against the local one, and only then is its manifest written: name, snapshot
+time, completion time, schema revision, archive checksum and size, encryption,
+recipient certificate fingerprint, storage receipt, and per-table row counts and
+content hashes. No connection details or rows. A manifest exists only for a
+verified archive. Retention then keeps every snapshot from the last 24 hours, the
+newest of each of the last seven UTC days, and always the newest verified backup.
+It deletes a manifest before its archive, so an interruption leaves an orphan
+archive, never a manifest without one. Orphan archives (a failed manifest upload,
+or an interruption) are swept once their name dates them more than an hour old.
+
+A store is untrusted input once it is remote, so nothing read back from it
+chooses a path:
+- Every stored name is `perennial-<YYYYMMDDTHHMMSSZ>-<6 hex>` plus `.dump.cms` or
+  `.manifest.json`.
+- A manifest is used only if it is at most 1 MiB and well formed, and its `name`
+  and `archive` agree with its own filename. Malformed manifests are never acted
+  on (not deleted, not restored); they are listed in `invalid_manifests` for a
+  human.
+- `LocalStore` accepts only plain basenames confined to its root, lists and
+  touches only regular files (never symlinks), and tightens an existing spool or
+  store directory to 0700. It refuses a symlinked root.
+
+Manifests and archives are **not signed**: anyone holding the public certificate
+can create an archive that decrypts. Checksums and GCM prove integrity, not
+origin, so the store itself must stay trusted. Compare archive fingerprints with
+the custody inventory below.
+
+The report is JSON on stdout with a fixed `status`/`error_code`. Exit 0 is `ok`;
+1 is a failure (`unsafe_source`, `unsafe_directory`, `openssl_unsupported`,
+`recipient_unreadable`, `dump_failed`, `encrypt_failed`, `upload_failed`,
+`upload_verify_failed`, `retention_failed`, `backup_failed`); 3 is
+`skipped_overlap`, which must alert like a failure. A `pg_dump` that dies
+mid-stream fails the run even though encryption of the truncated stream succeeds.
+A stored-object checksum that differs from the local one fails as
+`upload_verify_failed`, and the unverified archive is removed. OpenSSL 3 is
+required: macOS's `/usr/bin/openssl` is LibreSSL, which cannot do CMS AES-GCM and
+is refused up front, so put Homebrew's `openssl@3` first on PATH. `snapshot_age_seconds` is completion minus snapshot
+time: it must stay under ten minutes for the five-minute schedule to meet RPO.
+
+`--store` is a stub: a local directory standing in for off-site storage until
+the Supabase project and an encrypted off-site target exist. A real uploader
+keeps `LocalStore`'s `put`/`get`/`names`/`delete` and returns the provider's
+checksum of the stored object. Production use also needs a connection mode
+without the loopback guard (a protected libpq service file, TLS verification),
+a scheduler, alerting on the exit status and newest manifest age, and Bryan's
+key custody. None of that exists yet.
+
+To restore the newest verified archive into a disposable database and time it:
+
+```bash
+.venv/bin/python development/database/ops/restore_drill.py --synthetic-only \
+  --from-store /private/tmp/perennial-backup-store --key synthetic-key.pem \
+  --output /private/tmp/perennial-archive-drill-unique
+```
+
+It selects only a validated manifest, copies that archive to a fixed name in the
+new 0700 output directory, and checks it against the manifest checksum. It then
+streams `openssl cms -decrypt` straight into `pg_restore`, which restores in one
+transaction into a new random `perennial_test_restore_*` database. **The decrypted
+dump is never written to disk.** OpenSSL holds the whole archive in memory and
+checks the GCM tag before writing any output, so an archive that fails
+authentication (including one with a forged checksum) passes no bytes to
+`pg_restore`. That memory cost is proportional to the archive. If the key is
+encrypted, set `BACKUP_KEY_PASSPHRASE`: only the decryption process receives it,
+never `pg_restore`.
+
+The drill compares every table's count and hash with the manifest and drops only
+the database it created. On every path (success, failure, interruption), it
+kills its child processes and removes the encrypted copy, so **only
+`report.json` remains**. Unlinking is cleanup, not secure erasure, which is one
+more reason the plaintext never reaches disk. The report records
+`retrieve_seconds`, `decrypt_restore_and_verify_seconds`, `rto_seconds` from
+incident start (default: drill start) against `rto_target_seconds` 3600, and
+`rpo_seconds` against 900. A local synthetic timing is not the hosted RTO, which
+the Bryan-operated drill above must measure.
+
+### Backup key custody (Bryan-owned; draft options)
+
+Archives are encrypted to a recipient **certificate**: the public half, which
+the backup host holds. Only the matching **private key** decrypts them. Losing
+the key makes every archive unreadable; leaking it, together with storage access,
+exposes every archive. Agents never create, hold or see the real key. The
+commands below are for Bryan, on his own machine.
+
+**Key and certificate.** Generate an RSA-3072 key that is encrypted at rest from
+the start, plus a self-signed certificate for it:
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -aes-256-cbc -out perennial-backup-key.pem
+openssl req -x509 -new -key perennial-backup-key.pem -days 400 \
+  -subj "/CN=perennial-backup-YYYY" -out perennial-backup-cert.pem
+openssl x509 -noout -fingerprint -sha256 -in perennial-backup-cert.pem
+```
+
+`genpkey` prompts for the passphrase, so it never enters argv or shell history.
+Record the fingerprint: every manifest stores it as
+`recipient_sha256_fingerprint`, which is how you tell which key opens an archive.
+Encryption does **not** check the certificate's validity dates, so an expired
+certificate keeps working. Rotation is a schedule, not an expiry event. Only the
+certificate goes to the backup host and its config; the key never does.
+
+**Where the private key lives.** Options, all within D14's free tiers:
+
+| Option | Strength | Weakness |
+|---|---|---|
+| A. Encrypted key file as an attachment in Bryan's password manager | Available anywhere Bryan is; synced copies | One account compromise exposes the key file (it is still passphrase-protected) |
+| B. Encrypted key file on two offline media, kept in separate places | Outside every online failure boundary | Slow to reach during an incident; the media themselves need checking |
+| C. Cloud secret manager in the hosting provider | Scriptable | Shares a failure and compromise boundary with the backups; may cost money; unnecessary for one operator |
+| D. Hardware token (key generated on device) | Key cannot be copied | OpenSSL needs a PKCS#11 provider; not tested here; losing the token loses the archives unless a second recipient exists |
+
+**Recommendation: A plus one copy of B.** Keep the passphrase-encrypted key file
+in the password manager and one encrypted copy offline. Keep the passphrase in
+the password manager as a separate item. Note the limit: a separate item is
+organizational separation, not a separate compromise boundary. Anyone who
+controls the password manager account holds both the file and the passphrase.
+
+For a paper copy of the passphrase (so the key survives losing the password
+manager), Bryan chooses between:
+- **Store it apart from the offline key media (recommended).** Taking one place
+  yields only one factor. Recovery needs both places, so it is slower.
+- **Seal it with the offline media.** Recovery is simpler, but whoever gets that
+  bundle holds both factors, just as with the password manager.
+
+Never put the key or passphrase on the backup host, in CI secrets, the
+repository, Supabase, chat, or any agent-readable directory. These options are
+proposals, not verified product features or plan entitlements.
+
+**Passphrase handling during a drill.** `restore_drill.py --from-store` passes
+the passphrase to the decryption process only, as
+`-passin env:BACKUP_KEY_PASSPHRASE`, so it never appears in argv or reports. The
+key file's *path* is in argv; its contents are not. Enter it without echo or history, and clear it
+afterwards:
+
+```bash
+read -rs BACKUP_KEY_PASSPHRASE && export BACKUP_KEY_PASSPHRASE
+# ... run the drill ...
+unset BACKUP_KEY_PASSPHRASE
+```
+
+Other processes of the same OS user can read a process's environment. Run the
+drill on Bryan's own trusted machine, in a fresh shell that is closed afterwards.
+
+**Decrypting during a drill** (fits step 2 of the timed drill above):
+
+1. Copy the encrypted key file from custody into a new private directory
+   (`mkdir -m 700`). The file is still passphrase-encrypted on disk.
+2. Before restoring, check where the archive came from and that the key matches
+   it. The manifest's `recipient_sha256_fingerprint` only says which key opens
+   the archive, not who made it, because manifests are unsigned. Compare it with
+   the fingerprint in Bryan's custody inventory, and restore only from the
+   trusted store. The key must also match that certificate (the two hashes must
+   be equal):
+   ```bash
+   openssl x509 -noout -fingerprint -sha256 -in perennial-backup-cert.pem
+   openssl pkey -in perennial-backup-key.pem -pubout | openssl sha256
+   openssl x509 -in perennial-backup-cert.pem -noout -pubkey | openssl sha256
+   ```
+3. Run the drill with `--key` pointing at that file. The drill streams the
+   decrypted dump into `pg_restore`, so no plaintext file is created. An archive
+   that does not decrypt and authenticate restores nothing.
+4. Delete the key directory, then `unset` the passphrase and close the shell.
+   The deleted key file was ciphertext. The drill's output directory holds only
+   `report.json` (the encrypted copy is removed automatically); keep it as
+   evidence.
+
+**Rotation.** Rotate yearly with the restore drill, immediately on suspected
+compromise, and when custody changes hands.
+
+1. Generate a new key and certificate as above, and store the key per the
+   chosen option.
+2. Put the new certificate on the backup host. The next run's manifest shows the
+   new fingerprint.
+3. Run a drill on a new-key archive with the new key before retiring anything.
+4. Keep the old key until no stored archive uses its fingerprint. Check this in
+   the actual store inventory (every manifest's `recipient_sha256_fingerprint`,
+   plus any orphan or invalid entries), never by elapsed time alone. Under the
+   retention above, expect it about seven days after the first new-key backup.
+   Then destroy every copy and record the date and fingerprint.
+5. On compromise, also decide whether to delete old-key archives once new
+   verified backups exist. Anyone holding the old key and storage access can read
+   them. Re-encryption is not supported.
+
+Changing only the passphrase (`openssl pkey -in old.pem -aes-256-cbc -out
+new.pem`, with prompts) leaves the key and every archive unchanged. A
+compromised passphrase alone, with the file still safe, can be handled this way.
+
+**Not built:** encrypting to a second escrow recipient. OpenSSL CMS supports
+several recipient certificates, but `backup.py --recipient` takes one. Add it if
+Bryan wants a second custodian or a hardware-token primary.
+
 ## Phase 0 quality gates
 
 The baseline is Python **3.12** (`.python-version` pins 3.12.13) and PostgreSQL

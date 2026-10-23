@@ -429,8 +429,8 @@ def test_plans_match_legacy_loaders(upstream):
     si = collectors._fetcher("short_interest")
     data, failure = collectors._read_upstream("insider_trades", upstream)
     assert failure is None
-    legacy, congress_error = insider.load_congress_tickers()
-    ark_tickers, ark_error = insider.load_ark_tickers()
+    legacy, congress_error = insider.legacy_load_congress_tickers()
+    ark_tickers, ark_error = insider.legacy_load_ark_tickers()
     assert congress_error is None and ark_error is None
     legacy_ark = [t for t in ark_tickers if t not in set(legacy)]
     assert collectors._insider_plan(insider, data) == (

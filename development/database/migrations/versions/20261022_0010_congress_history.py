@@ -10,13 +10,13 @@ Downgrade refuses while any history-dependent state exists (watermarks,
 recorded plan watermarks, history or gap rows): dropping it would change how
 retained publications replay. It only runs on a database with none of that.
 
-Placeholder revision id: renumber and re-chain at merge per roadmap §4.
+Numbered 0010 per roadmap §4; chains after GDELT's 0009 (was placeholder congress_history_v1).
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = 'congress_history_v1'
-down_revision = '0007'
+revision = '0010'
+down_revision = '0009'
 branch_labels = None
 depends_on = None
 

@@ -73,7 +73,7 @@ def test_ranking_config_holds_ranking_inputs_only(engine, fixture_path):
     [event] = events(engine, pub)
     assert event["kind"] == "quality_passed"
     assert event["checks"]["failed"] == [] and event["checks"]["overridden"] == []
-    assert set(event["checks"]["sources"]) == set(models.SOURCES)
+    assert set(event["checks"]["sources"]) == set(models.WATCHLIST_SOURCES)
     assert replay(engine, pub) == saved["output"]
 
 
@@ -88,7 +88,7 @@ def test_legacy_ranking_config_with_quality_audit_replays_byte_identically(
     legacy = {
         **saved["ranking_config"],
         "quality_audit": {
-            "sources": {s: {"status": "no_baseline"} for s in models.SOURCES},
+            "sources": {s: {"status": "no_baseline"} for s in models.WATCHLIST_SOURCES},
             "override": {"actor": "a", "reason": "r", "checks": []},
         },
     }
