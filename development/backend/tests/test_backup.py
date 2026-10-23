@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -230,56 +231,79 @@ CONNECTION_KEYS = {"host", "hostaddr", "port", "user", "username", "password", "
 def _no_connection_details(manifest_text, url):
     """The manifest names nothing about the database connection.
 
-    A bare port number is never searched for: its digits can occur by chance in
-    the archive sha256, sizes and timestamps. Every check here cannot.
+    Nothing here can match by chance: a bare port number can occur in the
+    archive sha256, sizes and timestamps, and a bare user, password, database or
+    host name can occur inside the backup's own name (the documented local user
+    is "perennial"), so those are only matched as whole JSON values or in forms
+    that need an "@" or ":" no manifest field has.
     """
-    def keys(value):
+    def walk(value):
         if isinstance(value, dict):
             for k, v in value.items():
-                yield k.lower()
-                yield from keys(v)
+                yield "key", k.lower()
+                yield from walk(v)
         elif isinstance(value, list):
             for v in value:
-                yield from keys(v)
+                yield from walk(v)
+        elif isinstance(value, str):
+            yield "value", value.lower()
 
     lowered = manifest_text.lower()
-    checks = [(marker, marker) for marker in
-              ("postgres", "host=", "port=", "user=", "password=", "dbname=")]
-    checks += [("url", url.render_as_string(hide_password=False)),
+    found = ["scheme"] if re.search(r"postgres(ql)?(\+\w+)?://", lowered) else []
+    pieces = [(marker, marker) for marker in ("host=", "port=", "user=", "password=", "dbname=")]
+    pieces += [("url", url.render_as_string(hide_password=False)),
                ("masked url", url.render_as_string()), ("host:port", f"{url.host}:{url.port}"),
-               ("host", url.host), ("user", url.username), ("password", url.password),
-               ("database", url.database)]
+               ("user:password@", f"{url.username}:{url.password}@"), ("@host", f"@{url.host}")]
     # Labels only, so a failure never prints the credential itself.
-    found = [label for label, value in checks if value and str(value).lower() in lowered]
-    found += sorted(CONNECTION_KEYS & set(keys(json.loads(manifest_text))))
+    found += [label for label, piece in pieces if piece.lower() in lowered]
+    whole = {str(v).lower(): label for label, v in [
+        ("host", url.host), ("user", url.username), ("password", url.password),
+        ("database", url.database)] if v}
+    for kind, item in walk(json.loads(manifest_text)):
+        if kind == "key" and item in CONNECTION_KEYS:
+            found.append(f"key {item}")
+        elif kind == "value" and item in whole:
+            found.append(whole[item])
     assert found == []
 
 
-def test_connection_check_ignores_port_digits_but_catches_real_leaks():
+@pytest.mark.parametrize("raw", [
+    # CI (run 40020378732: the archive sha256 held CI's port)
+    "postgresql+psycopg://perennial_test:synthetic_ci_only@127.0.0.1:5432/perennial_test_0a1b2c3d",
+    # development/backend/.env.example: user and password are the prefix of every backup name
+    "postgresql+psycopg://perennial:perennial@localhost:5433/perennial_test",
+])
+def test_connection_check_ignores_chance_matches_but_catches_real_leaks(raw):
     from sqlalchemy.engine import make_url
-    url = make_url("postgresql+psycopg://perennial_test:synthetic_ci_only@127.0.0.1:5432/"
-                   "perennial_test_0a1b2c3d")
-    digest = "5432" + "a" * 60  # CI run 40020378732: the archive sha256 held CI's port
-    manifest = {"format": 1, "name": "perennial-20261023T201405Z-543254",
-                "archive": "perennial-20261023T201405Z-543254.dump.cms",
-                "snapshot_time": "2026-10-23T20:14:05.432123+00:00", "archive_bytes": 54321,
-                "archive_sha256": digest, "recipient_sha256_fingerprint": HEX,
-                "storage_receipt": {"store": "local-stub", "name": "x", "bytes": 54321,
-                                    "sha256": digest},
-                "tables": {"ark_holdings": {"rows": 5432, "sha256": digest}}}
+    url = make_url(raw)
+    port = str(url.port)
+    digest = port + "a" * 60
+    name = f"perennial-20261023T201405Z-{port}ab"
+    manifest = {"format": 1, "name": name, "archive": name + ".dump.cms",
+                "snapshot_time": f"2026-10-23T20:14:05.{port}12+00:00",
+                "archive_bytes": int(port + "1"), "archive_sha256": digest,
+                "recipient_sha256_fingerprint": HEX, "pg_dump_version": "PostgreSQL 17.7",
+                "storage_receipt": {"store": "local-stub", "name": name + ".dump.cms",
+                                    "bytes": int(port + "1"), "sha256": digest},
+                "tables": {"ark_holdings": {"rows": int(port), "sha256": digest}}}
     text = json.dumps(manifest, indent=2)
-    assert str(url.port) in text  # the old substring check fails here
+    assert port in text  # the bare-port check failed here
     _no_connection_details(text, url)
 
     leaks = [
         {"note": url.render_as_string(hide_password=False)},
         {"note": url.render_as_string()},
-        {"note": "restored from 127.0.0.1:5432"},
-        {"note": "host=127.0.0.1 port=5432 dbname=x"},
-        {"note": "synthetic_ci_only"},
-        {"note": "by perennial_test"},
-        {"port": 5432},
-        {"storage_receipt": {**manifest["storage_receipt"], "Host": "localhost"}},
+        {"note": f"postgresql://elsewhere/{url.database}x"},
+        {"note": f"restored from {url.host}:{port}"},
+        {"note": f"host={url.host} port={port} dbname=x"},
+        {"note": f"{url.username}:{url.password}@"},
+        {"note": f"via @{url.host}"},
+        {"note": url.password},
+        {"note": url.username.upper()},
+        {"source": [url.database]},
+        {"origin": url.host},
+        {"port": url.port},
+        {"storage_receipt": {**manifest["storage_receipt"], "Host": "x"}},
         {"tables": {"ark_holdings": {"rows": 1, "sha256": HEX, "dsn": "x"}}},
     ]
     for leak in leaks:
