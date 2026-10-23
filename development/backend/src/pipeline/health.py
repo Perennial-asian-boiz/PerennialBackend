@@ -8,6 +8,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import Engine
 
 from src.db import models as m
+from src.pipeline import congress_history
 from src.pipeline.publication import MAX_AGE, current
 from src.settings import (
     PUBLICATION_DEADLINE,
@@ -44,7 +45,11 @@ def publication_window_start(now: datetime, holidays: Iterable[date]) -> datetim
 def _severity(issue: str, issues: list[str]) -> str:
     # Rolled back: a deliberate, audited operator decision, visible until the
     # next publication; staleness it causes is still reported on its own.
-    if issue.startswith("publication:degraded") or issue == "publication:rolled_back":
+    if (
+        issue.startswith("publication:degraded")
+        or issue == "publication:rolled_back"
+        or issue == "congress_trades:possible_gap"
+    ):
         return SEV3
     source, _, state = issue.partition(":")
     if state in ("failed", "abandoned"):
@@ -130,6 +135,16 @@ def health(
             }
             if run["status"] in ("failed", "abandoned"):
                 issues.append(f"{source}:{run['status']}")
+            if (
+                source == "congress_trades"
+                and success is not None
+                and conn.execute(
+                    select(func.count())
+                    .select_from(m.congress_history_gaps)
+                    .where(m.congress_history_gaps.c.detected_run_id == success["id"])
+                ).scalar_one()
+            ):
+                issues.append("congress_trades:possible_gap")
             if run["status"] == "running" and (
                 run["heartbeat_at"] is None
                 or run["heartbeat_at"] < now - timedelta(minutes=10)
@@ -147,6 +162,15 @@ def health(
         batches = conn.execute(
             select(func.count()).select_from(m.source_batches)
         ).scalar_one()
+        # Informational, never an issue: history starts at the first live run,
+        # so the 2-year Congress window fills over time (design note §5).
+        since = conn.execute(
+            select(func.min(m.congress_trade_history.c.disclosure_date))
+        ).scalar_one()
+        congress_history_info = {
+            "since": since.isoformat() if since else None,
+            "warming": since is None or since > congress_history.window_start(now),
+        }
     # M3 missed-run monitor: the scheduled job never started for the trading day
     # whose deadline passed (distinct from a run that started and failed). Only
     # watchlist sources count: a GDELT run must not mask a missed pipeline run.
@@ -273,4 +297,5 @@ def health(
         "publication_id": pub["id"] if pub else None,
         "database_bytes": size,
         "batch_count": batches,
+        "congress_history": congress_history_info,
     }

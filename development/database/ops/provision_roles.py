@@ -19,6 +19,8 @@ IMMUTABLE = (
 )
 MUTABLE = ("ingestion_runs", "current_publication")
 IMMUTABLE += ("gdelt_articles",)
+# Congress history (free-plan accumulation): append-only like source batches.
+IMMUTABLE += ("congress_trade_history", "congress_history_gaps", "publication_history_watermarks")
 MUTABLE += ("gdelt_theme_days", "gdelt_spike_checks")
 # M4 identity. Aliases are append-only: root imports register canonical tickers.
 # Profiles are reviewed seed data written by the owner; the pipeline only reads them.

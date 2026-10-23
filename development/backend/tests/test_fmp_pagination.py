@@ -39,7 +39,7 @@ def test_page_counts_survive_diagnostic_sanitization():
 def test_database_congress_fetches_until_short_or_empty_page(count):
     session = _session(_trades(count))
     outcome = collectors.collect_congress(
-        session, api_key="synthetic-fmp", sleep=NO_SLEEP
+        session, api_key="synthetic-fmp", sleep=NO_SLEEP, max_pages=50
     )
     assert outcome.succeeded
     assert len(outcome.records) == count
@@ -52,22 +52,18 @@ def test_database_congress_fetches_until_short_or_empty_page(count):
     assert senate_pages == list(range(expected_pages))
 
 
-@pytest.mark.parametrize(
-    "full_pages,succeeds", [(1, True), (2, True), (3, False)]
-)
-def test_database_congress_safety_cap_boundary(monkeypatch, full_pages, succeeds):
-    fmp = collectors._fetcher("fmp")
-    monkeypatch.setattr(fmp, "MAX_PAGES", 3)
+@pytest.mark.parametrize("full_pages", [1, 2, 3])
+def test_database_congress_page_cap_ends_the_chamber(full_pages):
+    """A full final page is the end of what this run can see, not a failure:
+    history accumulates across runs and gaps are detected there."""
     session = _session(_trades(full_pages * 20 + 1))
     outcome = collectors.collect_congress(
-        session, api_key="synthetic-fmp", sleep=NO_SLEEP
+        session, api_key="synthetic-fmp", sleep=NO_SLEEP, max_pages=3
     )
-    assert outcome.succeeded is succeeds
-    if not succeeds:
-        assert outcome.diagnostics["failures"] == [
-            {"unit": "senate page 2", "code": "pagination_exhausted"}
-        ]
-        assert outcome.diagnostics["senate_pages_fetched"] == 3
+    assert outcome.succeeded
+    pages = min(full_pages + 1, 3)
+    assert outcome.diagnostics["senate_pages_fetched"] == pages
+    assert outcome.diagnostics["senate_rows_served"] == min(full_pages * 20 + 1, 60)
 
 
 def test_database_congress_402_on_later_page_is_explicit_failure():
@@ -75,6 +71,7 @@ def test_database_congress_402_on_later_page_is_explicit_failure():
         _session(_trades(61), status_page=2),
         api_key="synthetic-fmp",
         sleep=NO_SLEEP,
+        max_pages=50,
     )
     assert not outcome.succeeded
     assert outcome.diagnostics["failures"] == [

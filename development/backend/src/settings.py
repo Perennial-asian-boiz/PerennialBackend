@@ -108,7 +108,9 @@ class ProviderSettings(BaseSettings):
 
 class Settings(ProviderSettings):
     database_url: SecretStr
-    fmp_max_pages: int = Field(default=50, ge=1, le=1000)
+    # Pages per chamber per Congress run. The free FMP plan serves only page 0;
+    # raise this on a paid tier (docs/work-items/congress-incremental-design-note.md).
+    fmp_max_pages: int = Field(default=1, ge=1, le=1000)
     quality_thresholds: dict[str, QualityThreshold] = Field(
         default_factory=_quality_defaults
     )
