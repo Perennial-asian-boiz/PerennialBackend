@@ -19,7 +19,7 @@ import sys
 from dataclasses import asdict
 from typing import Any, List, Optional
 
-from src.db.models import SOURCES
+from src.db.models import SOURCES, WATCHLIST_SOURCES
 from src.db.queries import batch_rows, latest_successful_run
 from src.db.session import make_engine
 from src.ingestion.redaction import describe_exception
@@ -153,7 +153,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             with engine.connect() as conn:
                 latest = {
-                    source: latest_successful_run(conn, source) for source in SOURCES
+                    source: latest_successful_run(conn, source)
+                    for source in WATCHLIST_SOURCES
                 }
                 if any(run is None for run in latest.values()):
                     raise PublicationError("all sources need a successful batch")

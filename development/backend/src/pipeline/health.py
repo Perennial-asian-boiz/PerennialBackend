@@ -71,7 +71,7 @@ def health(
     issues: list[str] = []
     sources: dict[str, dict[str, Any] | None] = {}
     with engine.connect() as conn:
-        for source in m.SOURCES:
+        for source in m.WATCHLIST_SOURCES:
             run = (
                 conn.execute(
                     select(m.ingestion_runs)
