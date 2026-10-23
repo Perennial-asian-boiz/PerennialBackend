@@ -341,7 +341,7 @@ def test_publish_refuses_reuse_past_its_limit(engine, fixture_path):
 
     runs, batches = inputs(engine, fixture_path)
     publish(engine, runs, caps(engine, batches))
-    limits = {s: timedelta(days=3) for s in models.SOURCES}
+    limits = {s: timedelta(days=3) for s in models.WATCHLIST_SOURCES}
     limits["ark_holdings"] = timedelta(seconds=1)
     age_run(engine, runs["ark_holdings"], timedelta(seconds=5))
     with pytest.raises(PublicationReuseError):

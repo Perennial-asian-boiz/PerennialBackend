@@ -323,7 +323,7 @@ def demo_marked(engine: Engine, publication_id: int) -> bool:
 
 def walkthrough(engine: Engine, today: date | None = None) -> list[dict[str, Any]]:
     """The scripted demo; each step returns a compact summary (ids and codes only)."""
-    from src.db.models import SOURCES, publication_events
+    from src.db.models import WATCHLIST_SOURCES, publication_events
     from src.db.queries import batch_rows, latest_successful_run
     from src.pipeline import publication
     from src.pipeline.health import health
@@ -397,7 +397,7 @@ def walkthrough(engine: Engine, today: date | None = None) -> list[dict[str, Any
     steps.append(refused)
 
     with engine.connect() as conn:
-        latest = {s: latest_successful_run(conn, s) for s in SOURCES}
+        latest = {s: latest_successful_run(conn, s) for s in WATCHLIST_SOURCES}
         rows = {s: batch_rows(conn, s, r.batch_id) for s, r in latest.items() if r}
     with replaying(feed):
         caps = collect_market_caps(candidate_symbols(rows), api_key=PLACEHOLDER_KEY)

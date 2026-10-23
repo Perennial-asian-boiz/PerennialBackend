@@ -91,13 +91,13 @@ def test_cli_run_pipeline_publishes_with_keys_only_in_settings(
                 models.publication_sources.c.publication_id == publication_id
             )
         ).scalars()
-        assert sorted(pinned) == sorted(models.SOURCES)
+        assert sorted(pinned) == sorted(models.WATCHLIST_SOURCES)
         statuses = dict(
             conn.execute(
                 select(models.ingestion_runs.c.source, models.ingestion_runs.c.status)
             ).all()
         )
-    assert statuses == {source: "succeeded" for source in models.SOURCES}
+    assert statuses == {source: "succeeded" for source in models.WATCHLIST_SOURCES}
 
 
 @pytest.mark.db

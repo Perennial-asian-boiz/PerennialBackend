@@ -75,7 +75,7 @@ def test_fixture_runs_still_cannot_publish_without_the_demo_flag(demo_engine):
 
     run_demo(demo_engine, DemoReplay())
     with demo_engine.connect() as conn:
-        runs = {s: latest_successful_run(conn, s).run_id for s in models.SOURCES}
+        runs = {s: latest_successful_run(conn, s).run_id for s in models.WATCHLIST_SOURCES}
     with pytest.raises(PublicationError, match="live collection mode"):
         publish(demo_engine, runs, {})
 

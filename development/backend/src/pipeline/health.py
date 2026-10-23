@@ -19,6 +19,10 @@ from src.settings import (
 # M2: degraded publishing is visible but not an outage; everything else is.
 SEV2, SEV3 = "SEV2", "SEV3"
 
+# GDELT (G5, provisional): informational until M6 scores consume it. Staleness
+# is an advisory: visible, never a watchlist issue, never unhealthy.
+GDELT_MAX_AGE = timedelta(days=2)
+
 
 def publication_window_start(now: datetime, holidays: Iterable[date]) -> datetime:
     """Start of the trading day whose D6 deadline (10:30 PT) most recently passed.
@@ -144,18 +148,31 @@ def health(
             select(func.count()).select_from(m.source_batches)
         ).scalar_one()
     # M3 missed-run monitor: the scheduled job never started for the trading day
-    # whose deadline passed (distinct from a run that started and failed).
+    # whose deadline passed (distinct from a run that started and failed). Only
+    # watchlist sources count: a GDELT run must not mask a missed pipeline run.
     with engine.connect() as conn:
         started = conn.execute(
             select(func.count())
             .select_from(m.ingestion_runs)
             .where(
                 m.ingestion_runs.c.collection_mode == "live",
+                m.ingestion_runs.c.source.in_(m.WATCHLIST_SOURCES),
                 m.ingestion_runs.c.started_at >= window_start,
             )
         ).scalar_one()
     if not started:
         issues.append("pipeline:missed_run")
+    advisories: list[str] = []
+    with engine.connect() as conn:
+        for source in m.SUBJECTLESS_SOURCES:
+            finished = conn.execute(
+                select(func.max(m.ingestion_runs.c.finished_at)).where(
+                    m.ingestion_runs.c.source == source,
+                    m.ingestion_runs.c.status == "succeeded",
+                )
+            ).scalar_one()
+            if finished is None or now - finished > GDELT_MAX_AGE:
+                advisories.append(f"{source}:stale")
     pub = current(engine)
     if pub is None:
         issues.append("publication:missing")
@@ -251,6 +268,7 @@ def health(
         "issue_severity": severities,
         "checked_at": now,
         "issues": issues,
+        "advisories": advisories,
         "sources": sources,
         "publication_id": pub["id"] if pub else None,
         "database_bytes": size,

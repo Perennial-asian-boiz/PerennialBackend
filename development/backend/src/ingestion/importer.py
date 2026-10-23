@@ -82,7 +82,13 @@ def safe_coverage(value: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(value, dict):
         return None
     scope = value.get("scope")
-    if scope not in ("snapshot", "recent_window", "selected_universe"):
+    if scope not in (
+        "snapshot",
+        "recent_window",
+        "selected_universe",
+        "window",  # GDELT: every theme over the trailing window
+        "derivation",  # a derived batch computed from recorded input batches
+    ):
         return None
     return {"complete": value.get("complete") is True, "scope": scope}
 

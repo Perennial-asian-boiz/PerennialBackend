@@ -137,18 +137,19 @@ def test_search_extraction_error_is_safe(search_module, monkeypatch, caplog, tmp
 
 
 def test_gdelt_theme_failure_is_safe(caplog):
+    from datetime import datetime, timezone
     from types import SimpleNamespace
 
-    from src.services.gdelt import job
+    from src.services.gdelt import contract
 
     def fail(theme):
-        raise job.GdeltError(URL)
+        raise contract.GdeltError(URL)
 
-    client = SimpleNamespace(volume=fail)
+    client = SimpleNamespace(volume=fail, tone=fail)
     themes = SimpleNamespace(themes=["SYNTHETIC_THEME"])
     with caplog.at_level(logging.INFO):
-        result = job.run_gdelt(None, client=client, theme_map=themes)
-    assert len(result.failed) == 1
+        outcome = contract.collect_volume(client, themes, datetime.now(timezone.utc))
+    assert not outcome.succeeded
     assert "GdeltError" in caplog.text
     assert SECRET not in caplog.text and URL not in caplog.text
 

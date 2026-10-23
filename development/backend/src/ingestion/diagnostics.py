@@ -49,6 +49,7 @@ ERROR_SUMMARIES = {
     "partial_collection": "collection was incomplete; some units failed",
     "missing_credential": "a required provider credential is not configured",
     "empty_short_interest": "no short-interest records returned for the selected universe",
+    "empty_gdelt_timeline": "GDELT returned no volume for any watched theme",
     "no_input_tickers": "no candidate tickers available (upstream fetcher files missing or empty)",
     "parse_error": "fetcher output could not be parsed",
     "file_unreadable": "input file does not exist or cannot be read",
@@ -71,6 +72,7 @@ ERROR_SUMMARIES = {
 UNIT_KINDS = frozenset(
     {
         "ARK funds",
+        "GDELT themes",
         "Congress requests",
         "insider tickers",
         "short-interest tickers",
@@ -124,7 +126,8 @@ _REQUEST_ERRORS = frozenset(
 )
 _HTTP_CODE = re.compile(r"^http_[1-5][0-9]{2}$")
 _UNIT = re.compile(
-    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|trades_congress\.json|ark_holdings\.json)$"
+    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|trades_congress\.json|ark_holdings\.json"
+    r"|[A-Z][A-Z0-9_]{1,63})$"  # GDELT theme codes
 )
 MAX_COUNT = 10**9
 

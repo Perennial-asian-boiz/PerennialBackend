@@ -20,7 +20,7 @@ Rules shared by every source:
 
 import math
 import re
-from datetime import date
+from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlsplit
@@ -472,11 +472,97 @@ class ShortInterestRecord(SourceRecord):
         return v
 
 
+_THEME = re.compile(r"[A-Z0-9_]{1,64}")
+
+
+def _theme(value: Any) -> str:
+    if not isinstance(value, str) or not _THEME.fullmatch(value):
+        raise ValueError("theme must be a GDELT theme code")
+    return value
+
+
+def _tone(value: Any) -> Optional[Decimal]:
+    """GDELT average tone: signed, NUMERIC(8, 4)."""
+    dec = _optional_decimal(value)
+    if dec is None:
+        return None
+    dec = dec.quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+    if abs(dec) >= 10_000:
+        raise ValueError("number is out of range")
+    return dec
+
+
+Theme = Annotated[str, BeforeValidator(_theme)]
+
+
+class GdeltThemeVolume(GlobalRecord):
+    """One theme on one UTC day: article volume and average tone."""
+
+    DB_COLUMNS = ("theme", "day", "article_count", "total_articles", "avg_tone")
+
+    theme: Theme
+    day: RequiredDate
+    article_count: int = Field(ge=0, strict=True)
+    total_articles: Optional[int] = Field(default=None, ge=0, strict=True)
+    avg_tone: Annotated[Optional[Decimal], BeforeValidator(_tone)] = None
+
+
+class GdeltThemeArticle(GlobalRecord):
+    """One evidence article for a theme on the target day."""
+
+    DB_COLUMNS = ("theme", "day", "url", "title", "domain", "seen_at")
+
+    theme: Theme
+    day: RequiredDate
+    url: Annotated[str, BeforeValidator(_bounded(_optional_link, 2048))]
+    title: Annotated[Optional[str], BeforeValidator(_text_validator(500))] = None
+    domain: Annotated[Optional[str], BeforeValidator(_text_validator(255))] = None
+    seen_at: Optional[datetime] = None
+
+    @field_validator("seen_at")
+    @classmethod
+    def _aware(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("seen_at must be timezone-aware")
+        return v
+
+
+class GdeltSpikeResult(GlobalRecord):
+    """Derived: whether a theme's target-day volume is a spike (rule_version)."""
+
+    DB_COLUMNS = (
+        "theme",
+        "day",
+        "article_count",
+        "baseline_median",
+        "observed_baseline_days",
+        "ratio",
+        "is_spike",
+        "rule_version",
+    )
+
+    theme: Theme
+    day: RequiredDate
+    article_count: int = Field(ge=0, strict=True)
+    baseline_median: Annotated[
+        Optional[Decimal], BeforeValidator(_decimal_validator(2, 12))
+    ] = None
+    observed_baseline_days: int = Field(ge=0, le=32767, strict=True)
+    ratio: Annotated[Optional[Decimal], BeforeValidator(_decimal_validator(2, 10))] = (
+        None
+    )
+    is_spike: Optional[bool] = None
+    rule_version: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
+
+
 RECORD_MODELS: Dict[str, type[ContractRecord]] = {
     "congress_trades": CongressTrade,
     "ark_holdings": ArkHolding,
     "insider_trades": InsiderTrade,
     "short_interest": ShortInterestRecord,
+    "gdelt_theme_volume": GdeltThemeVolume,
+    "gdelt_theme_articles": GdeltThemeArticle,
+    "gdelt_spike_results": GdeltSpikeResult,
 }
 
 # Top-level key holding the record list in each fetcher's JSON output.
