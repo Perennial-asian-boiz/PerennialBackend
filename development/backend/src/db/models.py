@@ -36,7 +36,18 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 SCHEMA = "perennial"
 
-SOURCES = ("congress_trades", "ark_holdings", "insider_trades", "short_interest")
+# The watchlist publication pins exactly these sources; nothing else can block it.
+WATCHLIST_SOURCES = (
+    "congress_trades",
+    "ark_holdings",
+    "insider_trades",
+    "short_interest",
+)
+# Sources whose rows are not about one security: no ticker, no securities FK.
+SUBJECTLESS_SOURCES: tuple[str, ...] = ()
+# The closed source vocabulary (CHECKs, CLI, locks). Append only: lifecycle lock
+# keys are derived from each source's position.
+SOURCES = WATCHLIST_SOURCES + SUBJECTLESS_SOURCES
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live")
 PUBLICATION_EVENT_KINDS = ("quality_passed", "quality_override", "degraded", "rollback")
