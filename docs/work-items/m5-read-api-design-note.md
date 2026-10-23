@@ -56,11 +56,29 @@ The API connects with a login role that inherits only `perennial_api`. It does n
 
 **R1 defines `perennial_api` in `provision_roles.py`** with these grants:
 - `perennial`, SELECT only:
-  - `publications`, `current_publication`, `securities`, `security_identifiers` and `company_profiles`
+  - `publications`, `current_publication`, `securities` and `security_identifiers`
+  - on `company_profiles`, the columns `id`, `sector` and `industry`. The other columns are reviewed public reference data, but the endpoint serves only these, so the grant stays column-level.
   - on `publication_events`, the columns `id`, `publication_id`, `kind`, `checks` and `created_at`, **not** `actor` or `reason`
-- Nothing else in `perennial`: no raw source tables, `source_batches`, `ingestion_runs`, `run_dependencies`, market-cap or Congress-history tables, and no writes anywhere.
-- `perennial_api` joins the `ALTER DEFAULT PRIVILEGES … REVOKE` that `provision_roles.py` runs for its group roles (`provision_roles.py:72`). A table added to `perennial` later is then never readable by the API until a reviewed change grants it.
-- The role is NOLOGIN and NOBYPASSRLS, and inherits no other role. Provisioning is idempotent and refuses an existing role with stronger attributes, as `provision_roles.py` already does for the other three.
+- **Explicit columns in code.** Because two grants are column-level, the implementer must select explicit columns. SQLAlchemy's `select(m.publication_events)` expands to every column, `actor` and `reason` included, and fails as `perennial_api` with 42501. Tests that run as the API role (RA-2, RA-4, RA-12) catch it, but it should be designed in, not discovered.
+- Nothing else in `perennial`: no raw source tables, `source_batches`, `ingestion_runs`, `run_dependencies`, market-cap or Congress-history tables, and no writes anywhere. `USAGE` on schema `perennial` only, never `CREATE`.
+- **`perennial_api` joins every safety check `provision_roles.py` already runs for its group roles:**
+  - the role-count check (`provision_roles.py:36-38`), which becomes four roles
+  - the attribute and membership refusals (`:43-51`): an existing role with any of `rolsuper`, `rolcreatedb`, `rolcreaterole`, `rolreplication`, `rolbypassrls` or `rolcanlogin`, or with any membership, is refused
+  - the table and column `REVOKE` loop (`:83-90`)
+  - the `ALTER DEFAULT PRIVILEGES … REVOKE` (`:72`), so a table a future migration adds is never readable by the API until a reviewed change grants it
+
+  Column grants are re-applied after every migration, like the rest of the grants.
+- **Provisioning also refuses** if `perennial_api` owns any relation or schema (as #22's `provision_api_role.py:23-27` already checks). It also refuses if any of Supabase's `anon`, `authenticated` or `service_role` roles holds a privilege on a table in `perennial` (or `app`, once R2 lands). `REVOKE … FROM PUBLIC` doesn't cover named roles, so this is asserted, not assumed.
+- Provisioning is idempotent. It runs as Supabase's dashboard `postgres` role, which isn't a superuser but already provisions the other three groups. The script creates `perennial_api`, so that role holds ADMIN on it for the login member's `IN ROLE` grant.
+
+**The login role is Bryan's to create** (D3: agents never hold credentials). It must be:
+- `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE perennial_api`
+- a member of nothing else
+- given a `CONNECTION LIMIT` sized to the `api` pool per instance (5 + 5 today)
+
+`INHERIT` is required, because with the pooler in transaction mode `SET ROLE` can't be relied on. The startup check (RA-15) refuses any other membership anyway.
+
+**Supabase's exposed schemas.** `perennial` and `app` must never appear in Supabase's API "exposed schemas" setting. Otherwise PostgREST serves those tables to anyone holding the project's anon key, bypassing this role entirely. This is a deployment setting, confirmed on the real project before any deployment.
 
 **When #22 lands, its `app` grants join that same definition** (see "What R2 needs from #22"). This is narrower than the roadmap's "read-only on `perennial`". The narrowing is deliberate, so the checker should confirm it.
 
@@ -126,7 +144,7 @@ How each field is filled:
 - **Files.** R1 adds `src/api/__init__.py` with **exactly** #22's one-line docstring, so the two additions are identical and don't conflict. It also adds `src/api/read.py`, which exposes `router` and a `create_app()` used for tests and local runs. It doesn't add `src/api/app.py`.
 - **Wiring after #22.** When #22 lands, its `app.py` adds `app.include_router(read.router)`, and `create_app()` stays as the test app.
 - **Dependencies.** R1 adds the same pins #22 uses, so Jaden's rebase is a lock recompile, not a version negotiation. Locks follow ADR 0001.
-- **Database access.** R1 uses `make_engine(workload="api")`, and each request runs in one `READ ONLY` transaction.
+- **Database access.** R1 uses `make_engine(workload="api")`. Each request runs in one transaction marked read-only **per transaction**: `BEGIN READ ONLY`, which SQLAlchemy's psycopg dialect issues for `execution_options(postgresql_readonly=True)`. It is never a session-level `SET`, because Supabase's pooler runs in transaction mode and reuses backends. Read-only is a safety net; the grants are the boundary. Optionally, Bryan sets `default_transaction_read_only = on` on the **login** role. A setting on the NOLOGIN group doesn't apply to its members.
 
 ## What R2 needs from #22
 
@@ -139,6 +157,15 @@ R2 doesn't ask #22 for anything beyond Bryan's list. It names the exact interfac
    - **Today's #22 script would break R1.** It revokes and re-grants on schema `perennial` itself (`provision_api_role.py:46`, `:51`). It then runs `REVOKE ALL ON ALL TABLES IN SCHEMA app, perennial` (`:56`) and grants back only `publications` and `current_publication` (`:75`).
    - **Why that matters.** Run after R1's provisioning, it silently strips R1's grants on `securities`, `security_identifiers`, `company_profiles` and the `publication_events` columns. That breaks `/v1/securities` and the envelope, and the result depends on which script ran last.
    - **What #22 must do.** Its provisioning issues no REVOKE or GRANT on schema `perennial` or any table in it. RU-6 checks both orders. The coordinator is taking this requirement to Jaden through Bryan.
+
+### R2 boundary decisions, recorded now
+
+These three hold under either answer to Bryan's open questions for Jaden (`auth.uid()` vs `request.jwt.claim.sub`, and the Supabase `/user` call vs local key verification). They don't reopen those questions.
+1. **The subject is transaction-local only.** The API sets it with `set_config('<name>', $1, true)` inside the request's transaction, never with `SET` or `set_config(..., false)`. Transaction-mode pooling reuses backends across users, so a session-level setting would carry user A's subject into user B's next transaction.
+   - The API validates the subject as a UUID before setting it.
+   - Every policy expression denies when the setting is missing or empty: `nullif(current_setting('<name>', true), '')::uuid`, compared with equality. A missing subject then gives no rows, rather than an error or everything.
+2. **Policies name the role.** Every `app` policy is written `TO perennial_api`. PostgREST sets `request.jwt.claim.*` and `request.jwt.claims` for its own roles, so naming the role means a claim set by any other path never satisfies a policy, whichever setting name wins.
+3. **Ownership and FORCE.** `app` tables are owned by `perennial_owner` (or a dedicated app owner), never by `perennial_api`, and have both `ENABLE ROW LEVEL SECURITY` and `FORCE ROW LEVEL SECURITY`. Table owners bypass RLS unless it is forced. The startup check refuses ownership anyway, and FORCE keeps RU-2b meaningful even if provisioning drifts.
 
 ## Acceptance criteria
 
@@ -153,8 +180,8 @@ R2 doesn't ask #22 for anything beyond Bryan's list. It names the exact interfac
 - **RA-3** **Caching.** The `ETag` is `"v1-<id>"`. `If-None-Match: "v1-<id>"` returns `304` with no body, and a different tag returns `200`.
 - **RA-4** **Degraded, from an M2 fault-injection publication.** It has `degraded: true`, `stale_sources` listing each reused source with `collected_at` and `age_seconds`, and the counts filled in.
 - **RA-4b** **Not degraded.** A publication without a degraded event, and with every cap present, has `degraded: false`, `stale_sources: []` and both counts `0`.
-- **RA-4d** **Missing caps on a normal collection.** A legacy publication whose collector returned `None` for some symbols, with no fallback and so no degraded event, has `degraded: false` and `market_caps_unavailable` equal to the number of records warning `market_cap_unavailable` (more than 0).
 - **RA-4c** **Whitelisting.** A key added to a test's degraded-event body doesn't appear in the response.
+- **RA-4d** **Missing caps on a normal collection.** A legacy publication whose collector returned `None` for some symbols, with no fallback and so no degraded event, has `degraded: false` and `market_caps_unavailable` equal to the number of records warning `market_cap_unavailable` (more than 0).
 - **RA-5** **As of.** `source_as_of` equals `ranking_config.source_as_of` for the four watchlist sources, with `null` allowed.
 - **RA-6** **Byte-stable.** While publication P is current, `GET /v1/watchlist` returns byte-identical bodies in all of these cases:
   - across calls
@@ -179,16 +206,21 @@ R2 doesn't ask #22 for anything beyond Bryan's list. It names the exact interfac
 - **RA-11** **The entry.** `current.entry` is that symbol's record from the current publication's output, or `null` if it isn't in it. `current.publication` is the same envelope as RA-2.
 
 **Role and grants**
-- **RA-12** **Allowed.** `perennial_api` can SELECT exactly the tables and columns listed above. SELECT on `publication_events.actor` or `.reason` fails.
-- **RA-13** **Refused.** These fail:
-  - SELECT on `source_batches`, `ingestion_runs`, `run_dependencies`, any raw source table, `market_cap_observations` or `congress_trade_history`
-  - any INSERT, UPDATE or DELETE in `perennial`
-- **RA-14** **Role shape.** The role is NOLOGIN and NOBYPASSRLS and inherits nothing. Running provisioning twice is a no-op, and leaves exactly the RA-12 grant set.
+- **RA-12** **Allowed.** `perennial_api` can SELECT exactly the tables and columns listed above. SELECT on `publication_events.actor` or `.reason`, or on a `company_profiles` column other than `id`, `sector` and `industry`, fails with 42501.
+- **RA-13** **Refused, computed rather than hand-listed.** The refused set is every table in `provision_roles.TABLES` minus the RA-12 allow list, plus `public.alembic_version`. For each one, SELECT fails with 42501. For every table in `perennial`, INSERT, UPDATE, DELETE and TRUNCATE fail. Computing the set means the next migration's table is covered without editing the test.
+- **RA-14** **Role shape.** `perennial_api` has none of `rolsuper`, `rolcreatedb`, `rolcreaterole`, `rolreplication`, `rolbypassrls` or `rolcanlogin`. It is a member of no role and owns no relation or schema. Running provisioning twice is a no-op, and leaves exactly the RA-12 grant set.
 - **RA-14b** **Default privileges.** A table the owner creates in `perennial` after provisioning isn't readable by `perennial_api`.
+- **RA-14c** **Supabase API roles.** Provisioning refuses (fixed error, nothing changed) when `anon`, `authenticated` or `service_role` holds any privilege on a `perennial` table. A test grants one such privilege on a test database and checks that provisioning refuses.
 
 **Startup, transactions and logs**
-- **RA-15** **Startup refusal.** `create_app()` refuses to start if its connection role can INSERT, UPDATE or DELETE any table in `perennial`, or is a superuser, or has BYPASSRLS. This covers a `DATABASE_URL` that points at the owner.
-- **RA-16** **Read-only transactions.** Each request runs in a READ ONLY transaction on the `api` workload, and a write attempted inside a handler fails.
+- **RA-15** **Startup refusal.** `create_app()` runs one check on the `api` workload before serving. It fails closed on any clause, with a fixed error code and no role name, URL or SQL in the output, using bound parameters:
+  1. **Attributes.** `session_user` and `current_user` are the same role, and that role has none of `rolsuper`, `rolcreatedb`, `rolcreaterole`, `rolreplication` or `rolbypassrls` (`pg_roles`). Attributes aren't inherited through membership, so they are checked on the session role itself.
+  2. **Membership.** The roles the session role belongs to, directly or transitively, are exactly `{perennial_api}`. The set excludes `pg_*` built-ins and the role itself, and is computed from `pg_auth_members` or `pg_has_role(session_user, r.rolname, 'MEMBER')`. This closes the `SET ROLE` path to a non-inherited grant. For example, a NOINHERIT member of `perennial_owner` would pass a privilege check but can `SET ROLE perennial_owner`.
+  3. **No writes.** For every table in `pg_tables WHERE schemaname = 'perennial'` (and `'app'` once R2 lands, against its intended write set), `has_table_privilege(current_user, tbl, …)` is false for INSERT, UPDATE, DELETE and TRUNCATE. The privilege functions evaluate inheritance and ownership; `information_schema.role_table_grants` doesn't, so it is never used. An empty `perennial` table list fails the check, so an unmigrated or wrong database can't pass trivially.
+  4. **No ownership.** The session role owns no relation or schema (`pg_class.relowner`, `pg_namespace.nspowner`), and has no `CREATE` on schema `perennial` (`has_schema_privilege`) or on the database (`has_database_privilege`). An owner can re-grant itself anything, so ownership is refused independently of clause 3.
+
+  Tests cover each clause with its own refusing role: a superuser or BYPASSRLS login, a NOINHERIT member of `perennial_owner`, a login that is a member of `perennial_api` and `perennial_reader`, a role that owns a table, and an empty database. Each fails with the same fixed code, and a correctly shaped login starts.
+- **RA-16** **Read-only transactions.** Each request's transaction is read-only per transaction (`BEGIN READ ONLY`, through `postgresql_readonly=True`), never a session `SET`. The test drives the request-transaction helper directly, with a test engine whose role *could* write, because such a role would fail RA-15 at startup. A write attempted inside it fails with 25006, and the next transaction on the same pooled connection is still read-only.
 - **RA-17** **Logs and errors.** Logs are JSON (`configure_logging`) and contain no query strings or database URLs. Error bodies have only `detail` and `code`.
 
 **Schema document**
@@ -201,7 +233,13 @@ R2 doesn't ask #22 for anything beyond Bryan's list. It names the exact interfac
 - **RU-2b** **RLS without the API's filter.** Querying as `perennial_api` with user A's subject set returns none of user B's rows, even with the API's explicit filter bypassed.
 - **RU-3** **Item contents.** Each item has `security_id`, `symbol`, `name` and `added_at`. `entry` is the current publication's record or `null`. The response envelope is the same as RA-2.
 - **RU-4** **No current publication.** The items still return, with `publication: null` and every `entry: null`.
-- **RU-5** **No pipeline writes.** `perennial_api` still can't write `perennial` after the `app` grants are added (RA-13 still passes).
+- **RU-5** **No pipeline writes.** With the `app` grants added, the computed RA-13 assertion and the RA-15 startup check still pass. RA-15's clause 3 now also covers `app`, against #22's intended write set.
+- **RU-5b** **Boundary decisions hold.** These are the three decisions in "R2 boundary decisions, recorded now":
+  - With no subject set, or an empty one, every `app` policy returns zero rows and no error.
+  - A non-UUID subject is refused before `set_config`.
+  - After a request for user A, the next transaction on the same pooled connection, for user B, sees no subject until it sets its own.
+  - Every `app` policy is `TO perennial_api`.
+  - Every `app` table is owned by the owner role, with ENABLE and FORCE ROW LEVEL SECURITY.
 - **RU-6** **Both provisioning orders.** Run R1's provisioning and #22's in both orders on fresh databases. Each time, `perennial_api` ends with exactly R1's `perennial` grant set (RA-12, RA-13, RA-14b) and #22's `app` grants.
 
 ## Needs Bryan
@@ -225,6 +263,6 @@ Bryan's open RLS/JWT questions for Jaden (`auth.uid()` vs `request.jwt.claim.sub
 
 ## Gates
 
-- **Review:** the checker reviews this note. The auditor reviews R1's role and grants (RA-12 to RA-15) and R2's RLS and JWT boundary (Gate M5).
+- **Review:** the checker reviews this note. The auditor reviews R1's role, grants and startup check (RA-12 to RA-16) and R2's RLS and JWT boundary (RU-5b, RU-6, Gate M5).
 - **Builds:** each part is test-maker first, then the implementer. CI as usual: ruff, format, strict mypy and the full suite with `REQUIRE_DATABASE_TESTS=1`.
 - **Safety:** synthetic data only. No provider keys, no deployment, no push.
