@@ -54,7 +54,7 @@ Why not switch production to the new path now:
 - **Calls per run.** The legacy path makes one FMP `/stable/profile` call per candidate, inside the free plan's 250 calls a day. Congress uses the same quota, two page-0 calls per run since #42 (one per chamber). So one daily run completes only while there are about 248 candidates or fewer. The design note estimated several hundred candidates (finding 1), so the limit may already be passed.
 - **Growth starts 2026-10-23.** #42 merged at 20:50Z that day. From then on, Congress candidates are every purchase ticker in up to 2 years of stored history, so the count grows with every run until the window fills.
 - **What happens when the quota runs out.** `collect_market_caps` raises, and stored values cover 3 days (`runner.py:450-494`). After that every candidate is unavailable, and `_caps` refuses every publication (`publication.py:485-486`). Publishing stops.
-- **How to see it coming.** Each legacy publication writes one `publication_market_caps` row per candidate, so that row count is the number of FMP profile calls the run made. Bryan can add it to the count-only query he runs after each M1 staging run.
+- **How to see it coming.** Each legacy publication writes one `publication_market_caps` row per candidate, so that row count is the number of FMP profile calls the run made. Bryan can add it to the count-only query run after each M1 staging run.
 - **What fixes it.** Settling decision 1, then writing the chosen provider's adapter for the new path. This packet doesn't change the exposure, either way. Decision 1 is therefore time-sensitive. The coordinator has raised this with Bryan.
 
 ## What counts as done without a provider
