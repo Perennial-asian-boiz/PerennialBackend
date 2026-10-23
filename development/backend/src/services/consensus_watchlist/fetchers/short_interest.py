@@ -35,34 +35,48 @@ import json
 import logging
 import math
 import re
-import sys
+
+# ── shared path resolution (see paths.py) ──
+import sys as _sys
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Any
+from pathlib import Path as _Path
+from typing import Any, Dict, List, Optional, Set
+
 import requests
 
-# ── shared path resolution (see paths.py) ──
-import sys as _sys
-from pathlib import Path as _Path
-_sys.path.insert(0, str(next(
-    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
-)))
-from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
+_sys.path.insert(
+    0,
+    str(
+        next(
+            p
+            for p in _Path(__file__).resolve().parents
+            if p.name == "consensus_watchlist"
+        )
+    ),
+)
+# Support direct script execution as well as package imports.
+_sys.path.insert(
+    0, str(next(p for p in _Path(__file__).resolve().parents if p.name == "backend"))
+)
+from paths import (  # noqa: F401 -- legacy module exports
+    ENV_PATH,
+    LOCAL_DATA_DIR,
+    local_data_dir,
+)
+from src.utils.logger import configure_logging, log_exception
 
 # ─────────────────────────────────────────────────────────
 # CONFIG & LOGGING
 # ─────────────────────────────────────────────────────────
 
 logger = logging.getLogger("short_interest")
-if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(logging.Formatter("[short_interest] %(levelname)s: %(message)s"))
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
 
-NASDAQ_URL = "https://api.nasdaq.com/api/quote/{symbol}/short-interest?assetClass=stocks"
+NASDAQ_URL = (
+    "https://api.nasdaq.com/api/quote/{symbol}/short-interest?assetClass=stocks"
+)
 
 # Nasdaq blocks requests without a browser User-Agent
 HEADERS = {
@@ -75,13 +89,14 @@ HEADERS = {
 }
 
 REQUEST_TIMEOUT = 15
-MAX_RETRIES     = 3
-REQUEST_DELAY   = 0.5   # be respectful to the public endpoint
+MAX_RETRIES = 3
+REQUEST_DELAY = 0.5  # be respectful to the public endpoint
 
 
 # ─────────────────────────────────────────────────────────
 # PATH HELPERS
 # ─────────────────────────────────────────────────────────
+
 
 def resolve_data_dir() -> Path:
     """
@@ -99,6 +114,7 @@ def get_input_file(filename: str) -> Optional[Path]:
 # ─────────────────────────────────────────────────────────
 # CANDIDATE UNIVERSE
 # ─────────────────────────────────────────────────────────
+
 
 def normalize_ticker(ticker: str) -> Optional[str]:
     """Normalizes a ticker symbol. Rejects invalid symbols."""
@@ -131,7 +147,7 @@ def get_candidate_tickers() -> List[str]:
                     candidates.add(norm)
             logger.info("Loaded candidate tickers from Congress trades")
         except Exception as e:
-            logger.warning(f"Error loading Congress trades: {e}")
+            log_exception(logger, "short_interest_get_candidate_tickers_failed", e)
 
     # ARK tickers
     a_path = get_input_file("ark_holdings.json")
@@ -145,10 +161,12 @@ def get_candidate_tickers() -> List[str]:
                     candidates.add(norm)
             logger.info("Loaded candidate tickers from ARK holdings")
         except Exception as e:
-            logger.warning(f"Error loading ARK holdings: {e}")
+            log_exception(logger, "short_interest_get_candidate_tickers_failed", e)
 
     sorted_candidates = sorted(candidates)
-    logger.info(f"Total deduplicated candidate universe: {len(sorted_candidates)} tickers")
+    logger.info(
+        "Total deduplicated candidate universe: %s tickers", len(sorted_candidates)
+    )
     return sorted_candidates
 
 
@@ -258,28 +276,32 @@ def parse_short_interest_strict(ticker: str, raw: dict) -> Optional[Dict[str, An
         # Build compact history (date + short interest) for trend use later
         history = []
         for r in rows:
-            history.append({
-                "settlement_date":       _normalize_date(r.get("settlementDate", "")),
-                "short_interest_shares": _to_int_strict(r.get("interest")),
-                "average_daily_volume":  _to_int_strict(r.get("avgDailyShareVolume")),
-                # Legacy JSON consumers retain these aliases; normalized models
-                # archive the canonical names above, including in history.
-                "short_interest":        _to_int_strict(r.get("interest")),
-                "avg_daily_volume":      _to_int_strict(r.get("avgDailyShareVolume")),
-                "days_to_cover":         _to_float_strict(r.get("daysToCover")),
-            })
+            history.append(
+                {
+                    "settlement_date": _normalize_date(r.get("settlementDate", "")),
+                    "short_interest_shares": _to_int_strict(r.get("interest")),
+                    "average_daily_volume": _to_int_strict(
+                        r.get("avgDailyShareVolume")
+                    ),
+                    # Legacy JSON consumers retain these aliases; normalized models
+                    # archive the canonical names above, including in history.
+                    "short_interest": _to_int_strict(r.get("interest")),
+                    "avg_daily_volume": _to_int_strict(r.get("avgDailyShareVolume")),
+                    "days_to_cover": _to_float_strict(r.get("daysToCover")),
+                }
+            )
 
         return {
-            "ticker":            ticker,
+            "ticker": ticker,
             "short_interest_shares": _to_int_strict(latest.get("interest")),
             "average_daily_volume": _to_int_strict(latest.get("avgDailyShareVolume")),
-            "short_interest":    _to_int_strict(latest.get("interest")),
-            "avg_daily_volume":  _to_int_strict(latest.get("avgDailyShareVolume")),
-            "days_to_cover":     _to_float_strict(latest.get("daysToCover")),
-            "settlement_date":   _normalize_date(latest.get("settlementDate", "")),
-            "history":           history,
-            "data_source":       "nasdaq",
-            "fetched_at":        datetime.now(timezone.utc).isoformat(),
+            "short_interest": _to_int_strict(latest.get("interest")),
+            "avg_daily_volume": _to_int_strict(latest.get("avgDailyShareVolume")),
+            "days_to_cover": _to_float_strict(latest.get("daysToCover")),
+            "settlement_date": _normalize_date(latest.get("settlementDate", "")),
+            "history": history,
+            "data_source": "nasdaq",
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
         }
 
     except (ValueError, TypeError, AttributeError, KeyError):
@@ -301,12 +323,15 @@ def parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
         if not rows:
             return None
         latest = rows[0]
-        history = [{
-            "settlement_date": _normalize_date(r.get("settlementDate", "")),
-            "short_interest": _to_int(r.get("interest")),
-            "avg_daily_volume": _to_int(r.get("avgDailyShareVolume")),
-            "days_to_cover": _to_float(r.get("daysToCover")),
-        } for r in rows]
+        history = [
+            {
+                "settlement_date": _normalize_date(r.get("settlementDate", "")),
+                "short_interest": _to_int(r.get("interest")),
+                "avg_daily_volume": _to_int(r.get("avgDailyShareVolume")),
+                "days_to_cover": _to_float(r.get("daysToCover")),
+            }
+            for r in rows
+        ]
         return {
             "ticker": ticker,
             "short_interest": _to_int(latest.get("interest")),
@@ -326,7 +351,10 @@ def parse_short_interest(ticker: str, raw: dict) -> Optional[Dict[str, Any]]:
 # FETCH — One ticker
 # ─────────────────────────────────────────────────────────
 
-def fetch_short_interest(ticker: str, session: requests.Session) -> Optional[Dict[str, Any]]:
+
+def fetch_short_interest(
+    ticker: str, session: requests.Session
+) -> Optional[Dict[str, Any]]:
     """
     Fetches short interest for one ticker from Nasdaq public API.
     Returns parsed record or None.
@@ -338,8 +366,8 @@ def fetch_short_interest(ticker: str, session: requests.Session) -> Optional[Dic
             resp = session.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
 
             if resp.status_code == 429:
-                logger.warning(f"Rate limited on {ticker} — waiting (attempt {attempt})")
-                time.sleep(2 ** attempt)
+                logger.warning("short_interest_rate_limited attempt=%d", attempt)
+                time.sleep(2**attempt)
                 continue
 
             if resp.status_code != 200:
@@ -354,11 +382,15 @@ def fetch_short_interest(ticker: str, session: requests.Session) -> Optional[Dic
             return parse_short_interest(ticker, data)
 
         except requests.exceptions.Timeout:
-            logger.warning(f"Timeout on {ticker} (attempt {attempt}/{MAX_RETRIES})")
+            logger.warning(
+                "short_interest_timeout attempt=%d max_attempts=%d",
+                attempt,
+                MAX_RETRIES,
+            )
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Request error on {ticker}: {e}")
+            log_exception(logger, "short_interest_fetch_short_interest_failed", e)
         except Exception as e:
-            logger.warning(f"Unexpected error on {ticker}: {e}")
+            log_exception(logger, "short_interest_fetch_short_interest_failed", e)
             return None
 
         if attempt < MAX_RETRIES:
@@ -371,6 +403,7 @@ def fetch_short_interest(ticker: str, session: requests.Session) -> Optional[Dic
 # SAVE
 # ─────────────────────────────────────────────────────────
 
+
 def save_to_json(records: List[Dict[str, Any]], errors: List[str]) -> None:
     """Saves short interest records to database/local_data/short_interest.json"""
     output_dir = resolve_data_dir()
@@ -378,54 +411,36 @@ def save_to_json(records: List[Dict[str, Any]], errors: List[str]) -> None:
 
     payload = {
         "schema_version": "1.0",
-        "source":         "nasdaq",
-        "fetched_at":     datetime.now(timezone.utc).isoformat(),
-        "total_records":  len(records),
+        "source": "nasdaq",
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "total_records": len(records),
         "note": (
             "Short interest is an attention/risk signal for consensus.py. "
             "High days_to_cover can mean bearish sentiment OR squeeze potential."
         ),
-        "records":        records,
-        "errors":         errors,
+        "records": records,
+        "errors": errors,
     }
 
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
-    logger.info(f"Saved {len(records)} records → {output_file}")
+    logger.info("Saved %s records", len(records))
 
 
 # ─────────────────────────────────────────────────────────
 # PRINT SUMMARY
 # ─────────────────────────────────────────────────────────
 
+
 def print_summary(records: List[Dict[str, Any]]) -> None:
-    print("\n" + "="*60)
-    print("  PERENNIAL — Short Interest Summary")
-    print("="*60)
-    print(f"  Total tickers with data : {len(records)}")
-
-    if records:
-        # Sort by days to cover — highest = most short pressure
-        ranked = sorted(
-            [r for r in records if r.get("days_to_cover") is not None],
-            key=lambda x: x["days_to_cover"],
-            reverse=True
-        )
-
-        print("\n  📊 Highest days-to-cover (most short pressure):")
-        print("  " + "-"*40)
-        for r in ranked[:15]:
-            dtc = r["days_to_cover"]
-            si  = r["short_interest"] or 0
-            print(f"  {r['ticker']:<8} {dtc:>6.2f} days to cover | "
-                  f"{si:>14,} shares short | {r['settlement_date']}")
-    print()
+    logger.info("short_interest_summary records=%d", len(records))
 
 
 # ─────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────
+
 
 def run() -> Dict[str, Any]:
     """
@@ -436,25 +451,26 @@ def run() -> Dict[str, Any]:
 
     tickers = get_candidate_tickers()
     if not tickers:
-        logger.warning("No candidate tickers found — run fmp.py and ark.py first")
+        logger.info("No candidate tickers found run fmp.py and ark.py first")
         save_to_json([], [])
         return {"records": [], "errors": []}
 
     records: List[Dict[str, Any]] = []
-    errors:  List[str] = []
+    errors: List[str] = []
 
     session = requests.Session()
 
-    logger.info(f"Fetching short interest for {len(tickers)} tickers...")
-    logger.info(f"Est. time: ~{len(tickers) * REQUEST_DELAY:.0f} seconds")
+    logger.info("Fetching short interest for %s tickers...", len(tickers))
+    logger.info("short_interest_rate_limited")
 
     for i, ticker in enumerate(tickers, 1):
         record = fetch_short_interest(ticker, session)
         if record:
             records.append(record)
-            dtc = record.get("days_to_cover")
-            dtc_str = f"{dtc:.2f}" if dtc is not None else "N/A"
-            print(f"  ✅ {ticker:<8} {dtc_str} days to cover [{i}/{len(tickers)}]")
+
+            logger.info(
+                "short_interest_collected completed=%d planned=%d", i, len(tickers)
+            )
         else:
             # Not an error — many tickers just have no short interest record
             pass
@@ -466,9 +482,12 @@ def run() -> Dict[str, Any]:
     print_summary(records)
     save_to_json(records, errors)
 
-    logger.info(f"Short interest complete. {len(records)} records, {len(errors)} errors.")
+    logger.info(
+        "Short interest complete. %s records, %s errors.", len(records), len(errors)
+    )
     return {"records": records, "errors": errors}
 
 
 if __name__ == "__main__":
+    configure_logging()
     run()
