@@ -162,6 +162,76 @@ def test_retention_and_drill_cannot_reach_outside_the_store(engine, loaded, keyp
     assert sorted(p.name for p in (tmp_path / "bad-drill").iterdir()) == ["report.json"]
 
 
+# ── SEC-BACKUP-03: a name that fits BACKUP_NAME but is not a real time is ignored ──
+
+def _write_undated(store, kind, stamp="20261301T000000Z"):
+    """A store entry whose name matches BACKUP_NAME but whose timestamp does not exist."""
+    name = f"perennial-{stamp}-ffffff"
+    if kind == "archive":
+        (store.root / f"{name}.dump.cms").write_bytes(b"synthetic")
+        return f"{name}.dump.cms"
+    # Well formed apart from the date, so only the name can make it invalid.
+    manifest = {"format": 1, "name": name, "archive": f"{name}.dump.cms",
+                "snapshot_time": "2026-10-01T00:00:00+00:00", "archive_sha256": HEX,
+                "tables": {"ark_holdings": {"rows": 1, "sha256": HEX}}}
+    (store.root / f"{name}.manifest.json").write_text(json.dumps(manifest))
+    return f"{name}.manifest.json"
+
+
+@pytest.mark.parametrize("kind", ["manifest", "archive"])
+@pytest.mark.parametrize("stamp", [
+    "20261301T000000Z",  # month 13
+    "20260230T000000Z",  # 30 February
+    "20261022T250000Z",  # hour 25
+])
+def test_undated_backup_names_are_listed_or_ignored_not_raised(tmp_path, kind, stamp):
+    from backup import LocalStore, manifests, orphan_archives
+    store = LocalStore(tmp_path / "store")
+    valid = _write_set(store, NOW - timedelta(days=2))
+    bad = _write_undated(store, kind, stamp)
+    invalid = []
+    found = manifests(store, invalid)
+    assert [m["name"] for m in found] == [valid]
+    assert invalid == ([bad] if kind == "manifest" else [])
+    assert orphan_archives(store, found, NOW) == []
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("kind", ["manifest", "archive"])
+def test_undated_backup_name_does_not_stop_retention_or_orphan_sweep(
+        engine, loaded, keypair, tmp_path, kind):
+    from backup import LocalStore, run_backup
+    store = LocalStore(tmp_path / "store")
+    now = datetime.now(timezone.utc)
+    stale = _write_set(store, now - timedelta(days=9), "aaaaaa")
+    orphan = _name(now - timedelta(hours=2), "dddddd") + ".dump.cms"
+    (store.root / orphan).write_bytes(b"synthetic")
+    bad = _write_undated(store, kind)
+
+    report = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
+    assert report["status"] == "ok", report
+    assert report["deleted"] == [stale] and report["orphans_swept"] == [orphan]
+    assert report["invalid_manifests"] == ([bad] if kind == "manifest" else [])
+    assert sorted(store.names()) == sorted([  # the bad entry is left for a human
+        bad, report["name"] + ".dump.cms", report["name"] + ".manifest.json"])
+
+
+@pytest.mark.db
+def test_undated_manifest_does_not_block_the_archive_drill(engine, loaded, keypair, tmp_path):
+    from backup import LocalStore, run_backup
+    from restore_drill import run_backup_drill
+    store = LocalStore(tmp_path / "store")
+    backup = run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)
+    assert backup["status"] == "ok", backup
+    bad = _write_undated(store, "manifest")
+
+    drill = run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "drill")
+    assert drill["verified"] is True and drill["backup"] == backup["name"]
+    _no_plaintext(tmp_path / "drill")
+    assert _target_gone(engine, tmp_path / "drill")
+    assert (store.root / bad).exists()
+
+
 # ── BK-2: orphan archives are swept; nothing else is ──
 
 @pytest.mark.db
