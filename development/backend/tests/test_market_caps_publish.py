@@ -781,3 +781,110 @@ def test_legacy_rows_are_untouched_and_nothing_is_backfilled(engine, fixture_pat
         )
     assert after == before
     assert len(cap_runs(engine)) == 1  # only the new path's own collection
+
+
+# ── Edge cases found after the build (f974858) ───────────
+
+
+def publication_count(engine):
+    with engine.connect() as conn:
+        return conn.execute(text("SELECT count(*) FROM perennial.publications")).scalar()
+
+
+def test_selection_and_health_follow_the_same_max_reuse_age_setting(engine, fixture_path):
+    """One limit: rows past market_cap_max_reuse_age are both ineligible and stale."""
+    from src.pipeline.health import health
+    from src.pipeline.publication import PublicationError
+
+    one_day = settings_with(None).model_copy(update={"market_cap_max_reuse_age": timedelta(days=1)})
+    feed = Feed(fixture_path)
+    first = new_run(engine, feed, CapAdapter(), settings=one_day)
+    (run,) = cap_runs(engine)
+    age_run(engine, run.id, timedelta(days=2))
+    with engine.begin() as conn:
+        then = datetime.now(timezone.utc) - timedelta(days=2)
+        conn.execute(update(models.ingestion_runs).where(models.ingestion_runs.c.id == run.id)
+                     .values(started_at=then, finished_at=then))
+    configured = one_day.model_copy(update={"market_cap_adapter": "fixture"})
+    assert "market_caps:stale" in health(engine, settings=configured)["advisories"]
+    with pytest.raises(PublicationError):  # every earlier row is past the limit
+        new_run(engine, feed, failing(), settings=one_day)
+    with engine.connect() as conn:
+        assert conn.execute(text(
+            "SELECT publication_id FROM perennial.current_publication")).scalar() == first
+
+
+def test_a_valued_non_usd_row_refuses_and_writes_nothing(engine, fixture_path):
+    from src.pipeline.publication import PublicationError
+
+    runs = import_all(engine, Feed(fixture_path))
+    run = cap_run(engine, every("20000000000.00"))
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE perennial.market_caps SET currency = 'EUR'"
+                          " WHERE batch_id = :b AND value IS NOT NULL"
+                          " AND security_id = (SELECT id FROM perennial.securities"
+                          " WHERE symbol = 'ZZAA')"), {"b": run.batch_id})
+    before = publication_count(engine)
+    with pytest.raises(PublicationError):
+        publish_pinned(engine, runs)
+    assert publication_count(engine) == before
+
+
+def test_an_adapter_and_a_legacy_collector_together_are_refused_before_collecting(
+    engine, fixture_path
+):
+    from src.pipeline.runner import run_pipeline
+
+    feed = Feed(fixture_path)
+    with pytest.raises(ValueError):
+        run_pipeline(engine, collectors=feed.collectors(), market_cap_adapter=CapAdapter(),
+                     market_cap_collector=market_caps)
+    assert feed.calls == []
+    with engine.connect() as conn:
+        assert conn.execute(select(models.ingestion_runs.c.id)).first() is None
+
+
+def test_a_live_adapter_is_refused_in_a_demo_run_before_collecting(demo_engine):  # noqa: F811
+    from src.pipeline.demo import DemoReplay, replaying
+    from src.pipeline.runner import run_pipeline
+
+    adapter = CapAdapter()
+    with replaying(DemoReplay()), pytest.raises(ValueError):
+        run_pipeline(demo_engine, demo=True, market_cap_adapter=adapter)
+    assert adapter.calls == []
+    with demo_engine.connect() as conn:
+        assert conn.execute(select(models.ingestion_runs.c.id)).first() is None
+
+
+def test_replay_never_mixes_in_legacy_observations_for_an_unavailable_candidate(
+    engine, fixture_path
+):
+    """Replay chooses the pin table per publication, not per security."""
+    feed = Feed(fixture_path)
+    legacy_run(engine, feed)  # legacy observations exist for every candidate
+    pub = new_run(engine, feed, CapAdapter(overrides={"ZZAA": None}))
+    assert records(output(engine, pub))["ZZAA"]["market_cap"] is None
+    assert_replays(engine, pub)
+
+
+def test_pinned_publish_refuses_observations(engine, fixture_path):
+    from src.pipeline.publication import publish
+
+    runs = import_all(engine, Feed(fixture_path))
+    cap_run(engine, every("20000000000.00"))
+    before = publication_count(engine)
+    with pytest.raises(Exception):
+        publish(engine, runs, market_caps(CANDIDATES), market_caps="pinned",
+                quality_thresholds=THRESHOLDS)
+    assert publication_count(engine) == before
+
+
+def test_rollback_to_a_legacy_publication_after_new_path_ones(engine, fixture_path):
+    from src.pipeline.publication import current, rollback
+
+    feed = Feed(fixture_path)
+    legacy = legacy_run(engine, feed)
+    new_run(engine, feed, CapAdapter())
+    rollback(engine, legacy, actor="synthetic-operator", reason="synthetic rollback check")
+    assert current(engine)["id"] == legacy
+    assert_replays(engine, legacy)
