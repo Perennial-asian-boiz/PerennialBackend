@@ -13,6 +13,9 @@ dependencies = [
     "alembic==1.20.0",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
+    # M5 read API; the same pins as #22 so its rebase is a lock recompile.
+    "fastapi==0.143.1",
+    "uvicorn==0.34.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +26,8 @@ dev = [
     "types-requests==2.33.0.20261006",
     "pip-audit==2.10.1",
     "pip-tools==7.6.2",
+    # starlette 1.9's TestClient imports httpx2 (httpx is deprecated there).
+    "httpx2==2.13.1",
 ]
 
 [tool.ruff]
