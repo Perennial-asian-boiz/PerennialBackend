@@ -62,6 +62,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
+from src.ingestion.adapters import (
+    ArkAdapter,
+    Collector,
+    FmpAdapter,
+    InsiderAdapter,
+    ShortInterestAdapter,
+)
 from src.ingestion.files import read_json_bounded
 from src.ingestion.importer import CollectionOutcome
 from src.services.consensus_watchlist.paths import PACKAGE_DIR
@@ -397,8 +404,10 @@ def _upstream_row_ok(key: str, row: Any) -> bool:
     )
 
 
-def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]:
-    """Same selection as insider.load_congress_tickers / load_ark_tickers / run()."""
+def _insider_plan(
+    insider: InsiderAdapter, upstream: UpstreamRows
+) -> List[Tuple[str, str]]:
+    """Same selection as insider.legacy_load_congress_tickers / legacy_load_ark_tickers / legacy_run()."""
     purchases = [
         t["ticker"]
         for t in upstream["trades"]
@@ -417,8 +426,8 @@ def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]
     ]
 
 
-def _short_interest_plan(si: Any, upstream: UpstreamRows) -> List[str]:
-    """Same universe as short_interest.get_candidate_tickers()."""
+def _short_interest_plan(si: ShortInterestAdapter, upstream: UpstreamRows) -> List[str]:
+    """Same universe as short_interest.legacy_get_candidate_tickers()."""
     tickers = {
         si.normalize_ticker(r["ticker"])
         for r in upstream["trades"] + upstream["holdings"]
@@ -457,7 +466,7 @@ def collect_ark(
     session: Optional[requests.Session] = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> CollectionOutcome:
-    ark = _fetcher("ark")
+    ark: ArkAdapter = _fetcher("ark")
     session = session or requests.Session()
     tracker = _Tracker("ARK funds", planned=len(ark.ARK_FUNDS))
     all_raw: Dict[str, List[Dict[str, Any]]] = {}
@@ -535,7 +544,8 @@ def collect_congress(
     *,
     settings: Optional[Settings] = None,
 ) -> CollectionOutcome:
-    fmp = _fetcher("fmp")
+    fmp: FmpAdapter = _fetcher("fmp")
+    key: Optional[str]
     if api_key is not None:
         key = api_key
     elif settings is not None and settings.fmp_api_key is not None:
@@ -662,7 +672,7 @@ def collect_insider(
     settings: Optional[Settings] = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; None retains the legacy file fallback."""
-    insider = _fetcher("insider")
+    insider: InsiderAdapter = _fetcher("insider")
     upstream, failure = _resolve_upstream(
         "insider_trades", insider.LOCAL_DATA_DIR, upstream
     )
@@ -781,7 +791,7 @@ def collect_short_interest(
     upstream: Any = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; supplied data never reads files."""
-    si = _fetcher("short_interest")
+    si: ShortInterestAdapter = _fetcher("short_interest")
     upstream, failure = _resolve_upstream("short_interest", si.LOCAL_DATA_DIR, upstream)
     if failure:
         return failure
@@ -843,7 +853,7 @@ def collect_short_interest(
     )
 
 
-COLLECTORS: Dict[str, Callable[..., CollectionOutcome]] = {
+COLLECTORS: Dict[str, Collector] = {
     "congress_trades": collect_congress,
     "ark_holdings": collect_ark,
     "insider_trades": collect_insider,
