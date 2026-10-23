@@ -140,6 +140,12 @@ class PriorPublication:
     pins: dict[str, PinnedRun]
 
 
+class RollbackError(PublicationError):
+    """A rollback target is missing, already current, or not reproducible."""
+
+    code = "rollback_rejected"
+
+
 class PublicationInProgressError(PublicationError):
     """Another publisher holds the pointer lock; fail fast instead of queueing."""
 
@@ -738,6 +744,68 @@ def publish(
             )
         )
         return cast(int, pub_id)
+
+
+def rollback(engine: Engine, to_publication_id: int, *, actor: str, reason: str) -> int:
+    """Point production back at an earlier publication (roadmap M3).
+
+    This is the only way to serve older observations: publish() keeps refusing
+    any observation date older than the current publication's. The target must
+    replay byte-identically, the actor and reason pass the override text policy,
+    and a `rollback` event on the target records who moved the pointer from where.
+    """
+    actor, reason = actor.strip(), reason.strip()
+    _check_override_text(actor, reason)
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        if not conn.execute(
+            text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": PUBLICATION_LOCK}
+        ).scalar_one():
+            raise PublicationInProgressError()
+        prior = conn.execute(
+            select(m.current_publication.c.publication_id).where(
+                m.current_publication.c.channel == "production"
+            )
+        ).scalar_one_or_none()
+        target = (
+            conn.execute(
+                select(m.publications.c.output).where(
+                    m.publications.c.id == to_publication_id
+                )
+            )
+            .tuples()
+            .one_or_none()
+        )
+        if target is None:
+            raise RollbackError("rollback target does not exist")
+        if prior == to_publication_id:
+            raise RollbackError("rollback target is already the current publication")
+        if replay(engine, to_publication_id) != target[0]:
+            raise RollbackError("rollback target does not replay identically")
+        conn.execute(
+            pg_insert(m.current_publication)
+            .values(
+                channel="production", publication_id=to_publication_id, promoted_at=now
+            )
+            .on_conflict_do_update(
+                index_elements=["channel"],
+                set_={"publication_id": to_publication_id, "promoted_at": now},
+            )
+        )
+        conn.execute(
+            insert(m.publication_events).values(
+                publication_id=to_publication_id,
+                kind="rollback",
+                actor=actor,
+                reason=reason,
+                checks={
+                    "from_publication_id": prior,
+                    "to_publication_id": to_publication_id,
+                },
+                created_at=now,
+            )
+        )
+    return prior if prior is not None else to_publication_id
 
 
 def current(engine: Engine) -> dict[str, Any] | None:
