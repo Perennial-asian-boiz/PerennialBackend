@@ -116,6 +116,18 @@ def _provider_record_id(item):
     return None
 
 
+def _text(item: dict, key: str) -> str:
+    """An optional FMP string: absent or null both become "" (stripped otherwise).
+
+    FMP marks missing values with "" or null; the collector accepts both. ""
+    keeps the legacy JSON string-typed, and the importer normalizes "" and None
+    to the same missing value, so the stored record and its hash do not depend
+    on which form FMP sent. A required field left "" fails record validation.
+    """
+    value = item.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
 def parse_trades(raw_data: list, *, preserve_provenance: bool = True):
     """
     Cleans raw FMP response into structured dicts.
@@ -140,22 +152,22 @@ def parse_trades(raw_data: list, *, preserve_provenance: bool = True):
         except ValueError:
             pass
 
-        first = item.get("firstName", "").strip()
-        last = item.get("lastName", "").strip()
+        first = _text(item, "firstName")
+        last = _text(item, "lastName")
 
         trades.append({
             "politician_name": f"{first} {last}".strip(),
             "chamber": item.get("_chamber", ""),
             "ticker": ticker,
-            "asset_description": item.get("assetDescription", "").strip(),
-            "asset_type": item.get("assetType", "").strip(),
-            "trade_type": item.get("type", "").strip(),
-            "amount_range": item.get("amount", "").strip(),
+            "asset_description": _text(item, "assetDescription"),
+            "asset_type": _text(item, "assetType"),
+            "trade_type": _text(item, "type"),
+            "amount_range": _text(item, "amount"),
             "transaction_date": trade_date_str,
             "disclosure_date": disclosure_date_str,
             "days_to_disclose": days_to_disclose,
-            "district": item.get("district", "").strip(),
-            "source_link": item.get("link", "").strip(),
+            "district": _text(item, "district"),
+            "source_link": _text(item, "link"),
             "fetched_at": datetime.now(timezone.utc).isoformat(),
         })
         if preserve_provenance:
