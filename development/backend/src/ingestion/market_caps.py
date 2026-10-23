@@ -26,7 +26,8 @@ Policy, as in src/ingestion/collectors.py:
     not issuer-level.
   * Values follow publication._caps: finite, above 0 and below 1e22, rounded
     half-even to cents. Only USD. observed_at must be timezone-aware and not
-    in the future. An invalid sector or industry label becomes NULL.
+    in the future. An invalid sector or industry label becomes NULL,
+    including one with a control or format character.
   * A fixture adapter can only record a fixture run (MCA-3g); an adapter of
     any other non-live mode is refused too. collect_source relabels the
     outcome's mode from its record_mode, so this layer refuses the adapter
@@ -34,6 +35,7 @@ Policy, as in src/ingestion/collectors.py:
 """
 
 import time
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -251,11 +253,19 @@ def _observed_at(raw: Any, now: datetime) -> datetime | None:
 
 
 def _label(raw: Any, max_length: int) -> str | None:
-    """As runner._classification: optional labels; bad ones become null."""
+    """As runner._classification: optional labels; bad ones become null.
+
+    A label with a control, format or other Unicode "C" character is bad too:
+    NUL cannot be stored, and the others would be stored verbatim.
+    """
     if not isinstance(raw, str):
         return None
     label = raw.strip()
-    return label if 0 < len(label) <= max_length else None
+    if not 0 < len(label) <= max_length:
+        return None
+    if any(unicodedata.category(char).startswith("C") for char in label):
+        return None
+    return label
 
 
 def _record(symbol: str, quote: Any, provider: str, now: datetime) -> dict[str, Any]:
