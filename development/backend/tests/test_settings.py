@@ -23,7 +23,8 @@ def test_settings_hide_secrets_and_supply_source_quality_defaults(monkeypatch):
     assert "synthetic-provider-secret" not in repr(settings)
     assert settings.fmp_max_pages == 50
     assert settings.quality_thresholds["short_interest"].allow_equal_as_of
-    assert not settings.quality_thresholds["congress_trades"].allow_equal_as_of
+    assert settings.quality_thresholds["congress_trades"].allow_equal_as_of
+    assert settings.quality_thresholds["insider_trades"].allow_equal_as_of
 
 
 def test_missing_database_setting_names_field_without_value(monkeypatch):
@@ -173,3 +174,20 @@ def test_source_policy_overrides_merge_and_are_validated(monkeypatch):
         with pytest.raises(SettingsError) as caught:
             load_settings(local_dev=False)
         assert "SOURCE_POLICIES" in str(caught.value)
+
+
+def test_trading_holidays_cover_this_year_and_next():
+    """Fails once the NYSE list stops covering next year: extend it (M2 N3)."""
+    from datetime import date
+
+    from src.settings import TRADING_HOLIDAYS
+
+    covered = {d.year for d in TRADING_HOLIDAYS}
+    this_year = date.today().year
+    assert {this_year, this_year + 1} <= covered, (
+        "extend settings.TRADING_HOLIDAYS with the NYSE closures for "
+        f"{sorted({this_year, this_year + 1} - covered)}"
+    )
+    # A covered year is complete enough to include its January closures (MLK Day at least).
+    for year in covered:
+        assert any(d.year == year and d.month == 1 for d in TRADING_HOLIDAYS)

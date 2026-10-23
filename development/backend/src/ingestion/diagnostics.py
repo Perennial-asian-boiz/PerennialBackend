@@ -46,6 +46,7 @@ ERROR_SUMMARIES = {
     "collection_failed": "collection did not complete",
     "partial_collection": "collection was incomplete; some units failed",
     "missing_credential": "a required provider credential is not configured",
+    "empty_short_interest": "no short-interest records returned for the selected universe",
     "no_input_tickers": "no candidate tickers available (upstream fetcher files missing or empty)",
     "parse_error": "fetcher output could not be parsed",
     "file_unreadable": "input file does not exist or cannot be read",
