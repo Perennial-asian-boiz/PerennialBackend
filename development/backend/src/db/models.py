@@ -51,6 +51,8 @@ SOURCES = WATCHLIST_SOURCES + SUBJECTLESS_SOURCES
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live")
 PUBLICATION_EVENT_KINDS = ("quality_passed", "quality_override", "degraded", "rollback")
+SECURITY_TYPES = ("common", "adr", "etf")
+IDENTIFIER_SCHEMES = ("ticker", "figi", "cusip", "cik")
 
 ERROR_SUMMARY_MAX = 1000
 DIAGNOSTICS_MAX_BYTES = 16384
@@ -75,6 +77,36 @@ def _id() -> Column[Any]:
     return Column("id", BigInteger, Identity(always=True), primary_key=True)
 
 
+# One row per issuer (M4). Share classes such as GOOG and GOOGL stay distinct
+# securities that point at one profile. sector/industry are expanded here from
+# market_cap_observations; GDELT reads switch over in a later change.
+company_profiles = Table(
+    "company_profiles",
+    metadata,
+    _id(),
+    Column("legal_name", Text),
+    Column("sector", String(64)),
+    Column("industry", String(128)),
+    Column("alias_names", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    # Issuer-level: one CIK can cover several share classes.
+    Column("cik", String(10)),
+    # The share class whose provider listing carries the issuer's insider filings.
+    Column(
+        "insider_reporting_security_id",
+        BigInteger,
+        ForeignKey(
+            f"{SCHEMA}.securities.id",
+            use_alter=True,
+            name="fk_company_profiles_insider_reporting_security_id_securities",
+        ),
+    ),
+    UniqueConstraint("cik"),
+    CheckConstraint("cik IS NULL OR cik ~ '^[0-9]{10}$'", name="cik_format"),
+    CheckConstraint(
+        "legal_name IS NULL OR btrim(legal_name) <> ''", name="legal_name_not_blank"
+    ),
+)
+
 securities = Table(
     "securities",
     metadata,
@@ -88,7 +120,22 @@ securities = Table(
         nullable=False,
         server_default=text("now()"),
     ),
+    Column("name", Text),
+    Column("security_type", String(16)),
+    Column("country", String(2)),
+    Column("figi", String(12)),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column(
+        "company_profile_id", BigInteger, ForeignKey(f"{SCHEMA}.company_profiles.id")
+    ),
     UniqueConstraint("symbol"),
+    UniqueConstraint("figi"),
+    CheckConstraint(
+        f"security_type IS NULL OR {_in('security_type', SECURITY_TYPES)}",
+        name="security_type",
+    ),
+    CheckConstraint("country IS NULL OR country ~ '^[A-Z]{2}$'", name="country_format"),
+    CheckConstraint("figi IS NULL OR figi ~ '^[A-Z0-9]{12}$'", name="figi_format"),
     CheckConstraint(
         "symbol = upper(symbol) AND symbol ~ '^[A-Z0-9][A-Z0-9./-]*$'",
         name="symbol_format",
@@ -100,6 +147,32 @@ securities = Table(
         "currency IS NULL OR currency ~ '^[A-Z]{3}$'", name="currency_format"
     ),
 )
+
+Index("ix_securities_company_profile_id", securities.c.company_profile_id)
+
+# Lookup-only aliases (M4). Provider spellings are encoded in value with a fixed
+# provider prefix ("FINNHUB:BRK-B"); a bare value is the canonical ticker.
+security_identifiers = Table(
+    "security_identifiers",
+    metadata,
+    Column("scheme", String(16), primary_key=True),
+    Column("value", String(64), primary_key=True),
+    Column(
+        "security_id", BigInteger, ForeignKey(f"{SCHEMA}.securities.id"), nullable=False
+    ),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint(_in("scheme", IDENTIFIER_SCHEMES), name="scheme"),
+    CheckConstraint(
+        "value = btrim(value) AND value <> '' AND value = upper(value)",
+        name="value_format",
+    ),
+)
+Index("ix_security_identifiers_security_id", security_identifiers.c.security_id)
 
 source_batches = Table(
     "source_batches",

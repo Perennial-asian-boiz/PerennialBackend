@@ -61,6 +61,7 @@ ERROR_SUMMARIES = {
     "validation_failed": "one or more records failed validation",
     "validation_error": "input could not be validated",
     "security_conflict": "a ticker conflicts with an existing or in-batch security mapping",
+    "unresolved_security": "a ticker does not resolve to exactly one active security",
     "missing_upstream": "upstream rows or fetcher files are missing or malformed",
     "plan_too_large": "too many tickers planned; collection refused rather than truncated",
     "database_error": "database write failed",
@@ -77,6 +78,7 @@ UNIT_KINDS = frozenset(
     }
 )
 _COUNT_KEYS = (
+    "securities_registered",
     "senate_pages_fetched",
     "house_pages_fetched",
     "input_count",
@@ -103,6 +105,9 @@ FAILURE_CODES = frozenset(
         "malformed_response",
         "exchange_conflict",
         "currency_conflict",
+        "unresolved",
+        "inactive_security",
+        "alias_collision",
         "parse_error",
         "missing_file",
         "unreadable_file",
