@@ -952,3 +952,120 @@ def test_api_document_describes_the_v1_schemas():
         "invalid_request",
     ):
         assert re.search(re.escape(name), content), name
+
+
+# ── Edge cases found after the build (04d5793) ───────────
+
+
+@pytest.mark.db
+def test_unknown_routes_and_methods_keep_the_error_shape(api):
+    for response in (api.get("/v1/nothing-here"), api.post("/v1/watchlist"),
+                     api.delete("/v1/securities/ZZAA")):
+        assert response.status_code in (404, 405)
+        body = response.json()
+        assert set(body) == {"detail", "code"} and isinstance(body["code"], str)
+
+
+@pytest.mark.db
+def test_hostile_symbols_are_422_not_500_and_never_echoed(engine, api):
+    for bad in ("%00", "ZZ%00AA", "A" * 1000, "%E2%80%8BZZAA", "ZZ%0AAA"):
+        assert_error(api.get(f"/v1/securities/{bad}"), 422, "invalid_request", "A" * 1000)
+    response = api.get("/v1/securities/ZZNOSUCH")
+    assert_error(response, 404, "unknown_security", "ZZNOSUCH")
+
+
+@pytest.mark.db
+def test_security_lookup_without_a_current_publication(engine, api):
+    seed_security(engine, "ZZSOLO")
+    body = api.get("/v1/securities/ZZSOLO").json()
+    assert body["current"] == {"publication": None, "entry": None}
+
+
+@pytest.mark.db
+def test_provider_prefixed_aliases_never_match_a_plain_symbol(engine, api):
+    sid = seed_security(engine, "ZZCANON")
+    with engine.begin() as conn:
+        conn.execute(insert(models.security_identifiers).values(
+            scheme="ticker", value="FINNHUB:ZZPROV", security_id=sid))
+    assert_error(api.get("/v1/securities/ZZPROV"), 404, "unknown_security")
+
+
+@pytest.mark.db
+def test_a_degraded_event_without_reused_sources(engine, fixture_path, api):
+    """Degraded by Congress gaps alone: degraded, no stale sources, the gap count."""
+    pub = publish_run(engine, feed(fixture_path))
+    with engine.begin() as conn:
+        conn.execute(insert(models.publication_events).values(
+            publication_id=pub, kind="degraded", created_at=datetime.now().astimezone(),
+            checks={"reused": {}, "cohort": [], "all_sources_reused": False,
+                    "congress_gaps": {"count": 2}}))
+    meta = api.get("/v1/watchlist").json()["publication"]
+    assert meta["degraded"] is True and meta["stale_sources"] == []
+    assert meta["congress_history_gaps"] == 2
+
+
+@pytest.mark.db
+def test_an_overridden_publication_serves_its_envelope_and_demo_marker(
+    engine, fixture_path, api
+):
+    pub = publish_run(engine, feed(fixture_path))
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE perennial.publication_events SET kind = 'quality_override',"
+            " actor = 'synthetic-operator', reason = 'synthetic override',"
+            " checks = checks || '{\"demo\": true}' WHERE publication_id = :p"
+            " AND kind = 'quality_passed'"), {"p": pub})
+    response = api.get("/v1/watchlist")
+    assert response.status_code == 200
+    assert response.json()["publication"]["demo"] is True
+    for operator_text in ("synthetic-operator", "synthetic override"):
+        assert operator_text not in response.text
+
+
+@pytest.mark.db
+def test_conditional_requests_follow_http_matching(engine, fixture_path, api):
+    """RFC 9110: a list of tags matches if any does; If-None-Match compares weakly."""
+    pub = publish_run(engine, feed(fixture_path))
+    tag = f'"v1-{pub}"'
+    for header in (f'"v1-0", {tag}', f"W/{tag}"):
+        response = api.get("/v1/watchlist", headers={"If-None-Match": header})
+        assert response.status_code == 304 and response.content == b"", header
+        assert response.headers["etag"] == tag
+
+
+REFUSING_MORE = {
+    "createrole": dict(options="CREATEROLE"),
+    "createdb": dict(options="CREATEDB"),
+    "replication": dict(options="REPLICATION"),
+    "indirect_member": dict(via_intermediate=True),
+    "create_on_database": dict(grant="GRANT CREATE ON DATABASE \"{db}\" TO \"{name}\""),
+    "create_on_schema": dict(grant="GRANT CREATE ON SCHEMA perennial TO \"{name}\""),
+}
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("case", sorted(REFUSING_MORE))
+def test_more_unsafe_logins_are_refused_the_same_way(engine, groups, caplog, case):
+    """The remaining attribute, membership and CREATE clauses of RA-15."""
+    spec = REFUSING_MORE[case]
+    intermediate = f"ra_mid_{secrets.token_hex(4)}"
+    members = ("api",)
+    if spec.get("via_intermediate"):
+        with engine.begin() as conn:
+            conn.execute(text(f'CREATE ROLE "{intermediate}" NOLOGIN IN ROLE "{groups["api"]}"'))
+        groups = {**groups, "mid": intermediate}
+        members = ("mid",)
+    try:
+        with login(engine, groups, options=spec.get("options", ""), members=members) as (
+            api_engine, name, password
+        ):
+            if "grant" in spec:
+                with engine.begin() as conn:
+                    conn.execute(text(spec["grant"].format(db=engine.url.database, name=name)))
+            outcome = _refusal(engine, groups, caplog, api_engine,
+                               (name, password, engine.url.database, intermediate))
+            with login(engine, groups, options="SUPERUSER") as (super_engine, n2, p2):
+                reference = _refusal(engine, groups, caplog, super_engine, (n2, p2))
+            assert outcome == reference  # the same fixed error as every other clause
+    finally:
+        _drop_roles(engine, [intermediate])
