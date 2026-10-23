@@ -41,23 +41,29 @@ A new setting, `market_cap_adapter`, defaults to `None`. With `None`, `run_pipel
 - it writes `market_cap_observations` and `publication_market_caps`
 - it records no `market_caps` run
 
-The new path runs only when an adapter is configured. For now that means the fixture adapter in tests and demo mode, or a test's own stub adapter.
+The new path runs only when an adapter is configured. For now that means the fixture adapter in demo mode, or a live-mode stub adapter defined inside a test.
 
 Why not switch production to the new path now:
 - **With no adapter, every candidate is unavailable.** Today's guard then refuses every publication (`publication.py:485-486`), so production would stop publishing. Relaxing the guard would instead publish every candidate as `unresolved`, which is also worse than today.
 - **Wrapping today's FMP profile call as an adapter** is building on FMP, which decision 1 rules out.
 - **The cost is a temporary dual path** in `runner.py` and `publication.py`. The change that registers the first real adapter should also remove the legacy branch from the runner. The legacy tables then only serve replay until the contract step.
 
-**Not worse than today also means today's exposure stays.** This needs Bryan's attention, though it doesn't block this packet:
-- The legacy path makes one FMP `/stable/profile` call per candidate, inside the free plan's 250 calls a day, which Congress also uses. The design note found the candidates are likely several hundred (finding 1).
-- Since #42 merged, Congress candidates come from up to 2 years of stored history, so the candidate count grows as that history accumulates.
-- Once the quota runs out, `collect_market_caps` raises. Stored values cover the gap for 3 days, and after that every publication is refused.
-- This packet doesn't change that. Settling decision 1, then writing the chosen provider's adapter, does.
+### Dated risk R-MC1 (recorded 2026-10-23): the legacy path's FMP quota, tied to decision 1
+
+"Not worse than today" also means today's exposure stays, and it grows from now on:
+- **Calls per run.** The legacy path makes one FMP `/stable/profile` call per candidate, inside the free plan's 250 calls a day. Congress uses the same quota, two page-0 calls per run since #42 (one per chamber). So one daily run completes only while there are about 248 candidates or fewer. The design note estimated several hundred candidates (finding 1), so the limit may already be passed.
+- **Growth starts 2026-10-23.** #42 merged at 20:50Z that day. From then on, Congress candidates are every purchase ticker in up to 2 years of stored history, so the count grows with every run until the window fills.
+- **What happens when the quota runs out.** `collect_market_caps` raises, and stored values cover 3 days (`runner.py:450-494`). After that every candidate is unavailable, and `_caps` refuses every publication (`publication.py:485-486`). Publishing stops.
+- **How to see it coming.** Each legacy publication writes one `publication_market_caps` row per candidate, so that row count is the number of FMP profile calls the run made. Bryan can add it to the count-only query he runs after each M1 staging run.
+- **What fixes it.** Settling decision 1, then writing the chosen provider's adapter for the new path. This packet doesn't change the exposure, either way. Decision 1 is therefore time-sensitive. The coordinator has raised this with Bryan.
 
 ## What counts as done without a provider
 
-1. **New path with the fixture adapter:**
-   - In tests and in demo mode, a pipeline run records a `market_caps` run and batch with lineage, publishes with pins in `publication_market_cap_rows`, writes nothing to the legacy tables for that publication, and replays byte-identically.
+1. **The new path runs end to end**, in two settings:
+   - **Demo mode** uses the fixture adapter. Runs and rows are fixture-mode, and the result is a demo publication.
+   - **Non-demo tests** run the live path with a live-mode stub adapter defined inside the test (the MCB-12 pattern). The fixture adapter is refused outside demo (MCA-3g, MCB-2e).
+
+   Either way, the run records a `market_caps` run and batch with lineage, publishes with pins in `publication_market_cap_rows`, writes nothing to the legacy tables for that publication, and replays byte-identically.
 2. **Failures and age limits:**
    - A failed market-cap collection leaves a failed run. The publication uses earlier rows up to 3 days old, with degraded counts, and treats older rows as unavailable.
 3. **Production default unchanged:**
@@ -67,7 +73,7 @@ Why not switch production to the new path now:
    - A stub adapter defined only inside a test runs the whole path with no other code change.
    - A reusable adapter conformance test, which the fixture adapter passes, is what any future adapter must also pass.
 
-## Bryan's product calls (open questions 3, 4 and 5 of the design note)
+## Bryan's product calls (open questions 3, 4 and 5 of the design note; decisions 11–13 in the register)
 
 The test maker can write everything else now. Only the tests named here wait on Bryan's answers.
 
@@ -104,6 +110,7 @@ Merge MC-A and MC-B together, or MC-A first. MC-A alone changes no behaviour, be
 - `src/ingestion/schemas.py`, `src/ingestion/importer.py` and `src/ingestion/identity.py` (the `market_caps` entries)
 - new `src/ingestion/market_caps.py`
 - `src/settings.py` (the new field only)
+- `src/ingestion/diagnostics.py` (the one new run code, `fixture_adapter_not_allowed`)
 - `development/database/ops/provision_roles.py`
 
 **You don't touch:** `runner.py`, `publication.py`, `demo.py`, `health.py`, the legacy FMP code or the test maker's tests.
@@ -131,10 +138,14 @@ Merge MC-A and MC-B together, or MC-A first. MC-A alone changes no behaviour, be
 - **Adapter interface, in `src/ingestion/market_caps.py`:**
   - `MarketCapQuote`: a frozen dataclass with `value: Decimal | None`, `currency: str`, `issuer_level: bool`, `observed_at: datetime | None`, `sector: str | None` and `industry: str | None`.
   - `MarketCapAdapter`: a Protocol with `name: str` (the provider id stored in each row, `^[a-z0-9_]{1,32}$`), `collection_mode: Literal["live", "fixture"]`, and `fetch(symbols: Sequence[str], *, session: requests.Session | None = None, sleep: Callable[[float], None] = time.sleep) -> Mapping[str, MarketCapQuote | None]`.
-  - `MarketCapAdapterError(code)`: what an adapter raises on any failure, with a fixed code (`collection_failed`, `rate_limited`, `auth_failed`, `malformed_response`, `deadline_exceeded` or `missing_credential`). Messages are never stored.
+  - `MarketCapAdapterError(code)`: what an adapter raises on any failure. Messages are never stored. The code is one of:
+    - `missing_credential`, which is also a run error code
+    - a unit failure code from `FAILURE_CODES` or `http_NNN` (`diagnostics.py:103-123`), for example `timeout`, `http_429` or `malformed_response`
+
+    Run error codes must come from `ERROR_SUMMARIES` (`diagnostics.py:37-70`), because `safe_code` turns any other code into `collection_failed` (`diagnostics.py:184-185`).
   - `ADAPTERS: dict[str, Callable[[Settings], MarketCapAdapter]] = {"fixture": ...}`. This registry is the only place a provider is named.
   - `FixtureMarketCapAdapter`: `name = "fixture"`, `collection_mode = "fixture"`. It reads a synthetic JSON fixture (the test maker owns it under `tests/fixtures/providers/`), returns `None` for symbols the fixture doesn't list, and can be set to raise a given code, for fault injection.
-  - `collect(adapter, *, upstream, session=None, sleep=time.sleep) -> CollectionOutcome` for source `market_caps`. `upstream` is the `{trades, holdings}` row shape the downstream collectors already take (`collectors.py:351-392`).
+  - `collect(adapter, *, upstream, record_mode="live", session=None, sleep=time.sleep) -> CollectionOutcome` for source `market_caps`. `upstream` is the `{trades, holdings}` row shape the downstream collectors already take (`collectors.py:351-392`). `record_mode` is the mode `collect_source` will record the run in, and it guards the fixture adapter (MCA-3g).
 - **Setting:** `market_cap_adapter: str | None = None`. A name not in `ADAPTERS` fails at startup with `SettingsError`.
 
 ### Acceptance criteria
@@ -167,14 +178,15 @@ Merge MC-A and MC-B together, or MC-A first. MC-A alone changes no behaviour, be
 - **MCA-3a** **Planning.** The plan is `candidate_symbols` over `upstream`: sorted, with no duplicates. An empty plan fails with `no_input_tickers`, and a plan of more than `MAX_PLANNED_REQUESTS` (2000, `collectors.py:87`) fails with `plan_too_large`. Neither ever truncates.
 - **MCA-3b** **Success.** One record per planned symbol, coverage `{"scope": "selected_universe", "complete": true}`, an envelope naming `adapter.name`, and `outcome.mode == "live"`, as `collect_source` requires (`runner.py:246-251`).
 - **MCA-3c** **A symbol with no value.** A `None` quote is stored as a row with a NULL value, sector and industry. The run still succeeds, with coverage complete.
-- **MCA-3d** **Adapter errors.** An adapter that raises `MarketCapAdapterError(code)` gives a failed run with that code and imports nothing. Any other exception is mapped by `collect_source` as today (`runner.py:254-267`): `collection_failed` for a `requests` exception, otherwise `internal_error`. No exception text appears in the run, its diagnostics or the logs.
-- **MCA-3e** **Response mismatch.** If the response's symbols differ from the plan's, by one missing or one extra, the run fails with `malformed_response`.
+- **MCA-3d** **Adapter errors.** An adapter that raises `MarketCapAdapterError("missing_credential")` gives a failed run with `missing_credential`. Any other `MarketCapAdapterError(code)` gives a failed run with `collection_failed`, with that unit code in the diagnostics, as `_Tracker` reports failures (`collectors.py:275-320`). Either way, nothing is imported. Any other exception is mapped by `collect_source` as today (`runner.py:254-267`): `collection_failed` for a `requests` exception, otherwise `internal_error`. No exception text appears in the run, its diagnostics or the logs.
+- **MCA-3e** **Response mismatch.** If the response's symbols differ from the plan's, by one missing or one extra, the run fails with `collection_failed` and unit code `malformed_response`.
 - **MCA-3f** **Value validation.** This matches `_caps` (`publication.py:457-469`):
   - Values are finite, more than 0 and less than 1e22, rounded to 0.01 half-even.
-  - A `bool` value, or one that is NaN, infinite or not a number, fails with `malformed_response`.
-  - A non-USD currency fails with `unsupported_currency`.
-  - An `observed_at` in the future fails with `malformed_response`.
+  - A `bool` value, or one that is NaN, infinite or not a number, fails the run with `collection_failed` and unit code `malformed_response`.
+  - A non-USD currency fails the run with `collection_failed` and unit code `currency_conflict`.
+  - An `observed_at` in the future fails the run with `collection_failed` and unit code `malformed_response`.
   - An invalid sector or industry becomes NULL and doesn't fail, as `_classification` does (`runner.py:297-302`).
+- **MCA-3g** **Fixture guard, at the lowest layer.** `collect` refuses an adapter whose `collection_mode` is `"fixture"` unless `record_mode == "fixture"`. It returns a failure outcome with the new run code `fixture_adapter_not_allowed`, without calling `fetch`. This applies to the default `record_mode="live"` as well. Through `import_collection`, that gives a failed run, no batch and no `market_caps` rows. With `record_mode="fixture"`, the fixture adapter runs normally. This exists because `collect_source` relabels the outcome's mode from its `record_mode` (`runner.py:252-253`), so the caller's `record_mode` alone would decide whether fixture values are recorded as live.
 
 **Import and identity**
 - **MCA-4a** Records resolve lookup-only by canonical ticker. An unknown symbol fails with `unresolved_security` and an inactive one with `inactive_security`, and nothing is imported. `market_caps` is not added to `ROOT_SOURCES` (`importer.py:98`). The adapter handles its own provider spellings and returns results under the canonical symbols it was given.
@@ -192,7 +204,7 @@ Merge MC-A and MC-B together, or MC-A first. MC-A alone changes no behaviour, be
 
 **You own:** `src/pipeline/runner.py`, `src/pipeline/publication.py`, `src/pipeline/demo.py` and `src/pipeline/health.py`.
 
-**You don't touch:** MC-A's files beyond calling them, the legacy FMP collector and fallback (keep them working for the `None` default), and the test maker's tests.
+**You don't touch:** MC-A's files beyond calling them, the legacy FMP collector and fallback (keep them working for the `None` default), and the test maker's tests. Two other hard-coded insider/short tuples stay exactly as they are; see MCB-2d.
 
 ### Interfaces to build
 
@@ -211,8 +223,12 @@ Merge MC-A and MC-B together, or MC-A first. MC-A alone changes no behaviour, be
 - **MCB-2a** **When it runs.** Each `run_pipeline` call makes exactly one `market_caps` collection, after `select_sources`. It is planned from the rows `publish()` will rank for that selection.
 - **MCB-2b** **Failure doesn't stop the run.** If that collection fails, the run is still recorded as failed and the pipeline goes on to selection.
 - **MCB-2c** **No lineage check against the cohort.** Market-cap rows are pinned one by one, so `publish()` doesn't require the market-cap run's dependencies to match the published cohort.
-- **MCB-2d** **Lineage.** `collect_source` treats `market_caps` as a downstream source (`runner.py:200`), so its run's `run_dependencies` names the Congress and ARK batches the plan came from. It also records the history watermark (`history_through_id`), as the other downstream sources do.
-- **MCB-2e** **Mode safety.** `run_pipeline(demo=False)` with the fixture adapter configured refuses before any collection, with `ValueError`.
+- **MCB-2d** **Lineage.** On `main`, `collect_source` treats only insider and short interest as downstream (`runner.py:200`). Without a change, a `market_caps` run would get no upstream rows, no `run_dependencies` and no watermark.
+  - **Add `market_caps` to that tuple.** Its run's `run_dependencies` then names the Congress and ARK batches the plan came from, and it records the history watermark (`history_through_id`), as the other downstream sources do.
+  - **Pass the run's `record_mode` to the market-cap collector,** for MCA-3g. For non-live modes, this happens after the demo-database check `collect_source` already makes (`runner.py:219-221`).
+  - **Leave the other two hard-coded tuples as insider/short only:** `_selected`'s lineage check (`publication.py:420`), because MCB-2c keeps market caps outside it, and `planned_watermark` (`congress_history.py:298`), because a market-cap run's watermark must not join the publication's agreement check. A test fails if either starts counting `market_caps`.
+- **MCB-2e** **Mode safety, at the pipeline.** `run_pipeline(demo=False)` with the fixture adapter configured refuses before any collection, with `ValueError`. This is a second guard above MCA-3g.
+- **MCB-2f** **Mode safety, at `collect_source`.** `collect_source(engine, "market_caps", collector=partial(collect, FixtureMarketCapAdapter(...)), record_mode="live")` records a failed run with `fixture_adapter_not_allowed`. Nothing is imported, and the adapter's `fetch` is never called.
 
 **Selection at publish**
 - **MCB-3a** For each candidate, the eligible rows are those in `market_caps` that:
