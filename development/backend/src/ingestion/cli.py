@@ -15,6 +15,7 @@ database URL, request URLs or exception messages.
 import argparse
 import getpass
 import json
+import logging
 import sys
 from dataclasses import asdict
 from typing import Any, List, Optional
@@ -22,12 +23,16 @@ from typing import Any, List, Optional
 from src.db.models import SOURCES, WATCHLIST_SOURCES
 from src.db.queries import batch_rows, latest_successful_run
 from src.db.session import make_engine
-from src.ingestion.redaction import describe_exception
+from src.ingestion.redaction import redact
 from src.settings import SettingsError, load_settings
+from src.utils.logger import configure_logging, log_context, log_exception
+
+logger = logging.getLogger(__name__)
 
 
-def _print(obj: Any) -> None:
-    print(json.dumps(obj, indent=2, default=str))
+def emit(obj: Any) -> None:
+    """Write command results to stdout; diagnostics belong on stderr."""
+    sys.stdout.write(json.dumps(obj, indent=2, default=str) + "\n")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -99,10 +104,19 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_logging()
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command == "publish" and bool(args.override) != bool(args.override_checks):
         parser.error("--override and --override-check must be given together")
+    with log_context(
+        source=getattr(args, "source", None),
+        publication_id=getattr(args, "publication_id", None),
+    ):
+        return _execute(args)
+
+
+def _execute(args: argparse.Namespace) -> int:
     try:
         settings = load_settings()
         if args.command == "run-pipeline":
@@ -120,13 +134,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             workload="pipeline" if args.command == "run-pipeline" else "cli",
         )
     except SettingsError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        # SettingsError contains only setting names, never rejected values.
+        logger.error("configuration error: %s", redact(exc))
         return 2
     except Exception as exc:
-        print(
-            f"error: database engine could not be created: {describe_exception(exc)}",
-            file=sys.stderr,
-        )
+        log_exception(logger, "database engine could not be created", exc)
         return 2
 
     try:
@@ -136,7 +148,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "run-pipeline":
             from src.pipeline.runner import run_pipeline
 
-            _print(
+            emit(
                 {
                     "publication_id": run_pipeline(
                         engine,
@@ -175,7 +187,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 else None,
             )
             actor = (args.actor or getpass.getuser()) if args.override else None
-            _print(
+            emit(
                 {
                     "publication_id": publish(
                         engine,
@@ -198,32 +210,32 @@ def main(argv: Optional[List[str]] = None) -> int:
                 actor=args.actor or getpass.getuser(),
                 reason=args.reason,
             )
-            _print(
+            emit(
                 {"publication_id": args.to_publication_id, "rolled_back_from": previous}
             )
             return 0
         if args.command == "current":
             from src.pipeline.publication import current
 
-            _print(current(engine))
+            emit(current(engine))
             return 0
         if args.command == "replay":
             from src.pipeline.publication import replay
 
-            _print(replay(engine, args.publication_id))
+            emit(replay(engine, args.publication_id))
             return 0
         if args.command == "health":
             from src.pipeline.health import health
 
             report = health(engine, settings=settings)
-            _print(report)
+            emit(report)
             return 0 if report["healthy"] else 1
         if args.command == "recover-stale":
             from datetime import timedelta
 
             from src.pipeline.lifecycle import abandon_stale_runs
 
-            _print(
+            emit(
                 {
                     "abandoned": abandon_stale_runs(
                         engine, timedelta(minutes=args.minutes)
@@ -236,7 +248,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             with engine.connect() as conn:
                 run = latest_successful_run(conn, args.source)
                 if run is None:
-                    _print({"source": args.source, "latest": None})
+                    emit({"source": args.source, "latest": None})
                     return 0
                 rows = batch_rows(
                     conn,
@@ -246,7 +258,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     offset=args.offset,
                     symbol=args.symbol,
                 )
-            _print(
+            emit(
                 {
                     "source": args.source,
                     "latest": dict(run._mapping),
@@ -269,7 +281,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             from src.pipeline.runner import collect_source
 
             result = collect_source(engine, args.source, settings=settings)
-            _print(asdict(result))
+            emit(asdict(result))
             return 0 if result.succeeded else 1
         result = import_collection(engine, outcome)
     except Exception as exc:
@@ -282,27 +294,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         from src.pipeline.runner import RequiredSourceUnavailableError
 
         if isinstance(exc, PublicationQualityError):
-            _print({"error_code": exc.code, "checks": list(exc.checks)})
+            emit({"error_code": exc.code, "checks": list(exc.checks)})
             return 1
         if isinstance(exc, (PublicationInProgressError, RollbackError)):
-            _print({"error_code": exc.code})
+            emit({"error_code": exc.code})
             return 1
         if isinstance(exc, RequiredSourceUnavailableError):
-            _print({"error_code": exc.code, "source": exc.source})
+            emit({"error_code": exc.code, "source": exc.source})
             return 1
         if isinstance(exc, OverrideInputError):
-            # Fixed text only: the rejected input may itself hold a secret.
-            print(f"error: {exc.code}: {exc}", file=sys.stderr)
+            log_exception(logger, exc.code, exc)
             return 2
-        print(
-            f"error: database operation failed: {describe_exception(exc)}",
-            file=sys.stderr,
-        )
+        log_exception(logger, "database operation failed", exc)
         return 2
     finally:
         engine.dispose()
 
-    _print(asdict(result))
+    emit(asdict(result))
     return 0 if result.succeeded else 1
 
 
