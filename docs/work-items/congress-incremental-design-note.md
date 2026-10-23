@@ -117,6 +117,18 @@ growing pin sets.
 - `publication_sources` keeps pinning the day's Congress observation batch.
   That batch still carries lineage, `source_as_of`, quality checks and M2
   reuse. The watermark carries the ranking input.
+- **Downstream planning reads the same history (CI-1).** Insider and short
+  interest are planned from history up to a watermark, within the 2-year
+  window, not from the day's ~20-row page. Otherwise a Congress ticker that
+  has scrolled off the page would rank without being requested downstream.
+  Before planning, the runner folds the selected Congress batch into history
+  and reads the watermark under the history lock. It records that watermark
+  on the downstream run's Congress dependency
+  (`run_dependencies.history_through_id`). Publish pins exactly that
+  watermark. It refuses when the two downstream runs recorded different
+  watermarks, or when their plan predates the selected Congress batch. Runs
+  without a recorded watermark (all runs from before this change) rank the
+  history visible at publish time.
 - Rows with the same key and occurrence come out in `history_id` order, which
   replaces today's `row_number` order as the deterministic tiebreak in ranking.
 - Publications made before this change have no watermark row and replay from
