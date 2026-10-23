@@ -5,9 +5,9 @@ adapter and the provider-neutral collector.
 A provider is added by writing one MarketCapAdapter and registering it in
 ADAPTERS, the only place a provider is named. collect() plans the request,
 validates the adapter's quotes and shapes them into market_caps records; the
-shared importer stores them as a batch with run lineage. Nothing in the
-pipeline calls collect() yet (MC-B), and production keeps the legacy FMP
-profile path while settings.market_cap_adapter is None.
+shared importer stores them as a batch with run lineage. run_pipeline
+calls it once per run when an adapter is configured (MC-B); production keeps
+the legacy FMP profile path while settings.market_cap_adapter is None.
 
 Policy, as in src/ingestion/collectors.py:
   * The plan is the publication's candidate set (ranking.candidate_symbols)
@@ -31,7 +31,8 @@ Policy, as in src/ingestion/collectors.py:
   * A fixture adapter can only record a fixture run (MCA-3g); an adapter of
     any other non-live mode is refused too. collect_source relabels the
     outcome's mode from its record_mode, so this layer refuses the adapter
-    before fetch, whatever the caller does with the outcome.
+    before fetch, whatever the caller does with the outcome. A live adapter
+    records only live runs (adapter_mode_mismatch otherwise).
 """
 
 import time
@@ -315,6 +316,9 @@ def collect(
     mode = adapter.collection_mode
     if mode != "live" and not (mode == "fixture" and record_mode == "fixture"):
         return _failure("fixture_adapter_not_allowed")
+    # MC-B: symmetric, so a live adapter never records a fixture, file or derived run.
+    if mode == "live" and record_mode != "live":
+        return _failure("adapter_mode_mismatch")
     plan = _plan(upstream)
     if plan is None:
         return _failure("missing_upstream")

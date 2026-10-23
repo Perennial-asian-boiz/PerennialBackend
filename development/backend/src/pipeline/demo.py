@@ -238,16 +238,15 @@ def demo_settings(database_url: str) -> Any:
 
 def run_demo(engine: Engine, replay: DemoReplay) -> int:
     """One full pipeline run against the replay, published into the demo DB."""
-    from src.pipeline.runner import collect_market_caps, run_pipeline
+    from src.ingestion.market_caps import FixtureMarketCapAdapter
+    from src.pipeline.runner import run_pipeline
 
     with replaying(replay):
         return run_pipeline(
             engine,
             settings=demo_settings(engine.url.render_as_string(hide_password=False)),
             demo=True,
-            market_cap_collector=lambda symbols: collect_market_caps(
-                symbols, api_key=PLACEHOLDER_KEY
-            ),
+            market_cap_adapter=FixtureMarketCapAdapter(),  # the M4 path (MCB-10)
         )
 
 
@@ -324,7 +323,7 @@ def demo_marked(engine: Engine, publication_id: int) -> bool:
 def walkthrough(engine: Engine, today: date | None = None) -> list[dict[str, Any]]:
     """The scripted demo; each step returns a compact summary (ids and codes only)."""
     from src.db.models import WATCHLIST_SOURCES, publication_events
-    from src.db.queries import batch_rows, latest_successful_run
+    from src.db.queries import latest_successful_run
     from src.pipeline import publication
     from src.pipeline.health import health
     from src.pipeline.publication import (
@@ -333,8 +332,6 @@ def walkthrough(engine: Engine, today: date | None = None) -> list[dict[str, Any
         publish,
         replay,
     )
-    from src.pipeline.ranking import candidate_symbols
-    from src.pipeline.runner import collect_market_caps
 
     with engine.connect() as conn:
         check_demo_database(conn)
@@ -398,14 +395,15 @@ def walkthrough(engine: Engine, today: date | None = None) -> list[dict[str, Any
 
     with engine.connect() as conn:
         latest = {s: latest_successful_run(conn, s) for s in WATCHLIST_SOURCES}
-        rows = {s: batch_rows(conn, s, r.batch_id) for s, r in latest.items() if r}
-    with replaying(feed):
-        caps = collect_market_caps(candidate_symbols(rows), api_key=PLACEHOLDER_KEY)
+        caps_run = latest_successful_run(conn, "market_caps")
     overridden = publish(
         engine,
         {s: r.run_id for s, r in latest.items() if r},
-        caps,
+        None,
         demo=True,
+        market_caps="pinned",  # the refused run's own market_caps collection
+        market_cap_run_id=caps_run.run_id if caps_run else None,
+        market_cap_adapter="fixture",
         override_reason="demo: no qualifying insider buys in the recorded day",
         override_actor="demo-operator",
         override_checks=refused.get("checks") or [],
