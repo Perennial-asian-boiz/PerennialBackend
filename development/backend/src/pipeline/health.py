@@ -1,7 +1,7 @@
 """Machine-readable checks for a supervisor/monitor. No credentials or payloads."""
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, Sequence
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
@@ -18,6 +18,10 @@ from src.settings import (
 
 # M2: degraded publishing is visible but not an outage; everything else is.
 SEV2, SEV3 = "SEV2", "SEV3"
+
+# GDELT (G5, provisional): informational until M6 scores consume it. Staleness
+# is an advisory: visible, never a watchlist issue, never unhealthy.
+GDELT_MAX_AGE = timedelta(days=2)
 
 
 def publication_window_start(now: datetime, holidays: Iterable[date]) -> datetime:
@@ -64,7 +68,9 @@ def health(
     *,
     settings: Settings | None = None,
     now: datetime | None = None,
+    modes: Sequence[str] = ("live",),
 ) -> dict[str, Any]:
+    """modes: which collection modes count as runs; only the demo widens it."""
     now = datetime.now(timezone.utc) if now is None else now
     holidays = settings.trading_holidays if settings is not None else TRADING_HOLIDAYS
     window_start = publication_window_start(now, holidays)
@@ -77,7 +83,7 @@ def health(
                     select(m.ingestion_runs)
                     .where(
                         m.ingestion_runs.c.source == source,
-                        m.ingestion_runs.c.collection_mode == "live",
+                        m.ingestion_runs.c.collection_mode.in_(modes),
                     )
                     .order_by(
                         m.ingestion_runs.c.started_at.desc(),
@@ -94,7 +100,7 @@ def health(
                     .where(
                         m.ingestion_runs.c.source == source,
                         m.ingestion_runs.c.status == "succeeded",
-                        m.ingestion_runs.c.collection_mode == "live",
+                        m.ingestion_runs.c.collection_mode.in_(modes),
                     )
                     .order_by(
                         m.ingestion_runs.c.collected_at.desc().nullslast(),
@@ -142,18 +148,31 @@ def health(
             select(func.count()).select_from(m.source_batches)
         ).scalar_one()
     # M3 missed-run monitor: the scheduled job never started for the trading day
-    # whose deadline passed (distinct from a run that started and failed).
+    # whose deadline passed (distinct from a run that started and failed). Only
+    # watchlist sources count: a GDELT run must not mask a missed pipeline run.
     with engine.connect() as conn:
         started = conn.execute(
             select(func.count())
             .select_from(m.ingestion_runs)
             .where(
                 m.ingestion_runs.c.collection_mode == "live",
+                m.ingestion_runs.c.source.in_(m.WATCHLIST_SOURCES),
                 m.ingestion_runs.c.started_at >= window_start,
             )
         ).scalar_one()
     if not started:
         issues.append("pipeline:missed_run")
+    advisories: list[str] = []
+    with engine.connect() as conn:
+        for source in m.SUBJECTLESS_SOURCES:
+            finished = conn.execute(
+                select(func.max(m.ingestion_runs.c.finished_at)).where(
+                    m.ingestion_runs.c.source == source,
+                    m.ingestion_runs.c.status == "succeeded",
+                )
+            ).scalar_one()
+            if finished is None or now - finished > GDELT_MAX_AGE:
+                advisories.append(f"{source}:stale")
     pub = current(engine)
     if pub is None:
         issues.append("publication:missing")
@@ -249,6 +268,7 @@ def health(
         "issue_severity": severities,
         "checked_at": now,
         "issues": issues,
+        "advisories": advisories,
         "sources": sources,
         "publication_id": pub["id"] if pub else None,
         "database_bytes": size,

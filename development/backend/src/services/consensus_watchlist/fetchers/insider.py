@@ -123,6 +123,11 @@ US_EXCHANGE_SUFFIXES = {"UQ", "UW", "UR", "UN", "UA", "UP"}
 
 # Tickers whose Form 4s Finnhub files under a different symbol. Alphabet's
 # two share classes are one issuer; Finnhub has every filing under GOOGL.
+# TODO(M4): replace provider_symbol with stored identifiers
+# (src/ingestion/identity.request_symbol, seeded in database/seeds/identity.json).
+# Not mechanical: this fetcher has no database connection, so the collector
+# must plan request spellings before calling it. tests/test_identity.py proves
+# the seeds reproduce these spellings for the #18 cases.
 PROVIDER_ALIASES = {"GOOG": "GOOGL"}
 
 # Collection outcomes. These travel in the output file, not just the console,

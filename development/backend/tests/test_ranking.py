@@ -131,7 +131,7 @@ def test_v2_keeps_ark_insider_and_short_interest_signals_unchanged():
 
 def ranking_inputs(engine, records):
     runs, batches = {}, {}
-    for source in models.SOURCES:
+    for source in models.WATCHLIST_SOURCES:
         dependencies = {s: batches[s] for s in ('congress_trades', 'ark_holdings')} if len(batches) >= 2 else {}
         run = begin_run(engine, source, 'live', dependencies=dependencies)
         result = import_collection(engine, CollectionOutcome.success(
@@ -160,7 +160,7 @@ def test_v1_publication_replays_baseline_output_and_new_publication_is_v2(engine
             ranking_version='watchlist-v1', ranking_config=ranking.DEFAULT_CONFIG,
             output=expected).returning(models.publications.c.id)).scalar_one()
         conn.execute(insert(models.publication_sources), [dict(publication_id=old, source=s,
-            run_id=runs[s], batch_id=batches[s]) for s in models.SOURCES])
+            run_id=runs[s], batch_id=batches[s]) for s in models.WATCHLIST_SOURCES])
         for security in conn.execute(select(models.securities)).mappings():
             observation = conn.execute(insert(models.market_cap_observations).values(
                 security_id=security['id'], value=Decimal('20000000000'), currency='USD',

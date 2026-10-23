@@ -153,7 +153,7 @@ def test_database_pipeline_passes_pinned_upstream_without_files(engine, fixture_
         return {s: {"value": Decimal("1000000000"), "currency": "USD", "provider": "fmp",
                     "retrieved_at": datetime.now(timezone.utc)} for s in symbols}
     pub = run_pipeline(engine, collectors=collectors, market_cap_collector=market_caps)
-    assert seen == list(models.SOURCES)
+    assert seen == list(models.WATCHLIST_SOURCES)
     assert current(engine)["id"] == pub
     assert replay(engine, pub) == current(engine)["output"]
     seen.clear()
