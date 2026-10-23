@@ -153,15 +153,26 @@ def test_database_pipeline_passes_pinned_upstream_without_files(engine, fixture_
         return {s: {"value": Decimal("1000000000"), "currency": "USD", "provider": "fmp",
                     "retrieved_at": datetime.now(timezone.utc)} for s in symbols}
     pub = run_pipeline(engine, collectors=collectors, market_cap_collector=market_caps)
-    assert seen == list(models.SOURCES)
+    assert seen == list(models.WATCHLIST_SOURCES)
     assert current(engine)["id"] == pub
     assert replay(engine, pub) == current(engine)["output"]
     seen.clear()
+    # M2: a failed upstream collection reuses the pinned batch, and downstream
+    # sources are planned from that reused batch.
     collectors["ark_holdings"] = lambda: CollectionOutcome.failure("ark_holdings", "live", "collection_failed")
-    with pytest.raises(RuntimeError, match="ark_holdings"):
-        run_pipeline(engine, collectors=collectors, market_cap_collector=market_caps)
-    assert seen == ["congress_trades"]
-    assert current(engine)["id"] == pub
+    second = run_pipeline(engine, collectors=collectors, market_cap_collector=market_caps)
+    assert seen == ["congress_trades", "insider_trades", "short_interest"]
+    assert current(engine)["id"] == second != pub
+    with engine.connect() as conn:
+        pinned = dict(conn.execute(select(models.publication_sources.c.source, models.publication_sources.c.batch_id)
+                                   .where(models.publication_sources.c.publication_id.in_([pub, second]))
+                                   .where(models.publication_sources.c.source == "ark_holdings")).all())
+        degraded = conn.execute(select(models.publication_events.c.checks).where(
+            models.publication_events.c.publication_id == second,
+            models.publication_events.c.kind == "degraded")).scalar_one()
+    assert set(degraded["reused"]) == {"ark_holdings"}
+    assert degraded["reused"]["ark_holdings"]["failure_code"] == "collection_failed"
+    assert replay(engine, second) == current(engine)["output"]
 
 
 def test_collector_crash_is_recorded_and_run_exists_before_fetch(engine):
@@ -227,6 +238,10 @@ def test_pipeline_reports_abandoned_collection_and_preserves_publication(engine,
     from src.pipeline.runner import run_pipeline
     runs, batches = inputs(engine, fixture_path)
     previous = publish(engine, runs, caps(engine, batches))
+    # Past its 3-day reuse limit, so M2 cannot fall back to the pinned run.
+    with engine.begin() as conn:
+        conn.execute(update(models.ingestion_runs).where(models.ingestion_runs.c.id == runs['congress_trades'])
+                     .values(collected_at=datetime.now(timezone.utc)-timedelta(days=4)))
     def abandoned_collector():
         with engine.begin() as conn:
             conn.execute(update(models.ingestion_runs).where(models.ingestion_runs.c.status == 'running')

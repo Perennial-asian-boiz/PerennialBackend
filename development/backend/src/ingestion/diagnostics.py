@@ -38,11 +38,18 @@ ERROR_SUMMARIES = {
     "publication_quality_failed": "publication quality checks failed",
     "publication_in_progress": "another publication is in progress; retry later",
     "override_input_rejected": "override actor or reason is not safe to record",
+    "required_source_unavailable": "a required source has neither a fresh nor a reusable batch",
+    "reuse_not_current": "a reused run is no longer pinned by the current publication or is too old",
+    "observation_regressed": "a source's observation date would go backwards",
+    "lineage_mismatch": "a downstream run was planned from different upstream batches",
+    "rollback_rejected": "rollback target is missing, already current or not reproducible",
+    "gdelt_incomplete": "one or more GDELT themes failed in the scheduled run",
     "worker_abandoned": "Worker heartbeat expired.",
     "collection_failed": "collection did not complete",
     "partial_collection": "collection was incomplete; some units failed",
     "missing_credential": "a required provider credential is not configured",
     "empty_short_interest": "no short-interest records returned for the selected universe",
+    "empty_gdelt_timeline": "GDELT returned no volume for any watched theme",
     "no_input_tickers": "no candidate tickers available (upstream fetcher files missing or empty)",
     "parse_error": "fetcher output could not be parsed",
     "file_unreadable": "input file does not exist or cannot be read",
@@ -55,6 +62,7 @@ ERROR_SUMMARIES = {
     "validation_failed": "one or more records failed validation",
     "validation_error": "input could not be validated",
     "security_conflict": "a ticker conflicts with an existing or in-batch security mapping",
+    "unresolved_security": "a ticker does not resolve to exactly one active security",
     "missing_upstream": "upstream rows or fetcher files are missing or malformed",
     "plan_too_large": "too many tickers planned; collection refused rather than truncated",
     "database_error": "database write failed",
@@ -64,6 +72,7 @@ ERROR_SUMMARIES = {
 UNIT_KINDS = frozenset(
     {
         "ARK funds",
+        "GDELT themes",
         "Congress requests",
         "insider tickers",
         "short-interest tickers",
@@ -71,6 +80,7 @@ UNIT_KINDS = frozenset(
     }
 )
 _COUNT_KEYS = (
+    "securities_registered",
     "senate_pages_fetched",
     "house_pages_fetched",
     "input_count",
@@ -80,6 +90,9 @@ _COUNT_KEYS = (
     "completed",
     "failed",
     "not_attempted",
+    "senate_rows_served",
+    "house_rows_served",
+    "fmp_calls",
 )
 
 _OWN_ERROR_TYPES = {"not_an_object", "duplicate_security", "conflicting_exchange"}
@@ -97,6 +110,9 @@ FAILURE_CODES = frozenset(
         "malformed_response",
         "exchange_conflict",
         "currency_conflict",
+        "unresolved",
+        "inactive_security",
+        "alias_collision",
         "parse_error",
         "missing_file",
         "unreadable_file",
@@ -113,7 +129,8 @@ _REQUEST_ERRORS = frozenset(
 )
 _HTTP_CODE = re.compile(r"^http_[1-5][0-9]{2}$")
 _UNIT = re.compile(
-    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|trades_congress\.json|ark_holdings\.json)$"
+    r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|trades_congress\.json|ark_holdings\.json"
+    r"|[A-Z][A-Z0-9_]{1,63})$"  # GDELT theme codes
 )
 MAX_COUNT = 10**9
 

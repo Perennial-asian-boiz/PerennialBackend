@@ -68,11 +68,12 @@ def test_ranking_config_holds_ranking_inputs_only(engine, fixture_path):
         "market_cap_threshold",
         "source_as_of",
         "freshness_seconds",
+        "congress_window_years",  # ranking input: the D13 window over history
     }
     [event] = events(engine, pub)
     assert event["kind"] == "quality_passed"
     assert event["checks"]["failed"] == [] and event["checks"]["overridden"] == []
-    assert set(event["checks"]["sources"]) == set(models.SOURCES)
+    assert set(event["checks"]["sources"]) == set(models.WATCHLIST_SOURCES)
     assert replay(engine, pub) == saved["output"]
 
 
@@ -87,7 +88,7 @@ def test_legacy_ranking_config_with_quality_audit_replays_byte_identically(
     legacy = {
         **saved["ranking_config"],
         "quality_audit": {
-            "sources": {s: {"status": "no_baseline"} for s in models.SOURCES},
+            "sources": {s: {"status": "no_baseline"} for s in models.WATCHLIST_SOURCES},
             "override": {"actor": "a", "reason": "r", "checks": []},
         },
     }
@@ -120,14 +121,19 @@ def test_publication_events_constraints(engine, fixture_path):
     for values in bad:
         with engine.begin() as conn, pytest.raises(IntegrityError):
             conn.execute(models.publication_events.insert().values(**values))
-    # Degraded markers and rollbacks may repeat.
+    # One degraded marker per publication (0007); rollbacks may repeat.
+    rollback = dict(base, kind="rollback", actor="synthetic-op", reason="synthetic rollback")
     with engine.begin() as conn:
+        conn.execute(models.publication_events.insert().values(**base, kind="degraded"))
         for _ in range(2):
-            conn.execute(models.publication_events.insert().values(**base, kind="degraded"))
+            conn.execute(models.publication_events.insert().values(**rollback))
+    with engine.begin() as conn, pytest.raises(IntegrityError):
+        conn.execute(models.publication_events.insert().values(**base, kind="degraded"))
     assert [e["kind"] for e in events(engine, pub)] == [
         "quality_passed",
         "degraded",
-        "degraded",
+        "rollback",
+        "rollback",
     ]
 
 

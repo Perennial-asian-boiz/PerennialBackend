@@ -26,6 +26,7 @@ from sqlalchemy import (
     Integer,
     MetaData,
     Numeric,
+    SmallInteger,
     String,
     Table,
     Text,
@@ -36,10 +37,27 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 SCHEMA = "perennial"
 
-SOURCES = ("congress_trades", "ark_holdings", "insider_trades", "short_interest")
+# The watchlist publication pins exactly these sources; nothing else can block it.
+WATCHLIST_SOURCES = (
+    "congress_trades",
+    "ark_holdings",
+    "insider_trades",
+    "short_interest",
+)
+# Sources whose rows are not about one security: no ticker, no securities FK.
+SUBJECTLESS_SOURCES: tuple[str, ...] = (
+    "gdelt_theme_volume",
+    "gdelt_theme_articles",
+    "gdelt_spike_results",  # derived from gdelt_theme_volume (collection_mode derived)
+)
+# The closed source vocabulary (CHECKs, CLI, locks). Append only: lifecycle lock
+# keys are derived from each source's position.
+SOURCES = WATCHLIST_SOURCES + SUBJECTLESS_SOURCES
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
-COLLECTION_MODES = ("fixture", "file", "live")
+COLLECTION_MODES = ("fixture", "file", "live", "derived")
 PUBLICATION_EVENT_KINDS = ("quality_passed", "quality_override", "degraded", "rollback")
+SECURITY_TYPES = ("common", "adr", "etf")
+IDENTIFIER_SCHEMES = ("ticker", "figi", "cusip", "cik")
 
 ERROR_SUMMARY_MAX = 1000
 DIAGNOSTICS_MAX_BYTES = 16384
@@ -64,6 +82,36 @@ def _id() -> Column[Any]:
     return Column("id", BigInteger, Identity(always=True), primary_key=True)
 
 
+# One row per issuer (M4). Share classes such as GOOG and GOOGL stay distinct
+# securities that point at one profile. sector/industry are expanded here from
+# market_cap_observations; GDELT reads switch over in a later change.
+company_profiles = Table(
+    "company_profiles",
+    metadata,
+    _id(),
+    Column("legal_name", Text),
+    Column("sector", String(64)),
+    Column("industry", String(128)),
+    Column("alias_names", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    # Issuer-level: one CIK can cover several share classes.
+    Column("cik", String(10)),
+    # The share class whose provider listing carries the issuer's insider filings.
+    Column(
+        "insider_reporting_security_id",
+        BigInteger,
+        ForeignKey(
+            f"{SCHEMA}.securities.id",
+            use_alter=True,
+            name="fk_company_profiles_insider_reporting_security_id_securities",
+        ),
+    ),
+    UniqueConstraint("cik"),
+    CheckConstraint("cik IS NULL OR cik ~ '^[0-9]{10}$'", name="cik_format"),
+    CheckConstraint(
+        "legal_name IS NULL OR btrim(legal_name) <> ''", name="legal_name_not_blank"
+    ),
+)
+
 securities = Table(
     "securities",
     metadata,
@@ -77,7 +125,22 @@ securities = Table(
         nullable=False,
         server_default=text("now()"),
     ),
+    Column("name", Text),
+    Column("security_type", String(16)),
+    Column("country", String(2)),
+    Column("figi", String(12)),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column(
+        "company_profile_id", BigInteger, ForeignKey(f"{SCHEMA}.company_profiles.id")
+    ),
     UniqueConstraint("symbol"),
+    UniqueConstraint("figi"),
+    CheckConstraint(
+        f"security_type IS NULL OR {_in('security_type', SECURITY_TYPES)}",
+        name="security_type",
+    ),
+    CheckConstraint("country IS NULL OR country ~ '^[A-Z]{2}$'", name="country_format"),
+    CheckConstraint("figi IS NULL OR figi ~ '^[A-Z0-9]{12}$'", name="figi_format"),
     CheckConstraint(
         "symbol = upper(symbol) AND symbol ~ '^[A-Z0-9][A-Z0-9./-]*$'",
         name="symbol_format",
@@ -89,6 +152,32 @@ securities = Table(
         "currency IS NULL OR currency ~ '^[A-Z]{3}$'", name="currency_format"
     ),
 )
+
+Index("ix_securities_company_profile_id", securities.c.company_profile_id)
+
+# Lookup-only aliases (M4). Provider spellings are encoded in value with a fixed
+# provider prefix ("FINNHUB:BRK-B"); a bare value is the canonical ticker.
+security_identifiers = Table(
+    "security_identifiers",
+    metadata,
+    Column("scheme", String(16), primary_key=True),
+    Column("value", String(64), primary_key=True),
+    Column(
+        "security_id", BigInteger, ForeignKey(f"{SCHEMA}.securities.id"), nullable=False
+    ),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint(_in("scheme", IDENTIFIER_SCHEMES), name="scheme"),
+    CheckConstraint(
+        "value = btrim(value) AND value <> '' AND value = upper(value)",
+        name="value_format",
+    ),
+)
+Index("ix_security_identifiers_security_id", security_identifiers.c.security_id)
 
 source_batches = Table(
     "source_batches",
@@ -272,11 +361,79 @@ short_interest = Table(
 )
 Index("ix_short_interest_security_id", short_interest.c.security_id)
 
+_THEME_FORMAT = "theme ~ '^[A-Z0-9_]{1,64}$'"
+
+# GDELT through the ingestion contract: immutable batches with run lineage.
+gdelt_theme_volume = Table(
+    "gdelt_theme_volume",
+    metadata,
+    _id(),
+    _batch_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("article_count", Integer, nullable=False),
+    Column("total_articles", BigInteger),
+    Column("avg_tone", Numeric(8, 4)),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "theme", "day"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(_THEME_FORMAT, name="theme_format"),
+    CheckConstraint("article_count >= 0", name="article_count"),
+    CheckConstraint(
+        "total_articles IS NULL OR total_articles >= 0", name="total_articles"
+    ),
+)
+
+gdelt_theme_articles = Table(
+    "gdelt_theme_articles",
+    metadata,
+    _id(),
+    _batch_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("url", String(2048), nullable=False),
+    Column("title", String(500)),
+    Column("domain", String(255)),
+    Column("seen_at", DateTime(timezone=True)),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "theme", "url"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(_THEME_FORMAT, name="theme_format"),
+    CheckConstraint("url ~ '^https?://'", name="url_scheme"),
+)
+
+gdelt_spike_results = Table(
+    "gdelt_spike_results",
+    metadata,
+    _id(),
+    _batch_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("theme", String(64), nullable=False),
+    Column("day", Date, nullable=False),
+    Column("article_count", Integer, nullable=False),
+    Column("baseline_median", Numeric(12, 2)),
+    Column("observed_baseline_days", SmallInteger, nullable=False),
+    Column("ratio", Numeric(10, 2)),
+    Column("is_spike", Boolean),
+    Column("rule_version", String(16), nullable=False),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "theme", "day"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(_THEME_FORMAT, name="theme_format"),
+    CheckConstraint("article_count >= 0", name="article_count"),
+    CheckConstraint("observed_baseline_days >= 0", name="observed_baseline_days"),
+)
+
 SOURCE_TABLES = {
     "congress_trades": congress_trades,
     "ark_holdings": ark_holdings,
     "insider_trades": insider_trades,
     "short_interest": short_interest,
+    "gdelt_theme_volume": gdelt_theme_volume,
+    "gdelt_theme_articles": gdelt_theme_articles,
+    "gdelt_spike_results": gdelt_spike_results,
 }
 
 # These tables make collection lineage and publication explicit. Historical
@@ -292,9 +449,17 @@ run_dependencies = Table(
     ),
     Column("source", String(32), primary_key=True),
     Column("batch_id", BigInteger, nullable=False),
+    # For a downstream run's Congress dependency: the accumulated history it
+    # was planned from (congress_trade_history ids <= this). Publication pins it.
+    Column("history_through_id", BigInteger),
     ForeignKeyConstraint(
         ["batch_id", "source"],
         [f"{SCHEMA}.source_batches.id", f"{SCHEMA}.source_batches.source"],
+    ),
+    CheckConstraint(
+        "history_through_id IS NULL "
+        "OR (source = 'congress_trades' AND history_through_id >= 0)",
+        name="history_through_id",
     ),
 )
 
@@ -341,6 +506,12 @@ Index(
     publication_events.c.publication_id,
     unique=True,
     postgresql_where=text("kind IN ('quality_passed', 'quality_override')"),
+)
+Index(
+    "uq_publication_events_degraded",
+    publication_events.c.publication_id,
+    unique=True,
+    postgresql_where=text("kind = 'degraded'"),
 )
 
 publication_sources = Table(
@@ -485,4 +656,95 @@ gdelt_spike_checks = Table(
     Column("is_spike", Boolean, nullable=False),
     Column("checked_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("theme", "day"),
+)
+
+# Accumulated Congress history (src/pipeline/congress_history.py). Append-only:
+# each row is one distinct trade first seen in a live Congress batch.
+congress_trade_history = Table(
+    "congress_trade_history",
+    metadata,
+    Column("history_id", BigInteger, Identity(always=True), primary_key=True),
+    Column("trade_key", String(64), nullable=False),
+    Column("occurrence", Integer, nullable=False),
+    _security_fk(),
+    Column("politician_name", String(200), nullable=False),
+    Column("chamber", String(16)),
+    Column("trade_type", String(100), nullable=False),
+    Column("transaction_date", Date, nullable=False),
+    Column("disclosure_date", Date),
+    Column("amount_label", String(100)),
+    Column("asset_description", String(500)),
+    Column("asset_type", String(100)),
+    Column("district", String(20)),
+    Column("source_link", String(2048)),
+    Column("data_source", String(32)),
+    Column(
+        "first_seen_batch_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.source_batches.id"),
+        nullable=False,
+    ),
+    UniqueConstraint("trade_key", "occurrence"),
+    CheckConstraint("trade_key ~ '^[0-9a-f]{64}$'", name="trade_key_format"),
+    CheckConstraint("occurrence >= 1", name="occurrence"),
+)
+Index("ix_congress_trade_history_security_id", congress_trade_history.c.security_id)
+Index(
+    "ix_congress_trade_history_chamber_disclosure",
+    congress_trade_history.c.chamber,
+    congress_trade_history.c.disclosure_date,
+)
+Index(
+    "ix_congress_trade_history_first_seen_batch_id",
+    congress_trade_history.c.first_seen_batch_id,
+)
+
+# A full free page that shared no row with stored history: trades may be missing.
+congress_history_gaps = Table(
+    "congress_history_gaps",
+    metadata,
+    _id(),
+    Column("chamber", String(16), nullable=False),
+    Column("newest_stored_date", Date, nullable=False),
+    Column("oldest_seen_date", Date, nullable=False),
+    Column("gap_days", Integer, nullable=False),
+    Column(
+        "detected_batch_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.source_batches.id"),
+        nullable=False,
+    ),
+    Column(
+        "detected_run_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.ingestion_runs.id"),
+        nullable=False,
+    ),
+    Column(
+        "created_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    UniqueConstraint("detected_batch_id", "chamber"),
+    CheckConstraint("gap_days >= 0", name="gap_days"),
+)
+Index(
+    "ix_congress_history_gaps_detected_run_id", congress_history_gaps.c.detected_run_id
+)
+
+# The history a publication ranked: every row with history_id <= through.
+publication_history_watermarks = Table(
+    "publication_history_watermarks",
+    metadata,
+    Column(
+        "publication_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.publications.id"),
+        primary_key=True,
+    ),
+    Column("source", String(32), primary_key=True),
+    Column("through_history_id", BigInteger, nullable=False),
+    CheckConstraint("source = 'congress_trades'", name="source"),
+    CheckConstraint("through_history_id >= 0", name="through_history_id"),
 )

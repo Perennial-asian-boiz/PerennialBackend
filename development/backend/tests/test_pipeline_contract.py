@@ -237,7 +237,7 @@ def test_real_collectors_accept_exactly_what_runner_passes(engine, fixture_path)
 
     batches = seed_live_upstream(engine, fixture_path)
     mismatches = {}
-    for source in models.SOURCES:
+    for source in models.WATCHLIST_SOURCES:
         calls = []
 
         def spy(*args, _source=source, **kwargs):
@@ -262,11 +262,13 @@ def test_runner_upstream_rows_satisfy_collector_plan_contract(engine, fixture_pa
     The DB-shaped rows the runner hands downstream must carry every field the
     collectors' plan builders read (ticker, trade_type, fund_count, funds).
     """
+    from src.pipeline import congress_history
     from src.pipeline.runner import _upstream
 
     batches = seed_live_upstream(engine, fixture_path)
-    with engine.connect() as conn:
-        upstream = _upstream(conn, batches)
+    with engine.begin() as conn:  # plan from history, as the runner does (CI-1)
+        congress_history.fold_batch(conn, batches["congress_trades"])
+        upstream = _upstream(conn, batches, congress_history.watermark(conn))
     assert upstream["trades"] and upstream["holdings"]
     for row in upstream["trades"]:
         assert isinstance(row["ticker"], str) and row["ticker"].strip()

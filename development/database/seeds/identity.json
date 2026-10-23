@@ -1,0 +1,16 @@
+{
+  "note": "Reviewed M4 identity seeds. Bryan approves additions. No FIGI or CIK without reviewed evidence; ADRs keep their reported basis.",
+  "securities": [
+    {"symbol": "RKLB", "exchange": "NASDAQ", "currency": "USD", "security_type": "common", "country": "US"},
+    {"symbol": "BRK.B", "exchange": "NYSE", "currency": "USD", "security_type": "common", "country": "US"},
+    {"symbol": "GOOG", "exchange": "NASDAQ", "currency": "USD", "security_type": "common", "country": "US"},
+    {"symbol": "GOOGL", "exchange": "NASDAQ", "currency": "USD", "security_type": "common", "country": "US"}
+  ],
+  "aliases": [
+    {"scheme": "ticker", "value": "BRK-B", "symbol": "BRK.B"},
+    {"scheme": "ticker", "value": "FINNHUB:BRK-B", "symbol": "BRK.B"}
+  ],
+  "profiles": [
+    {"legal_name": "Alphabet Inc.", "members": ["GOOG", "GOOGL"], "insider_reporting_symbol": "GOOGL"}
+  ]
+}

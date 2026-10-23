@@ -29,9 +29,13 @@ def begin_run(
     mode: str = "live",
     *,
     dependencies: Mapping[str, int] | None = None,
+    history_through: int | None = None,
 ) -> int:
+    """history_through: the Congress history watermark a downstream plan used."""
     if source not in SOURCES or mode not in COLLECTION_MODES:
         raise ValueError("invalid source or collection mode")
+    if history_through is not None and "congress_trades" not in (dependencies or {}):
+        raise ValueError("a history watermark needs a Congress dependency")
     with engine.begin() as conn:
         run_id = conn.execute(
             insert(ingestion_runs)
@@ -52,7 +56,12 @@ def begin_run(
                 raise ValueError("dependency batch does not match source")
             conn.execute(
                 insert(run_dependencies).values(
-                    run_id=run_id, source=upstream, batch_id=batch_id
+                    run_id=run_id,
+                    source=upstream,
+                    batch_id=batch_id,
+                    history_through_id=history_through
+                    if upstream == "congress_trades"
+                    else None,
                 )
             )
     return cast(int, run_id)
@@ -169,10 +178,25 @@ def heartbeat_worker(
         worker.join(timeout=2)
 
 
+# Advisory lock key per workflow. Explicit, never derived from a source's
+# position: two branches appending sources must not shift each other's keys
+# during a rolling deploy (checker MC-5). A new source takes the next unused key.
+SOURCE_LOCK_KEYS = {
+    "congress_trades": 170010,
+    "ark_holdings": 170011,
+    "insider_trades": 170012,
+    "short_interest": 170013,
+    "gdelt_theme_volume": 170014,
+    "gdelt_theme_articles": 170015,
+    "gdelt_spike_results": 170016,
+    "pipeline": 170098,
+}
+
+
 @contextmanager
 def source_lock(engine: Engine, source: str) -> Iterator[None]:
     """Session advisory lock: no open transaction while network calls run."""
-    key = 170098 if source == "pipeline" else 170010 + SOURCES.index(source)
+    key = SOURCE_LOCK_KEYS[source]
     with engine.connect() as conn:
         acquired = conn.execute(
             text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
