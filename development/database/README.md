@@ -213,7 +213,7 @@ Rules worth knowing:
   mismatch: valid short-interest signals now populate the JSON watchlist where
   they were always null at `fab7188`.
 - **Congress adapters and versioned ranking.** The legacy JSON writer uses
-  `fmp.deduplicate`, retaining the first row for the `fab7188` key
+  `fmp.legacy_deduplicate`, retaining the first row for the `fab7188` key
   `(politician_name.lower(), ticker, transaction_date, trade_type.lower())`.
   The database collector uses `deduplicate_proven_repeats`, preserving
   cross-provider observations and unidentified repeats without changing hash v2.

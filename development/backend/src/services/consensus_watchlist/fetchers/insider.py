@@ -68,9 +68,10 @@ import os
 import sys as _sys
 import time
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from pathlib import Path as _Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -91,9 +92,9 @@ _sys.path.insert(
 )
 from paths import (  # noqa: F401 -- legacy module exports
     ENV_PATH,
-    LOCAL_DATA_DIR,
     local_data_dir,
 )
+from paths import LOCAL_DATA_DIR as LOCAL_DATA_DIR  # collectors read it
 from src.utils.logger import configure_logging, log_exception
 
 logger = logging.getLogger(__name__)
@@ -159,7 +160,8 @@ ERR_INPUT_UNREADABLE = "input_unreadable"  # upstream output corrupt
 #   contract  — provider answered but the shape broke our parser; FIX CODE
 #   config    — our own setup is incomplete; fix development/backend/.env
 #   pipeline  — an earlier stage of our own pipeline produced no input
-ERROR_CATEGORY = {
+# Keyed by Optional so a clean load (error None) looks up as no category.
+ERROR_CATEGORY: Dict[Optional[str], str] = {
     ERR_RATE_LIMITED: "transient",
     ERR_TIMEOUT: "transient",
     ERR_CONNECTION: "transient",
@@ -173,12 +175,12 @@ ERROR_CATEGORY = {
 REQUEST_TIMEOUT = 15  # seconds
 
 
-def has_api_key():
+def legacy_has_api_key() -> bool:
     """True when .env holds a real key, not empty or the .env.example placeholder."""
     return bool(FINNHUB_API_KEY) and not FINNHUB_API_KEY.lower().startswith("your_")
 
 
-def provider_symbol(ticker: str):
+def provider_symbol(ticker: str) -> Optional[str]:
     """
     The symbol to ask Finnhub for, or None when the listing has no SEC
     Form 4 filings to ask about.
@@ -200,13 +202,13 @@ def provider_symbol(ticker: str):
     return PROVIDER_ALIASES.get(symbol, symbol)
 
 
-def rate_limit_wait(resp):
+def legacy_rate_limit_wait(resp: object) -> float:
     """
     Seconds until Finnhub's 60-call window resets, from X-Ratelimit-Reset
     (epoch seconds). Falls back to RATE_LIMIT_WAIT when the header is
     missing or unusable, and never exceeds MAX_RATE_LIMIT_WAIT.
     """
-    headers = getattr(resp, "headers", None) or {}
+    headers: Any = getattr(resp, "headers", None) or {}
     try:
         wait = float(headers.get("X-Ratelimit-Reset")) - time.time() + 1
     except (TypeError, ValueError):
@@ -216,7 +218,7 @@ def rate_limit_wait(resp):
     return wait
 
 
-def lookback_cutoff():
+def lookback_cutoff() -> date:
     """Oldest transaction date that still counts."""
     return (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).date()
 
@@ -226,7 +228,7 @@ def lookback_cutoff():
 # ─────────────────────────────────────────────────────────
 
 
-def load_congress_tickers():
+def legacy_load_congress_tickers() -> Tuple[List[str], Optional[str]]:
     """
     Reads trades_congress.json produced by fmp.py.
     Returns (tickers, error) — error is None on a clean read. An empty list
@@ -264,7 +266,7 @@ def load_congress_tickers():
 # ─────────────────────────────────────────────────────────
 
 
-def load_ark_tickers():
+def legacy_load_ark_tickers() -> Tuple[List[str], Optional[str]]:
     """
     Reads ark_holdings.json produced by ark.py.
     Returns (tickers, error) for Bucket 2 (Affordable & Growing).
@@ -306,7 +308,7 @@ def load_ark_tickers():
 # ─────────────────────────────────────────────────────────
 
 
-def fetch_insider_activity(ticker: str):
+def legacy_fetch_insider_activity(ticker: str) -> Dict[str, Any]:
     """
     Fetches insider transactions for one ticker from Finnhub, asking for
     provider_symbol(ticker). Callers skip tickers that map to None.
@@ -317,7 +319,7 @@ def fetch_insider_activity(ticker: str):
     a ticker with no transactions.
     """
 
-    def failure(code, detail):
+    def failure(code: str, detail: str) -> Dict[str, Any]:
         return {
             "status": STATUS_FAILED,
             "data": None,
@@ -325,10 +327,10 @@ def fetch_insider_activity(ticker: str):
             "error_detail": detail,
         }
 
-    if not has_api_key():
+    if not legacy_has_api_key():
         return failure(ERR_CREDENTIAL, "FINNHUB_API_KEY is not set in .env")
 
-    def request():
+    def request() -> requests.Response:
         # The key travels in a header, never the URL, so it cannot leak into
         # an exception message that ends up in error_detail.
         return requests.get(
@@ -348,7 +350,7 @@ def fetch_insider_activity(ticker: str):
         for attempt in range(1, RATE_LIMIT_RETRIES + 1):
             if resp.status_code != 429:
                 break
-            wait = rate_limit_wait(resp)
+            wait = legacy_rate_limit_wait(resp)
             logger.warning(
                 "insider_rate_limited wait_seconds=%s attempt=%d max_attempts=%d",
                 wait,
@@ -397,7 +399,9 @@ def fetch_insider_activity(ticker: str):
 # ─────────────────────────────────────────────────────────
 
 
-def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
+def parse_finnhub_buys(
+    ticker: str, raw: Any, bucket: str
+) -> Tuple[List[Dict[str, Any]], Optional[str], Optional[str]]:
     """
     Extracts open market PURCHASE transactions only.
 
@@ -425,7 +429,7 @@ def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
     if not isinstance(raw, dict) or not isinstance(raw.get("data"), list):
         return [], ERR_BAD_RESPONSE, "response has no `data` list"
 
-    buys = []
+    buys: List[Dict[str, Any]] = []
     cutoff = lookback_cutoff()
 
     try:
@@ -471,19 +475,22 @@ def parse_finnhub_buys(ticker: str, raw: dict, bucket: str):
 # ─────────────────────────────────────────────────────────
 
 
-def scan_tickers(tickers: list, bucket: str, label: str):
+def legacy_scan_tickers(
+    tickers: List[str], bucket: str, label: str
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """
     Loops through tickers checking each for insider buying.
     Returns (all_buys, outcomes) where outcomes carries one status record
     per ticker so a coverage gap is never mistaken for an absence of buying.
     """
-    all_buys = []
-    outcomes = []
+    all_buys: List[Dict[str, Any]] = []
+    outcomes: List[Dict[str, Any]] = []
     found = 0
     no_buys = 0
     failed = 0
     unsupported = 0
-    credential_failure = None  # set once the key turns out missing or rejected
+    # set once the key turns out missing or rejected
+    credential_failure: Optional[Dict[str, Any]] = None
 
     logger.info("insider_scan_started")
     logger.info("insider_scan_planned count=%d", len(tickers))
@@ -508,11 +515,11 @@ def scan_tickers(tickers: list, bucket: str, label: str):
 
         # A missing or rejected key fails every request the same way, so
         # stop calling the provider and mark the remaining tickers unknown.
-        result = credential_failure or fetch_insider_activity(ticker)
+        result = credential_failure or legacy_fetch_insider_activity(ticker)
         status = result["status"]
         code = result["error_code"]
         detail = result["error_detail"]
-        buys = []
+        buys: List[Dict[str, Any]] = []
 
         if status == STATUS_SUCCESS:
             buys, parse_code, parse_detail = parse_finnhub_buys(
@@ -574,12 +581,12 @@ def scan_tickers(tickers: list, bucket: str, label: str):
 # ─────────────────────────────────────────────────────────
 
 
-def analyze_insider_buys(all_buys: list):
+def legacy_analyze_insider_buys(all_buys: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Groups buys by ticker and calculates signal metrics.
     Multiple insiders buying same stock = cluster buy signal.
     """
-    ticker_summary = defaultdict(
+    ticker_summary: defaultdict[str, Dict[str, Any]] = defaultdict(
         lambda: {
             "ticker": "",
             "bucket": "",
@@ -612,7 +619,9 @@ def analyze_insider_buys(all_buys: list):
 # ─────────────────────────────────────────────────────────
 
 
-def build_coverage(outcomes: list, inputs: dict):
+def legacy_build_coverage(
+    outcomes: List[Dict[str, Any]], inputs: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
     """
     Summarizes what this run actually established.
 
@@ -635,7 +644,7 @@ def build_coverage(outcomes: list, inputs: dict):
     bad_inputs = [name for name, i in inputs.items() if i.get("error_code")]
 
     success_rate = (succeeded / checked) if checked else 0.0
-    errors = summarize_errors(outcomes)
+    errors = legacy_summarize_errors(outcomes)
 
     if checked == 0 or success_rate < MIN_USABLE_SUCCESS_RATE:
         run_status = STATUS_FAILED
@@ -671,7 +680,7 @@ def build_coverage(outcomes: list, inputs: dict):
     }
 
 
-def summarize_errors(outcomes: list):
+def legacy_summarize_errors(outcomes: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Groups failures by error code so a dev can tell WHY a run degraded
     without reading console scrollback: which cause, what to do about it
@@ -681,8 +690,8 @@ def summarize_errors(outcomes: list):
     since consensus.py treats a scanned ticker absent from it as genuinely
     having had no buys.
     """
-    groups = {}
-    tickers = []
+    groups: Dict[str, Dict[str, Any]] = {}
+    tickers: List[str] = []
 
     for o in outcomes:
         if o["status"] != STATUS_FAILED:
@@ -705,13 +714,15 @@ def summarize_errors(outcomes: list):
     return {"by_code": groups, "failed_tickers": tickers}
 
 
-def build_attempt(coverage: dict, outcomes: list, retained: bool):
+def legacy_build_attempt(
+    coverage: Dict[str, Any], outcomes: List[Dict[str, Any]], retained: bool
+) -> Dict[str, Any]:
     """
     One record of 'we tried to collect, here is what happened' — the
     human-readable diagnostic, so the ticker list is truncated here. The
     authoritative full list lives in coverage.failed_tickers.
     """
-    errors = summarize_errors(outcomes)
+    errors = legacy_summarize_errors(outcomes)
     errors.pop("failed_tickers")  # authoritative copy lives in coverage
     for group in errors["by_code"].values():
         listed = group["tickers"][:MAX_LISTED_FAILED_TICKERS]
@@ -732,7 +743,7 @@ def build_attempt(coverage: dict, outcomes: list, retained: bool):
     }
 
 
-def _write_json(path, payload):
+def _legacy_write_json(path: str | Path, payload: Any) -> None:
     """Atomic write — a crash mid-save must not leave a truncated file."""
     tmp = Path(f"{path}.tmp")
     with open(tmp, "w") as f:
@@ -740,7 +751,7 @@ def _write_json(path, payload):
     os.replace(tmp, path)
 
 
-def retain_previous_data(filename, attempt: dict):
+def legacy_retain_previous_data(filename: str | Path, attempt: Dict[str, Any]) -> bool:
     """
     A failed run establishes nothing, so it must not overwrite data a
     previous run did establish. Keep the existing payload and stamp the
@@ -748,7 +759,7 @@ def retain_previous_data(filename, attempt: dict):
 
     Returns True if existing data was preserved.
     """
-    previous = None
+    previous: Optional[Dict[str, Any]] = None
     if Path(filename).exists():
         try:
             with open(filename, "r") as f:
@@ -760,7 +771,7 @@ def retain_previous_data(filename, attempt: dict):
         # No good data to protect. Write a data-less record so consensus.py
         # sees an explicit failure rather than a missing file.
         attempt["retained_previous_data"] = False
-        _write_json(
+        _legacy_write_json(
             filename,
             {
                 "source": SOURCE_NAME,
@@ -774,7 +785,7 @@ def retain_previous_data(filename, attempt: dict):
         return False
 
     previous["last_attempt"] = attempt
-    _write_json(filename, previous)
+    _legacy_write_json(filename, previous)
     logger.warning(
         "Collection failed kept existing data from ( %s buys) and recorded the failed attempt",
         len(previous.get("transactions", [])),
@@ -782,9 +793,13 @@ def retain_previous_data(filename, attempt: dict):
     return True
 
 
-def save_to_json(
-    all_buys: list, summary: list, outcomes: list, inputs: dict, filename=None
-):
+def legacy_save_to_json(
+    all_buys: List[Dict[str, Any]],
+    summary: List[Dict[str, Any]],
+    outcomes: List[Dict[str, Any]],
+    inputs: Dict[str, Dict[str, Any]],
+    filename: Optional[str | Path] = None,
+) -> None:
     """
     Writes trades_insider.json — but only when this run actually collected
     something. On a failed run the previous file is preserved and the
@@ -795,10 +810,12 @@ def save_to_json(
         output_dir.mkdir(parents=True, exist_ok=True)
         filename = output_dir / "trades_insider.json"
 
-    coverage = build_coverage(outcomes, inputs)
+    coverage = legacy_build_coverage(outcomes, inputs)
 
     if coverage["run_status"] == STATUS_FAILED:
-        retain_previous_data(filename, build_attempt(coverage, outcomes, True))
+        legacy_retain_previous_data(
+            filename, legacy_build_attempt(coverage, outcomes, True)
+        )
         return
 
     popular = [s for s in summary if s["bucket"] == "popular_stable"]
@@ -826,7 +843,7 @@ def save_to_json(
             "absence may just mean we never got an answer."
         ),
         "coverage": coverage,
-        "last_attempt": build_attempt(coverage, outcomes, retained=False),
+        "last_attempt": legacy_build_attempt(coverage, outcomes, retained=False),
         "popular_stable": {
             "count": len(popular),
             "tickers": popular,
@@ -838,7 +855,7 @@ def save_to_json(
         "transactions": all_buys,
     }
 
-    _write_json(filename, output)
+    _legacy_write_json(filename, output)
 
     logger.info("Saved %s insider buys (run_status=)", len(all_buys))
 
@@ -848,7 +865,11 @@ def save_to_json(
 # ─────────────────────────────────────────────────────────
 
 
-def print_summary(summary: list, all_buys: list, coverage: dict):
+def legacy_print_summary(
+    summary: List[Dict[str, Any]],
+    all_buys: List[Dict[str, Any]],
+    coverage: Dict[str, Any],
+) -> None:
     logger.info(
         "insider_summary checked=%d no_buys=%d failed=%d skipped=%d buys=%d signals=%d",
         coverage["tickers_checked"],
@@ -865,28 +886,28 @@ def print_summary(summary: list, all_buys: list, coverage: dict):
 # ─────────────────────────────────────────────────────────
 
 
-def run():
+def legacy_run() -> List[Dict[str, Any]]:
     logger.info("Starting insider trades fetch...")
     logger.info("Reads from: trades_congress.json + ark_holdings.json")
     logger.info("insider_provider_finnhub")
-    if not has_api_key():
+    if not legacy_has_api_key():
         logger.info(
             "FINNHUB_API_KEY is not set in development/backend/.env no ticker can be checked"
         )
 
-    all_buys = []
-    outcomes = []
-    inputs = {}
+    all_buys: List[Dict[str, Any]] = []
+    outcomes: List[Dict[str, Any]] = []
+    inputs: Dict[str, Dict[str, Any]] = {}
 
     # ── BUCKET 1: Congress tickers ───────────────────────
-    congress_tickers, congress_error = load_congress_tickers()
+    congress_tickers, congress_error = legacy_load_congress_tickers()
     inputs["trades_congress.json"] = {
         "tickers_loaded": len(congress_tickers),
         "error_code": congress_error,
         "category": ERROR_CATEGORY.get(congress_error),
     }
     if congress_tickers:
-        stable_buys, stable_outcomes = scan_tickers(
+        stable_buys, stable_outcomes = legacy_scan_tickers(
             congress_tickers,
             bucket="popular_stable",
             label="BUCKET 1 — Popular & Stable",
@@ -895,7 +916,7 @@ def run():
         outcomes.extend(stable_outcomes)
 
     # ── BUCKET 2: ARK tickers ────────────────────────────
-    ark_tickers, ark_error = load_ark_tickers()
+    ark_tickers, ark_error = legacy_load_ark_tickers()
     inputs["ark_holdings.json"] = {
         "tickers_loaded": len(ark_tickers),
         "error_code": ark_error,
@@ -910,7 +931,7 @@ def run():
             len(ark_tickers) - len(unique_growth),
         )
 
-        growth_buys, growth_outcomes = scan_tickers(
+        growth_buys, growth_outcomes = legacy_scan_tickers(
             unique_growth,
             bucket="affordable_growing",
             label="BUCKET 2 — Affordable & Growing",
@@ -919,10 +940,10 @@ def run():
         outcomes.extend(growth_outcomes)
 
     # ── Analyze + Print + Save ───────────────────────────
-    summary = analyze_insider_buys(all_buys)
-    coverage = build_coverage(outcomes, inputs)
-    print_summary(summary, all_buys, coverage)
-    save_to_json(all_buys, summary, outcomes, inputs)
+    summary = legacy_analyze_insider_buys(all_buys)
+    coverage = legacy_build_coverage(outcomes, inputs)
+    legacy_print_summary(summary, all_buys, coverage)
+    legacy_save_to_json(all_buys, summary, outcomes, inputs)
 
     if coverage["run_status"] == STATUS_FAILED:
         logger.info("Done, but nothing was established this run.")
@@ -934,6 +955,10 @@ def run():
     return all_buys
 
 
+# scheduler/cron.py calls run() and cannot change; delete with cron.py (M7).
+run = legacy_run
+
+
 if __name__ == "__main__":
     configure_logging()
-    run()
+    legacy_run()

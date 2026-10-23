@@ -708,7 +708,7 @@ def test_legacy_fmp_run_matches_fab7188_golden_and_buy_count(
     monkeypatch.setattr(fmp, "LOCAL_DATA_DIR", tmp_path)
     inputs = legacy_golden["inputs"]
     monkeypatch.setattr(
-        fmp, "fetch_chamber_trades", lambda c: copy.deepcopy(inputs["fmp_" + c])
+        fmp, "legacy_fetch_chamber_trades", lambda c: copy.deepcopy(inputs["fmp_" + c])
     )
     fmp.run()
     path = tmp_path / "trades_congress.json"
@@ -726,8 +726,8 @@ def test_legacy_short_interest_run_keeps_malformed_ticker_like_fab7188(
     si = collectors._fetcher("short_interest")
     _freeze_golden_time(si, monkeypatch, legacy_golden)
     inputs = legacy_golden["inputs"]["short_interest"]
-    monkeypatch.setattr(si, "resolve_data_dir", lambda: tmp_path)
-    monkeypatch.setattr(si, "get_candidate_tickers", lambda: [inputs["ticker"]])
+    monkeypatch.setattr(si, "legacy_resolve_data_dir", lambda: tmp_path)
+    monkeypatch.setattr(si, "legacy_get_candidate_tickers", lambda: [inputs["ticker"]])
     monkeypatch.setattr(si.time, "sleep", NO_SLEEP)
 
     class Session:
@@ -798,8 +798,8 @@ def test_database_collectors_cannot_reach_legacy_dedup_or_lenient_parser(
     fmp = collectors._fetcher("fmp")
     si = collectors._fetcher("short_interest")
     _freeze_golden_time(fmp, monkeypatch, legacy_golden)
-    monkeypatch.setattr(fmp, "deduplicate", forbidden)
-    monkeypatch.setattr(si, "parse_short_interest", forbidden)
+    monkeypatch.setattr(fmp, "legacy_deduplicate", forbidden)
+    monkeypatch.setattr(si, "legacy_parse_short_interest", forbidden)
     congress = collectors.collect_congress(
         _golden_congress_session(legacy_golden), api_key="synthetic", sleep=NO_SLEEP
     )

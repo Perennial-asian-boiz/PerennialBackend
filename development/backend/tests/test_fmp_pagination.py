@@ -109,7 +109,7 @@ def test_legacy_fmp_fetches_all_pages_without_changing_small_outputs(
         return Response(records[page * 20 : (page + 1) * 20])
 
     monkeypatch.setattr(fmp.requests, "get", get)
-    actual = fmp.fetch_chamber_trades("senate", api_key="synthetic")
+    actual = fmp.legacy_fetch_chamber_trades("senate", api_key="synthetic")
     expected = [dict(record, _chamber="Senate") for record in records]
     assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
     expected_pages = count // 20 + 1 if count % 20 == 0 else ceil(count / 20)
@@ -144,5 +144,5 @@ def test_legacy_fmp_configured_page_cap_fails_instead_of_truncating(
 
     monkeypatch.setattr(fmp.requests, "get", get)
     with pytest.raises(RuntimeError, match="pagination exhausted"):
-        fmp.fetch_chamber_trades("senate", api_key="synthetic", max_pages=max_pages)
+        fmp.legacy_fetch_chamber_trades("senate", api_key="synthetic", max_pages=max_pages)
     assert pages == list(range(max_pages))

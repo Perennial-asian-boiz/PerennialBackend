@@ -17,7 +17,7 @@ import sys as _sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path as _Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 import requests
 
@@ -39,6 +39,7 @@ from paths import LOCAL_DATA_DIR, local_data_dir  # noqa: F401 -- legacy module 
 from src.utils.logger import configure_logging, log_exception
 
 if TYPE_CHECKING:
+    from pydantic import SecretStr
     from src.settings import ProviderSettings
 
 
@@ -60,9 +61,9 @@ MAX_PAGES = 50  # Safety cap per chamber; full final page is not a complete resu
 # ─────────────────────────────────────────────────────────
 
 
-def fetch_chamber_trades(
+def legacy_fetch_chamber_trades(
     chamber: str, *, api_key: str | None = None, max_pages: int | None = None
-):
+) -> List[Dict[str, Any]]:
     """
     Fetches trades for one chamber.
     chamber = "senate" or "house"
@@ -74,13 +75,12 @@ def fetch_chamber_trades(
     page_limit = MAX_PAGES if max_pages is None else max_pages
     if page_limit < 1:
         raise ValueError("FMP page limit must be positive")
-    all_trades = []
+    all_trades: List[Dict[str, Any]] = []
 
     for page in range(page_limit):
         try:
-            resp = requests.get(
-                endpoint, params={"page": page, "limit": 20, "apikey": key}, timeout=15
-            )
+            params: Dict[str, str | int] = {"page": page, "limit": 20, "apikey": key}
+            resp = requests.get(endpoint, params=params, timeout=15)
 
             if resp.status_code == 401:
                 logger.warning("congress_credential_rejected")
@@ -119,7 +119,7 @@ def fetch_chamber_trades(
 # ─────────────────────────────────────────────────────────
 
 
-def _provider_record_id(item):
+def _provider_record_id(item: Dict[str, Any]) -> Optional[str]:
     """A transaction identifier, never a filing URL (one filing can contain many trades)."""
     for key in ("transactionId", "transaction_id", "id"):
         value = item.get(key)
@@ -134,7 +134,7 @@ def _provider_record_id(item):
     return None
 
 
-def _text(item: dict, key: str) -> str:
+def _text(item: Dict[str, Any], key: str) -> str:
     """An optional FMP string: absent or null both become "" (stripped otherwise).
 
     FMP marks missing values with "" or null; the collector accepts both. ""
@@ -146,7 +146,9 @@ def _text(item: dict, key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
-def parse_trades(raw_data: list, *, preserve_provenance: bool = True):
+def parse_trades(
+    raw_data: List[Dict[str, Any]], *, preserve_provenance: bool = True
+) -> List[Dict[str, Any]]:
     """
     Cleans raw FMP response into structured dicts.
     Skips entries with no ticker symbol.
@@ -198,7 +200,7 @@ def parse_trades(raw_data: list, *, preserve_provenance: bool = True):
     return trades
 
 
-def deduplicate(trades: list):
+def legacy_deduplicate(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Removes repeated trades from the legacy JSON output.
     Key: politician + ticker + transaction_date + trade_type
@@ -222,7 +224,7 @@ def deduplicate(trades: list):
     return result
 
 
-def deduplicate_proven_repeats(trades: list):
+def deduplicate_proven_repeats(trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Remove proven repeats only: same provider transaction ID and same content.
 
@@ -255,7 +257,7 @@ def deduplicate_proven_repeats(trades: list):
     return result
 
 
-def filter_recent(trades: list, years: int = 2):
+def filter_recent(trades: List[Dict[str, Any]], years: int = 2) -> List[Dict[str, Any]]:
     """
     Filters trades to only include records within the last N years.
     Keeps signals fresh and relevant for Perennial users.
@@ -286,7 +288,7 @@ def filter_recent(trades: list, years: int = 2):
 # ─────────────────────────────────────────────────────────
 
 
-def analyze_trades(trades: list):
+def legacy_analyze_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Counts purchase mentions per ticker.
     This is the only signal Perennial needs from Congress data.
@@ -310,7 +312,9 @@ def analyze_trades(trades: list):
 # ─────────────────────────────────────────────────────────
 
 
-def save_to_json(trades: list, filename=None):
+def legacy_save_to_json(
+    trades: List[Dict[str, Any]], filename: Optional[str | _Path] = None
+) -> None:
     if filename is None:
         output_dir = LOCAL_DATA_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -333,7 +337,9 @@ def save_to_json(trades: list, filename=None):
 # ─────────────────────────────────────────────────────────
 
 
-def print_summary(trades: list, analysis: dict):
+def legacy_print_summary(
+    trades: List[Dict[str, Any]], analysis: Dict[str, Any]
+) -> None:
     logger.info(
         "congress_summary trades=%d purchases=%d sales=%d tickers=%d",
         analysis["total_trades"],
@@ -348,7 +354,9 @@ def print_summary(trades: list, analysis: dict):
 # ─────────────────────────────────────────────────────────
 
 
-def run(provider_settings: "ProviderSettings | None" = None):
+def legacy_run(
+    provider_settings: "ProviderSettings | None" = None,
+) -> Optional[List[Dict[str, Any]]]:
     # The compatibility branch is only for existing JSON callers that set the
     # module symbol themselves. Normal runs resolve settings at invocation.
     legacy_key = provider_settings is None and FMP_API_KEY is not None
@@ -360,18 +368,23 @@ def run(provider_settings: "ProviderSettings | None" = None):
 
             provider_settings = load_provider_settings()
         provider_settings.require_provider_keys("fmp")
-        key = provider_settings.fmp_api_key.get_secret_value()
+        # require_provider_keys has just rejected a missing key.
+        key = cast("SecretStr", provider_settings.fmp_api_key).get_secret_value()
     page_limit = getattr(provider_settings, "fmp_max_pages", MAX_PAGES)
 
     logger.info("Starting Congress trades fetch...")
 
     # Fetch both chambers
     if legacy_key:
-        fmp_senate = fetch_chamber_trades("senate")
-        fmp_house = fetch_chamber_trades("house")
+        fmp_senate = legacy_fetch_chamber_trades("senate")
+        fmp_house = legacy_fetch_chamber_trades("house")
     else:
-        fmp_senate = fetch_chamber_trades("senate", api_key=key, max_pages=page_limit)
-        fmp_house = fetch_chamber_trades("house", api_key=key, max_pages=page_limit)
+        fmp_senate = legacy_fetch_chamber_trades(
+            "senate", api_key=key, max_pages=page_limit
+        )
+        fmp_house = legacy_fetch_chamber_trades(
+            "house", api_key=key, max_pages=page_limit
+        )
 
     all_raw = fmp_senate + fmp_house
     logger.info("Total raw records: %s", len(all_raw))
@@ -380,24 +393,28 @@ def run(provider_settings: "ProviderSettings | None" = None):
     # provider transaction identity and provenance via the default parsers.
     fmp_trades = parse_trades(all_raw, preserve_provenance=False)
 
-    trades = deduplicate(fmp_trades)
+    trades = legacy_deduplicate(fmp_trades)
 
     # Filter to recent 2 years only
     trades = filter_recent(trades, years=2)
 
     if not trades:
         logger.info("No valid trades. Exiting.")
-        return
+        return None
 
     # Analyze + print + save
-    analysis = analyze_trades(trades)
-    print_summary(trades, analysis)
-    save_to_json(trades)
+    analysis = legacy_analyze_trades(trades)
+    legacy_print_summary(trades, analysis)
+    legacy_save_to_json(trades)
 
     logger.info("Done.")
     return trades
 
 
+# scheduler/cron.py calls run() and cannot change; delete with cron.py (M7).
+run = legacy_run
+
+
 if __name__ == "__main__":
     configure_logging()
-    run()
+    legacy_run()
