@@ -7,14 +7,13 @@ gdelt_spike_checks) are left untouched; nothing writes them after this change an
 a later contract migration drops them. Downgrade refuses while any run or batch
 of the new sources exists, so it can never orphan lineage.
 
-The revision id is a placeholder; the merge assigns the next number (0009 after
-M2's 0007 and M4's 0008) and re-chains down_revision.
+Numbered 0009 at merge, after M2's 0007 and M4's 0008.
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = 'gdelt_contract_v1'
-down_revision = '0007'
+revision = '0009'
+down_revision = '0008'
 branch_labels = None
 depends_on = None
 

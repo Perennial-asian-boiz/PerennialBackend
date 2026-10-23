@@ -6,6 +6,7 @@ spike rule runs as a derived run over the latest good volume batch. The 0005
 tables (gdelt_theme_days, gdelt_articles, gdelt_spike_checks) are no longer
 written; a later contract migration drops them.
 """
+
 import logging
 import sys
 from dataclasses import dataclass, field
@@ -13,10 +14,10 @@ from datetime import date, datetime, timezone
 
 import requests
 from sqlalchemy.engine import Engine
-
 from src.services.gdelt.client import DocApiClient
 from src.services.gdelt.contract import run_contract
 from src.services.gdelt.themes import ThemeMap, load_theme_map
+from src.utils.logger import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +54,13 @@ def run_gdelt(
             summary.succeeded.append(source)
         else:
             summary.failed[source] = result.error_code or "collection_failed"
-    logger.info("gdelt run day=%s ok=%d failed=%d events=%s", summary.day,
-                len(summary.succeeded), len(summary.failed), summary.events)
+    logger.info(
+        "gdelt run day=%s ok=%d failed=%d events=%s",
+        summary.day,
+        len(summary.succeeded),
+        len(summary.failed),
+        summary.events,
+    )
     return summary
 
 
@@ -77,14 +83,20 @@ def run_scheduled() -> None:
 def main() -> int:
     from src.db.session import make_engine
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    configure_logging()
     engine = make_engine()
     try:
         summary = run_gdelt(engine)
     finally:
         engine.dispose()
     # Sources and fixed codes only; any failed source fails the run.
-    print(f"day={summary.day} ok={summary.succeeded} failed={summary.failed} events={summary.events}")
+    logger.info(
+        "gdelt_complete day=%s succeeded=%s failed=%s events=%s",
+        summary.day,
+        summary.succeeded,
+        summary.failed,
+        summary.events,
+    )
     return 1 if summary.failed else 0
 
 
