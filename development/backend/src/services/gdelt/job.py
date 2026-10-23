@@ -2,9 +2,7 @@
 
 Through the ingestion contract (services/gdelt/contract.py): theme volume and
 evidence articles are collected as immutable batches with run lineage, then the
-spike rule runs as a derived run over the latest good volume batch. The 0005
-tables (gdelt_theme_days, gdelt_articles, gdelt_spike_checks) are no longer
-written; a later contract migration drops them.
+spike rule runs as a derived run over the latest good volume batch.
 """
 
 import logging

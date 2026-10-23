@@ -17,7 +17,7 @@ Since the GDELT contract rework (`docs/work-items/gdelt-contract-design-note.md`
 - **Partial runs:** any failed theme fails that source's batch, and readers keep the last good batch.
 - **Readers:** read the latest successful run of a source, as for the watchlist sources.
 - **Watchlist isolation:** GDELT is in `SUBJECTLESS_SOURCES`, not `WATCHLIST_SOURCES`, so it can never block or degrade the watchlist publication.
-- **Legacy tables:** the tables below (`gdelt_theme_days`, `gdelt_articles`, `gdelt_spike_checks`, migration `0005`) are **legacy**. Nothing writes them any more, and a later contract migration drops them.
+- **Legacy tables:** the tables described below (`gdelt_theme_days`, `gdelt_articles`, `gdelt_spike_checks`, migration `0005`) were **dropped** by the contract migration `gdelt_drop_legacy_v1` (design note PR 3). The sections below are kept as build history.
 
 ## What we built
 

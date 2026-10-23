@@ -18,8 +18,6 @@ IMMUTABLE = (
     "publication_market_caps",
 )
 MUTABLE = ("ingestion_runs", "current_publication")
-IMMUTABLE += ("gdelt_articles",)
-MUTABLE += ("gdelt_theme_days", "gdelt_spike_checks")
 # M4 identity. Aliases are append-only: root imports register canonical tickers.
 # Profiles are reviewed seed data written by the owner; the pipeline only reads them.
 IMMUTABLE += ("security_identifiers",)

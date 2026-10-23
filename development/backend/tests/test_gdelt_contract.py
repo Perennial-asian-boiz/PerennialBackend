@@ -326,6 +326,14 @@ def test_every_theme_empty_fails_instead_of_a_quiet_success(engine):
 
 
 @pytest.mark.db
+def test_legacy_0005_tables_are_dropped(engine):
+    """PR 3 contract step: only the contract tables hold GDELT data."""
+    with engine.connect() as conn:
+        for table in ("gdelt_theme_days", "gdelt_articles", "gdelt_spike_checks"):
+            assert conn.execute(
+                text("SELECT to_regclass(:name)"), {"name": f"perennial.{table}"}
+            ).scalar_one() is None
+
 def test_a_gdelt_run_does_not_mask_a_missed_watchlist_run(engine):
     """M3's missed-run monitor counts only watchlist sources (merge with #32)."""
     from src.pipeline.health import health
