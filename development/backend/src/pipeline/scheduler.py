@@ -1,6 +1,20 @@
-"""Supervised daily database pipeline. Run python -m src.pipeline.scheduler.
+"""Daily database pipeline entry points.
 
---test executes one complete LIVE run, not an offline test.
+Production (roadmap M3): a platform scheduler runs one job per invocation,
+
+    python -m src.pipeline.scheduler --once            # the database pipeline
+    python -m src.pipeline.scheduler --once --job gdelt
+
+at 09:00 America/Los_Angeles (pipeline) and 09:30 (GDELT) on trading days. The
+exit code is the success signal: 0 when the job completed, 1 otherwise,
+including when another run already holds the pipeline lock, so a skipped
+overlapping run alerts instead of passing as success. Missed runs and missed
+publications are reported by `cli health` (pipeline:missed_run,
+publication:missed).
+
+Without --once this starts the legacy supervised APScheduler daemon, kept until
+the platform scheduler is cut over. --test executes one complete LIVE run, not
+an offline test.
 
 Every stage uses the shared collectors and importer; publication occurs only
 when all required sources meet coverage, lineage and freshness rules. JSON-only
@@ -19,6 +33,7 @@ from src.ingestion.redaction import describe_exception
 from src.pipeline.runner import run_pipeline
 from src.services.gdelt.job import run_scheduled as run_gdelt_job
 from src.settings import Settings, load_settings
+from src.utils.logger import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +74,59 @@ def run_full_pipeline(settings: Settings | None = None) -> int | None:
     return None
 
 
+def run_once(job: str = "pipeline", settings: Settings | None = None) -> int:
+    """Run one scheduled job and return its process exit code."""
+    if job == "pipeline":
+        try:
+            publication_id = run_full_pipeline(settings)
+        except PipelineRunFailed:
+            return 1
+        logger.info(
+            "scheduled pipeline run published publication_id=%s", publication_id
+        )
+        return 0
+    if job == "gdelt":
+        return _run_gdelt_once(settings)
+    raise ValueError("unknown scheduled job")
+
+
+GDELT_INCOMPLETE = "gdelt_incomplete"
+
+
+def _run_gdelt_once(settings: Settings | None) -> int:
+    """Any failed theme fails the scheduled job; only counts and codes are logged."""
+    from src.services.gdelt.job import run_gdelt
+
+    engine = None
+    try:
+        engine = (
+            make_engine(settings.database_url.get_secret_value())
+            if settings is not None
+            else make_engine()
+        )
+        summary = run_gdelt(engine)
+    except Exception as exc:
+        logger.error("gdelt run failed: %s", describe_exception(exc))
+        return 1
+    finally:
+        if engine is not None:
+            try:
+                engine.dispose()
+            except Exception as exc:  # cleanup must not leak raw text (SEC-M3-01)
+                logger.error("engine dispose failed: %s", describe_exception(exc))
+    if summary.failed:
+        logger.error(
+            "gdelt run incomplete code=%s ok=%d failed=%d",
+            GDELT_INCOMPLETE,
+            len(summary.succeeded),
+            len(summary.failed),
+        )
+        return 1
+    return 0
+
+
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
+    configure_logging()
     settings = load_settings()
     job = partial(run_full_pipeline, settings)
     scheduler = BlockingScheduler(timezone="America/Los_Angeles")
@@ -97,7 +161,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if "--once" in sys.argv:
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="python -m src.pipeline.scheduler")
+        parser.add_argument("--once", action="store_true", required=True)
+        parser.add_argument("--job", choices=("pipeline", "gdelt"), default="pipeline")
+        args = parser.parse_args()  # exits 2 on a missing or unknown --job
+        logging.basicConfig(
+            level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+        )
+        sys.exit(run_once(args.job))
     if "--test" in sys.argv:
+        configure_logging()
         try:
             run_full_pipeline()
         except Exception:

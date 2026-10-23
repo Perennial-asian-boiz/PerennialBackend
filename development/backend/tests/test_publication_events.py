@@ -120,14 +120,19 @@ def test_publication_events_constraints(engine, fixture_path):
     for values in bad:
         with engine.begin() as conn, pytest.raises(IntegrityError):
             conn.execute(models.publication_events.insert().values(**values))
-    # Degraded markers and rollbacks may repeat.
+    # One degraded marker per publication (0007); rollbacks may repeat.
+    rollback = dict(base, kind="rollback", actor="synthetic-op", reason="synthetic rollback")
     with engine.begin() as conn:
+        conn.execute(models.publication_events.insert().values(**base, kind="degraded"))
         for _ in range(2):
-            conn.execute(models.publication_events.insert().values(**base, kind="degraded"))
+            conn.execute(models.publication_events.insert().values(**rollback))
+    with engine.begin() as conn, pytest.raises(IntegrityError):
+        conn.execute(models.publication_events.insert().values(**base, kind="degraded"))
     assert [e["kind"] for e in events(engine, pub)] == [
         "quality_passed",
         "degraded",
-        "degraded",
+        "rollback",
+        "rollback",
     ]
 
 

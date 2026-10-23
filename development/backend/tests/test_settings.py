@@ -23,7 +23,8 @@ def test_settings_hide_secrets_and_supply_source_quality_defaults(monkeypatch):
     assert "synthetic-provider-secret" not in repr(settings)
     assert settings.fmp_max_pages == 50
     assert settings.quality_thresholds["short_interest"].allow_equal_as_of
-    assert not settings.quality_thresholds["congress_trades"].allow_equal_as_of
+    assert settings.quality_thresholds["congress_trades"].allow_equal_as_of
+    assert settings.quality_thresholds["insider_trades"].allow_equal_as_of
 
 
 def test_missing_database_setting_names_field_without_value(monkeypatch):
@@ -128,3 +129,65 @@ def test_consensus_market_cap_receives_provider_key_explicitly():
             return type("Response", (), {"status_code": 200, "json": lambda self: [{"marketCap": 42}]})()
 
     assert consensus.fetch_market_cap("ZZAA", {}, session=Session(), api_key="synthetic") == 42
+
+
+def test_source_policy_defaults_follow_d7():
+    from datetime import timedelta
+
+    from src.settings import Settings
+
+    settings = Settings(database_url="postgresql+psycopg://u@127.0.0.1/x_test")
+    days = {
+        source: (p.max_reuse_age / timedelta(days=1), p.max_age / timedelta(days=1))
+        for source, p in settings.source_policies.items()
+    }
+    assert days == {
+        "congress_trades": (3, 3),
+        "ark_holdings": (3, 3),
+        "insider_trades": (3, 3),
+        "short_interest": (15, 45),
+    }
+    assert all(p.required for p in settings.source_policies.values())
+    assert settings.market_cap_max_reuse_age == timedelta(days=3)
+
+
+def test_source_policy_overrides_merge_and_are_validated(monkeypatch):
+    import pytest
+
+    from src.settings import SettingsError, load_settings
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://u@127.0.0.1/x_test")
+    monkeypatch.setenv(
+        "SOURCE_POLICIES",
+        '{"short_interest": {"max_reuse_age": "P10D", "max_age": "P45D"}}',
+    )
+    settings = load_settings(local_dev=False)
+    assert settings.source_policies["short_interest"].max_reuse_age.days == 10
+    assert settings.source_policies["congress_trades"].max_age.days == 3
+    for bad in (
+        '{"short_interest": {"max_reuse_age": "P50D", "max_age": "P45D"}}',
+        '{"short_interest": {"max_reuse_age": "PT0S", "max_age": "P45D"}}',
+        '{"insider_trades": {"required": false, "max_reuse_age": "P3D", "max_age": "P3D"}}',
+        '{"gdelt": {"max_reuse_age": "P1D", "max_age": "P1D"}}',
+    ):
+        monkeypatch.setenv("SOURCE_POLICIES", bad)
+        with pytest.raises(SettingsError) as caught:
+            load_settings(local_dev=False)
+        assert "SOURCE_POLICIES" in str(caught.value)
+
+
+def test_trading_holidays_cover_this_year_and_next():
+    """Fails once the NYSE list stops covering next year: extend it (M2 N3)."""
+    from datetime import date
+
+    from src.settings import TRADING_HOLIDAYS
+
+    covered = {d.year for d in TRADING_HOLIDAYS}
+    this_year = date.today().year
+    assert {this_year, this_year + 1} <= covered, (
+        "extend settings.TRADING_HOLIDAYS with the NYSE closures for "
+        f"{sorted({this_year, this_year + 1} - covered)}"
+    )
+    # A covered year is complete enough to include its January closures (MLK Day at least).
+    for year in covered:
+        assert any(d.year == year and d.month == 1 for d in TRADING_HOLIDAYS)
