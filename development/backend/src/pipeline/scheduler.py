@@ -33,6 +33,7 @@ from src.ingestion.redaction import describe_exception
 from src.pipeline.runner import run_pipeline
 from src.services.gdelt.job import run_scheduled as run_gdelt_job
 from src.settings import Settings, load_settings
+from src.utils.logger import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +126,7 @@ def _run_gdelt_once(settings: Settings | None) -> int:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-    )
+    configure_logging()
     settings = load_settings()
     job = partial(run_full_pipeline, settings)
     scheduler = BlockingScheduler(timezone="America/Los_Angeles")
@@ -174,6 +173,7 @@ if __name__ == "__main__":
         )
         sys.exit(run_once(args.job))
     if "--test" in sys.argv:
+        configure_logging()
         try:
             run_full_pipeline()
         except Exception:
