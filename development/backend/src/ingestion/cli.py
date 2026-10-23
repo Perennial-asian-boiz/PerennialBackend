@@ -20,7 +20,7 @@ import sys
 from dataclasses import asdict
 from typing import Any, List, Optional
 
-from src.db.models import SOURCES
+from src.db.models import SOURCES, WATCHLIST_SOURCES
 from src.db.queries import batch_rows, latest_successful_run
 from src.db.session import make_engine
 from src.ingestion.redaction import redact
@@ -84,6 +84,12 @@ def _parser() -> argparse.ArgumentParser:
         help="a failed check to override, as reported (repeatable; needs --override)",
     )
     manual.add_argument("--actor", help="operator identity for the override audit")
+    back = sub.add_parser(
+        "rollback", help="serve an earlier publication again, with an audited reason"
+    )
+    back.add_argument("--to", dest="to_publication_id", type=int, required=True)
+    back.add_argument("--reason", required=True, help="why production goes back")
+    back.add_argument("--actor", help="operator identity for the rollback audit")
     sub.add_parser("current", help="show the published watchlist")
     sub.add_parser("health", help="machine-readable health; exits 1 when unhealthy")
     replay = sub.add_parser(
@@ -159,7 +165,8 @@ def _execute(args: argparse.Namespace) -> int:
 
             with engine.connect() as conn:
                 latest = {
-                    source: latest_successful_run(conn, source) for source in SOURCES
+                    source: latest_successful_run(conn, source)
+                    for source in WATCHLIST_SOURCES
                 }
                 if any(run is None for run in latest.values()):
                     raise PublicationError("all sources need a successful batch")
@@ -192,6 +199,19 @@ def _execute(args: argparse.Namespace) -> int:
                         override_checks=args.override_checks,
                     )
                 }
+            )
+            return 0
+        if args.command == "rollback":
+            from src.pipeline.publication import rollback
+
+            previous = rollback(
+                engine,
+                args.to_publication_id,
+                actor=args.actor or getpass.getuser(),
+                reason=args.reason,
+            )
+            emit(
+                {"publication_id": args.to_publication_id, "rolled_back_from": previous}
             )
             return 0
         if args.command == "current":
@@ -269,13 +289,18 @@ def _execute(args: argparse.Namespace) -> int:
             OverrideInputError,
             PublicationInProgressError,
             PublicationQualityError,
+            RollbackError,
         )
+        from src.pipeline.runner import RequiredSourceUnavailableError
 
         if isinstance(exc, PublicationQualityError):
             emit({"error_code": exc.code, "checks": list(exc.checks)})
             return 1
-        if isinstance(exc, PublicationInProgressError):
+        if isinstance(exc, (PublicationInProgressError, RollbackError)):
             emit({"error_code": exc.code})
+            return 1
+        if isinstance(exc, RequiredSourceUnavailableError):
+            emit({"error_code": exc.code, "source": exc.source})
             return 1
         if isinstance(exc, OverrideInputError):
             log_exception(logger, exc.code, exc)

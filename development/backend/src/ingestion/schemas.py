@@ -257,13 +257,30 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-class SourceRecord(BaseModel):
-    """Base for one normalized fetcher record."""
+class ContractRecord(BaseModel):
+    """Base for one normalized record of any source in the ingestion contract."""
 
     model_config = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
 
     # Columns stored in the source table, in addition to batch/security ids.
     DB_COLUMNS: ClassVar[Tuple[str, ...]] = ()
+
+    def canonical(self) -> Dict[str, Any]:
+        """JSON-safe, deterministic representation used for hashing and the batch payload."""
+        return {
+            name: _json_value(getattr(self, name)) for name in type(self).model_fields
+        }
+
+    def db_values(self) -> Dict[str, Any]:
+        return {name: getattr(self, name) for name in self.DB_COLUMNS}
+
+
+class GlobalRecord(ContractRecord):
+    """A record not about one security (for example a GDELT theme-day): no ticker."""
+
+
+class SourceRecord(ContractRecord):
+    """Base for one normalized fetcher record about a single security."""
 
     ticker: Ticker
     exchange: Annotated[Optional[str], BeforeValidator(_text_validator(20))] = None
@@ -301,15 +318,6 @@ class SourceRecord(BaseModel):
         if not re.fullmatch(r"[A-Z]{3}", text):
             raise ValueError("currency must be a 3-letter code")
         return text
-
-    def canonical(self) -> Dict[str, Any]:
-        """JSON-safe, deterministic representation used for hashing and the batch payload."""
-        return {
-            name: _json_value(getattr(self, name)) for name in type(self).model_fields
-        }
-
-    def db_values(self) -> Dict[str, Any]:
-        return {name: getattr(self, name) for name in self.DB_COLUMNS}
 
 
 class CongressTrade(SourceRecord):
@@ -464,7 +472,7 @@ class ShortInterestRecord(SourceRecord):
         return v
 
 
-RECORD_MODELS: Dict[str, type[SourceRecord]] = {
+RECORD_MODELS: Dict[str, type[ContractRecord]] = {
     "congress_trades": CongressTrade,
     "ark_holdings": ArkHolding,
     "insider_trades": InsiderTrade,
