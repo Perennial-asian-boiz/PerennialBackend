@@ -90,6 +90,9 @@ _COUNT_KEYS = (
     "completed",
     "failed",
     "not_attempted",
+    "senate_rows_served",
+    "house_rows_served",
+    "fmp_calls",
 )
 
 _OWN_ERROR_TYPES = {"not_an_object", "duplicate_security", "conflicting_exchange"}

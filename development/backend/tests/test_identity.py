@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from src.db.models import (
     company_profiles,
     market_cap_observations,
+    metadata,
     securities,
     security_identifiers,
 )
@@ -65,8 +66,11 @@ def aliases(conn):
 def test_migration_gives_existing_securities_their_canonical_alias(migrated_engine):
     with migrated_engine.connect() as conn:
         cfg = alembic_config(conn)
+        # Downgrades refuse while Congress history exists, so start empty.
+        names = ", ".join(f"perennial.{t.name}" for t in metadata.sorted_tables)
+        conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
+        conn.commit()
         command.downgrade(cfg, "0006")
-        conn.execute(text("TRUNCATE perennial.securities RESTART IDENTITY CASCADE"))
         conn.execute(
             text(
                 "INSERT INTO perennial.securities (symbol, exchange) "

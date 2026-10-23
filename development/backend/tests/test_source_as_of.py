@@ -101,8 +101,10 @@ def test_congress_uses_latest_retained_disclosure():
         api_key="synthetic",
         sleep=lambda _: None,
     )
-    assert result.succeeded and len(result.records) == 4
-    assert result.source_as_of == day
+    # D13: trades of every age are stored, so a late disclosure of an old
+    # transaction is retained and advances the observation date.
+    assert result.succeeded and len(result.records) == 6
+    assert result.source_as_of == day + timedelta(days=1)
 
 
 def test_insider_uses_query_through_date_regardless_of_filings():
