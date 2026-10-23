@@ -1,16 +1,17 @@
 import argparse
-from src.utils.logger import create_logger
-from pathlib import Path
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
 import base64
 import binascii
-import trafilatura
 import json
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+import requests
+import trafilatura
+from bs4 import BeautifulSoup
+from src.utils.logger import configure_logging, create_logger, log_exception
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
-DATA_DIR = BACKEND_DIR/"data"
+DATA_DIR = BACKEND_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 URL_PREFIX = "https://www.bing.com/search"
 SEARCH_HEADERS = {
@@ -20,8 +21,9 @@ SEARCH_HEADERS = {
     )
 }
 
+
 def clean_url(href: str) -> str | None:
-    """ extract redirect link from Bing links """
+    """extract redirect link from Bing links"""
     if not href:
         return None
 
@@ -43,9 +45,7 @@ def clean_url(href: str) -> str | None:
         encoded_url += "=" * (-len(encoded_url) % 4)
 
         try:
-            href = base64.urlsafe_b64decode(
-                encoded_url
-            ).decode("UTF-8")
+            href = base64.urlsafe_b64decode(encoded_url).decode("UTF-8")
         except (binascii.Error, UnicodeDecodeError, ValueError):
             return None
 
@@ -60,8 +60,9 @@ def clean_url(href: str) -> str | None:
 
     return href
 
+
 def get_top_urls(phrase: str, logger):
-    """ return top 10 urls from Bing search engine for phrase """
+    """return top 10 urls from Bing search engine for phrase"""
     res = requests.get(
         URL_PREFIX,
         params={
@@ -74,7 +75,7 @@ def get_top_urls(phrase: str, logger):
         timeout=10,
     )
 
-    logger.info(f"Web Engine status code for \"{phrase}\": {res.status_code}")
+    logger.info("search_response status=%d", res.status_code)
     res.raise_for_status()
 
     soup = BeautifulSoup(res.text, "html.parser")
@@ -96,14 +97,15 @@ def get_top_urls(phrase: str, logger):
 
         seen.add(cleaned_url)
         results.append(cleaned_url)
-        logger.info(f"Added URL: {cleaned_url}")
+        logger.info("search_result_added")
 
         if len(results) >= 10:
             break
     return results
 
+
 def extract_content(url):
-    """ Use trafilature library to extract content from html from redirect links from Bing """
+    """Use trafilature library to extract content from html from redirect links from Bing"""
     response = requests.get(
         url,
         timeout=15,
@@ -124,46 +126,46 @@ def extract_content(url):
         favor_precision=True,
     )
 
+
 def handle_urls(url_list, filepath, logger):
-    """ given list of Urls clean, fetch and write data to JSON """
+    """given list of Urls clean, fetch and write data to JSON"""
     data = {}
     for url in url_list:
         try:
-            logger.info(f"extracted {url}")
+            logger.info("article_extraction_started")
             content = extract_content(url)
             data[url] = content
         except requests.HTTPError as error:
-            status = error.response.status_code if error.response else "unknown"
-            logger.warning(
-                f"Skipping URL after HTTP {status}: {url}"
-            )
+            log_exception(logger, "article_extraction_failed", error)
 
-    with open(filepath, 'w') as f:
-        json.dump(data, f, indent = 4)
+    with open(filepath, "w") as f:
+        json.dump(data, f, indent=4)
+
 
 def main():
-    """ main body of script to coordinate searches """
-    parser = argparse.ArgumentParser(description="Return top data from search results from a web engine given search term.")
-    parser.add_argument(
-        "phrase",
-        help="phrase to search for"
+    """main body of script to coordinate searches"""
+    parser = argparse.ArgumentParser(
+        description="Return top data from search results from a web engine given search term."
     )
+    parser.add_argument("phrase", help="phrase to search for")
     args = parser.parse_args()
     phrase = args.phrase
-    print(f"Searching for: {phrase}")
+    configure_logging()
 
     search_result_file = f"{DATA_DIR}/{phrase}_search_results.json"
-    
-    logger = create_logger(f"{phrase}_search.log")
+
+    logger = create_logger("search.log")
+    logger.info("search_started")
     url_list = get_top_urls(phrase, logger)
 
     if not url_list:
         logger.warning("No valid URLs found")
         return
-    
+
     handle_urls(url_list, search_result_file, logger)
-    
+
     return
+
 
 if __name__ == "__main__":
     main()

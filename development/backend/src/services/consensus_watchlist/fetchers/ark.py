@@ -34,20 +34,42 @@ UPGRADE PATH:
     GET https://financialmodelingprep.com/stable/company-screener
     params: marketCapLowerThan=5B, priceLowerThan=50
 """
-import requests
+
+import logging
+
 # ── shared path resolution (see paths.py) ──
 import sys as _sys
 from pathlib import Path as _Path
-_sys.path.insert(0, str(next(
-    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
-)))
-from paths import ENV_PATH, LOCAL_DATA_DIR, local_data_dir
 
+import requests
+
+_sys.path.insert(
+    0,
+    str(
+        next(
+            p
+            for p in _Path(__file__).resolve().parents
+            if p.name == "consensus_watchlist"
+        )
+    ),
+)
 import json
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 from collections import defaultdict
+from datetime import datetime, timezone
+
+# Support direct script execution as well as package imports.
+_sys.path.insert(
+    0, str(next(p for p in _Path(__file__).resolve().parents if p.name == "backend"))
+)
+from paths import (  # noqa: F401 -- legacy module exports
+    ENV_PATH,
+    LOCAL_DATA_DIR,
+    local_data_dir,
+)
+from src.utils.logger import configure_logging, log_exception
+
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────
 # CONFIG
@@ -70,40 +92,37 @@ REQUEST_DELAY = 0.5  # seconds between API calls
 # FETCH — Holdings for one ARK fund
 # ─────────────────────────────────────────────────────────
 
+
 def fetch_fund_holdings(symbol: str):
     """
     Fetches current holdings for one ARK ETF fund.
     Returns list of holding dicts or empty list on failure.
     """
     try:
-        resp = requests.get(
-            ARK_API_URL,
-            params={"symbol": symbol},
-            timeout=15
-        )
+        resp = requests.get(ARK_API_URL, params={"symbol": symbol}, timeout=15)
 
         if resp.status_code == 429:
-            print(f"[ark] ⚠️  Rate limited on {symbol} — waiting 5s")
+            logger.warning("ark_rate_limited wait_seconds=5")
             time.sleep(5)
             return []
         if resp.status_code != 200:
-            print(f"[ark] ⚠️  {symbol} returned {resp.status_code}")
+            logger.info("ark_response_rejected status=%d", resp.status_code)
             return []
 
         data = resp.json()
         holdings = data.get("holdings", [])
-        print(f"[ark] {symbol:<6} ({ARK_FUNDS[symbol]}) "
-              f"— {len(holdings)} holdings")
+        logger.info("ark_collected holdings=%d", len(holdings))
         return holdings
 
     except Exception as e:
-        print(f"[ark] ❌ {symbol} fetch failed: {e}")
+        log_exception(logger, "ark_fetch_fund_holdings_failed", e)
         return []
 
 
 # ─────────────────────────────────────────────────────────
 # PARSE — Combine holdings across all funds
 # ─────────────────────────────────────────────────────────
+
 
 def parse_holdings(all_raw: dict):
     """
@@ -114,16 +133,18 @@ def parse_holdings(all_raw: dict):
 
     Returns list of clean holding dicts.
     """
-    ticker_map = defaultdict(lambda: {
-        "ticker": "",
-        "company": "",
-        "funds": [],
-        "fund_count": 0,
-        "share_price": 0.0,
-        "total_weight": 0.0,
-        "bucket": "affordable_growing",
-        "data_source": "ark_etf",
-    })
+    ticker_map = defaultdict(
+        lambda: {
+            "ticker": "",
+            "company": "",
+            "funds": [],
+            "fund_count": 0,
+            "share_price": 0.0,
+            "total_weight": 0.0,
+            "bucket": "affordable_growing",
+            "data_source": "ark_etf",
+        }
+    )
 
     for symbol, holdings in all_raw.items():
         for h in holdings:
@@ -146,7 +167,7 @@ def parse_holdings(all_raw: dict):
     holdings_list = sorted(
         ticker_map.values(),
         key=lambda x: (x["fund_count"], x["total_weight"]),
-        reverse=True
+        reverse=True,
     )
 
     return holdings_list
@@ -155,6 +176,7 @@ def parse_holdings(all_raw: dict):
 # ─────────────────────────────────────────────────────────
 # SAVE
 # ─────────────────────────────────────────────────────────
+
 
 def save_to_json(holdings: list, filename=None):
     """
@@ -178,8 +200,7 @@ def save_to_json(holdings: list, filename=None):
         "multi_fund_tickers": len(multi_fund),
         "single_fund_tickers": len(single_fund),
         "note": (
-            "multi_fund_tickers appear in 2+ ARK funds = "
-            "stronger conviction signal"
+            "multi_fund_tickers appear in 2+ ARK funds = stronger conviction signal"
         ),
         "holdings": holdings,
     }
@@ -187,48 +208,26 @@ def save_to_json(holdings: list, filename=None):
     with open(filename, "w") as f:
         json.dump(output, f, indent=2)
 
-    print(f"[ark] 💾 Saved {len(holdings)} tickers → {filename}")
+    logger.info("ark_saved records=%d", len(holdings))
 
 
 # ─────────────────────────────────────────────────────────
 # PRINT
 # ─────────────────────────────────────────────────────────
 
+
 def print_summary(holdings: list):
-    multi_fund = [h for h in holdings if h["fund_count"] > 1]
-    single_fund = [h for h in holdings if h["fund_count"] == 1]
-
-    print("\n" + "=" * 60)
-    print("  PERENNIAL — ARK ETF Holdings Summary")
-    print("=" * 60)
-    print(f"  Total unique tickers  : {len(holdings)}")
-    print(f"  In multiple ARK funds : {len(multi_fund)} "
-          f"← stronger conviction")
-    print(f"  In single ARK fund    : {len(single_fund)}")
-
-    if multi_fund:
-        print("\n  🚀 Multi-fund tickers (highest ARK conviction):")
-        print("  " + "-" * 40)
-        for h in multi_fund[:15]:
-            funds_str = ", ".join(h["funds"])
-            price_str = f"${h['share_price']:.2f}" \
-                if h["share_price"] else "N/A"
-            print(f"  {h['ticker']:<8} {price_str:<10} "
-                  f"[{funds_str}]  {h['company'][:30]}")
-
-    print("\n  📋 All tickers (first 20):")
-    print("  " + "-" * 40)
-    for h in holdings[:20]:
-        price_str = f"${h['share_price']:.2f}" \
-            if h["share_price"] else "N/A"
-        print(f"  {h['ticker']:<8} {price_str:<10} "
-              f"{len(h['funds'])} fund(s)  {h['company'][:30]}")
-    print()
+    logger.info(
+        "ark_summary holdings=%d multi_fund=%d",
+        len(holdings),
+        sum(1 for h in holdings if h["fund_count"] > 1),
+    )
 
 
 # ─────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────
+
 
 def run():
     """
@@ -236,8 +235,8 @@ def run():
     Can also be run manually: py ark.py
     Runs BEFORE insider.py which reads this output.
     """
-    print("[ark] Starting ARK ETF holdings fetch...")
-    print(f"[ark] Funds: {', '.join(ARK_FUNDS.keys())}\n")
+    logger.info("Starting ARK ETF holdings fetch...")
+    logger.info("ark_funds_planned")
 
     # Fetch all funds
     all_raw = {}
@@ -248,14 +247,14 @@ def run():
         time.sleep(REQUEST_DELAY)
 
     if not all_raw:
-        print("[ark] ❌ No data returned from any ARK fund")
+        logger.warning("No data returned from any ARK fund")
         return []
 
-    print(f"\n[ark] Parsing and merging holdings...")
+    logger.info("Parsing and merging holdings...")
 
     # Parse and merge
     holdings = parse_holdings(all_raw)
-    print(f"[ark] {len(holdings)} unique tickers across all funds")
+    logger.info("%s unique tickers across all funds", len(holdings))
 
     # Print summary
     print_summary(holdings)
@@ -263,9 +262,10 @@ def run():
     # Save
     save_to_json(holdings)
 
-    print("[ark] ✅ Done. ark_holdings.json ready for insider.py")
+    logger.info("Done. ark_holdings.json ready for insider.py")
     return holdings
 
 
 if __name__ == "__main__":
+    configure_logging()
     run()

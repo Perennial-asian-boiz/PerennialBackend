@@ -37,6 +37,25 @@ snapshots, publication inputs and publication outputs are immutable for the
 runtime role; only run state, the current pointer and security metadata may be
 updated. Readers only need `SELECT`. See [operations](../../docs/technical-specs/OPERATIONS.md).
 
+### Security identity (M4)
+
+Imports resolve tickers through `security_identifiers` (canonical tickers plus
+provider spellings such as `FINNHUB:BRK-B`). Congress and ARK define the
+universe, so a plain ticker they report with no alias registers a new security
+and its canonical alias; the run's diagnostics count `securities_registered`.
+Insider and short-interest imports only look up: an unknown or inactive ticker
+fails the run with `unresolved_security`. After migrating and granting, apply
+the reviewed seeds (share-class aliases, issuer profiles) and backfill profile
+sector/industry, as the owner:
+
+```bash
+OPS_DATABASE_URL=... python development/database/ops/seed_identity.py
+```
+
+It runs in one transaction, prints counts only, is idempotent, and refuses
+(rolling back) when the manifest disagrees with stored identity. Additions to
+`seeds/identity.json` need Bryan's approval.
+
 ## Importing
 
 Run from `development/backend`. Exit code 0 means the import succeeded, 1

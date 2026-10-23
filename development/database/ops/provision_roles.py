@@ -18,7 +18,11 @@ IMMUTABLE = (
     "publication_market_caps",
 )
 MUTABLE = ("ingestion_runs", "current_publication")
-TABLES = (*IMMUTABLE, *MUTABLE, "securities")
+# M4 identity. Aliases are append-only: root imports register canonical tickers.
+# Profiles are reviewed seed data written by the owner; the pipeline only reads them.
+IMMUTABLE += ("security_identifiers",)
+REFERENCE = ("company_profiles",)
+TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 
 
 def provision(conn, roles, *, phase):
@@ -80,7 +84,9 @@ def provision(conn, roles, *, phase):
         # Table REVOKE leaves any old column grants intact, so remove those explicitly too.
         conn.execute(sql.SQL("REVOKE ALL ({}) ON TABLE {} FROM PUBLIC, {}, {}")
                      .format(sql.SQL(", ").join(columns), ident, sql.Identifier(importer), sql.Identifier(reader)))
-        conn.execute(sql.SQL("GRANT SELECT, INSERT ON TABLE {} TO {}").format(ident, sql.Identifier(importer)))
+        importer_privileges = "SELECT" if table in REFERENCE else "SELECT, INSERT"
+        conn.execute(sql.SQL("GRANT {} ON TABLE {} TO {}")
+                     .format(sql.SQL(importer_privileges), ident, sql.Identifier(importer)))
         conn.execute(sql.SQL("GRANT SELECT ON TABLE {} TO {}").format(ident, sql.Identifier(reader)))
         if table in MUTABLE:
             conn.execute(sql.SQL("GRANT UPDATE ON TABLE {} TO {}").format(ident, sql.Identifier(importer)))

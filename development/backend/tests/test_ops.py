@@ -125,6 +125,23 @@ def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
                                         {"role": importer, "table": "perennial." + table}).scalar()
             assert conn.execute(text("SELECT has_table_privilege(:role,'perennial.current_publication','UPDATE')"),
                                 {"role": importer}).scalar()
+            # M4: aliases are append-only for imports; profiles are owner-seeded reference data.
+            privilege = "SELECT has_table_privilege(:role,:table,:privilege)"
+            for role, table, priv, allowed in (
+                (importer, "security_identifiers", "INSERT", True),
+                (importer, "security_identifiers", "UPDATE", False),
+                (importer, "security_identifiers", "DELETE", False),
+                (importer, "company_profiles", "SELECT", True),
+                (importer, "company_profiles", "INSERT", False),
+                (importer, "company_profiles", "UPDATE", False),
+                (reader, "security_identifiers", "SELECT", True),
+                (reader, "company_profiles", "SELECT", True),
+                (reader, "security_identifiers", "INSERT", False),
+            ):
+                assert conn.execute(text(privilege), {"role": role, "table": "perennial." + table,
+                                                      "privilege": priv}).scalar() is allowed
+            assert not conn.execute(text("SELECT has_column_privilege(:role,'perennial.securities',"
+                                         "'company_profile_id','UPDATE')"), {"role": importer}).scalar()
         with engine.begin() as conn:
             conn.execute(text(f'SET LOCAL ROLE "{owner}"'))
             conn.execute(text("CREATE TABLE perennial.future_table (id bigint GENERATED ALWAYS AS IDENTITY)"))

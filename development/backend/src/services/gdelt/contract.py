@@ -31,10 +31,15 @@ from src.ingestion.schemas import GdeltThemeArticle
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
 from src.services.gdelt.client import DocApiClient, GdeltError
 from src.services.gdelt.themes import ThemeMap
+from src.utils.logger import log_exception
 
 logger = logging.getLogger(__name__)
 
-VOLUME, ARTICLES, SPIKES = "gdelt_theme_volume", "gdelt_theme_articles", "gdelt_spike_results"
+VOLUME, ARTICLES, SPIKES = (
+    "gdelt_theme_volume",
+    "gdelt_theme_articles",
+    "gdelt_spike_results",
+)
 WINDOW_DAYS = 90
 EVIDENCE_PER_DAY = 5
 UNIT_KIND = "GDELT themes"
@@ -79,7 +84,9 @@ class SpikeRule:
         baseline = float(median(observed))
         result["baseline_median"] = round(baseline, 2)
         result["ratio"] = round(count / baseline, 2) if baseline > 0 else None
-        result["is_spike"] = count >= self.min_articles and count >= self.ratio * baseline
+        result["is_spike"] = (
+            count >= self.min_articles and count >= self.ratio * baseline
+        )
         return result
 
 
@@ -94,6 +101,7 @@ class _Themes:
 
     def fail(self, theme: str, exc: GdeltError) -> None:
         self.failures.append({"unit": theme, "code": failure_code(str(exc))})
+        log_exception(logger, "gdelt_theme_failed", exc)  # class name only
 
     def failed_outcome(self, source: str) -> CollectionOutcome | None:
         if not self.failures:
@@ -235,7 +243,9 @@ def derive_spikes(engine: Engine, rule: SpikeRule = SpikeRule()) -> ImportResult
         run_id = begin_run(engine, SPIKES, "derived", dependencies=dependencies)
         with heartbeat_worker(engine, run_id):
             if latest is None or latest.source_as_of is None:
-                outcome = CollectionOutcome.failure(SPIKES, "derived", "missing_upstream")
+                outcome = CollectionOutcome.failure(
+                    SPIKES, "derived", "missing_upstream"
+                )
                 return import_collection(engine, outcome, run_id=run_id)
             day = latest.source_as_of
             with engine.connect() as conn:
@@ -269,7 +279,9 @@ class ContractRun:
 
     @property
     def succeeded(self) -> bool:
-        return len(self.results) == 3 and all(r.succeeded for r in self.results.values())
+        return len(self.results) == 3 and all(
+            r.succeeded for r in self.results.values()
+        )
 
 
 def run_contract(

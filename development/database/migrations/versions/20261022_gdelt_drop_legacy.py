@@ -1,6 +1,6 @@
 """Contract step: drop the pre-contract GDELT tables from 0005.
 
-GDELT design note PR 3. Since gdelt_contract_v1 nothing writes
+GDELT design note PR 3. Since 0009 nothing writes
 gdelt_theme_days, gdelt_articles or gdelt_spike_checks and nothing reads them;
 the contract tables hold GDELT data. Run this only after the contract change
 has been released for one cycle (expand, then contract). The downgrade
@@ -13,7 +13,7 @@ from alembic import op
 import sqlalchemy as sa
 
 revision = 'gdelt_drop_legacy_v1'
-down_revision = 'gdelt_contract_v1'
+down_revision = '0009'
 branch_labels = None
 depends_on = None
 
