@@ -32,7 +32,7 @@ from datetime import date
 from typing import Any, Dict, List, Optional, Sequence
 
 from src.ingestion.envelope import sanitize_envelope
-from src.ingestion.schemas import SourceRecord
+from src.ingestion.schemas import ContractRecord
 
 HASH_VERSION = "v2"
 
@@ -45,13 +45,13 @@ def _dumps(value: Any) -> str:
 class CanonicalBatch:
     source: str
     content_hash: str
-    records: List[SourceRecord]  # in canonical order; row_number = index + 1
+    records: List[ContractRecord]  # in canonical order; row_number = index + 1
     payload: Dict[str, Any]
 
 
 def canonicalize(
     source: str,
-    records: Sequence[SourceRecord],
+    records: Sequence[ContractRecord],
     source_as_of: Optional[date] = None,
     envelope: Optional[Dict[str, Any]] = None,
 ) -> CanonicalBatch:

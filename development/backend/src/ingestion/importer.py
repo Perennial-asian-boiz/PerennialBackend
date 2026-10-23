@@ -8,8 +8,10 @@ Flow for one call:
   2. Records are validated. Any invalid record fails the whole import.
   3. Records are canonicalized and hashed (src/ingestion/canonical.py).
   4. One transaction inserts the batch (or finds the identical existing one),
-     resolves securities, inserts source rows for a new batch, and records the
-     succeeded run. Any error rolls all of it back.
+     resolves securities through stored aliases (src/ingestion/identity.py),
+     inserts source rows for a new batch, and records the succeeded run. Any
+     error rolls all of it back. Root sources register unknown plain tickers;
+     other sources fail with unresolved_security.
   5. After a rollback, the failed run is recorded in its own transaction.
 
 Concurrent identical imports: the batch insert uses ON CONFLICT DO NOTHING on
@@ -31,13 +33,14 @@ Failed-input diagnostics and retention policy:
     Succeeded runs keep only collection counters, which are not input data.
 """
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from pydantic import ValidationError
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
@@ -49,6 +52,7 @@ from src.db.models import (
     SOURCES,
     ingestion_runs,
     securities,
+    security_identifiers,
     source_batches,
 )
 from src.ingestion.canonical import HASH_VERSION, CanonicalBatch, canonicalize
@@ -59,7 +63,13 @@ from src.ingestion.diagnostics import (
     safe_code,
     safe_diagnostics,
 )
-from src.ingestion.schemas import ONE_ROW_PER_SECURITY, RECORD_MODELS, SourceRecord
+from src.ingestion.identity import ALIAS_COLLISION, UNRESOLVED, resolve_tickers
+from src.ingestion.schemas import (
+    ONE_ROW_PER_SECURITY,
+    RECORD_MODELS,
+    ContractRecord,
+    SourceRecord,
+)
 from src.pipeline.lifecycle import (
     RunIdentityError,
     RunInactive,
@@ -78,6 +88,9 @@ def safe_coverage(value: Any) -> Optional[Dict[str, Any]]:
 
 
 MAX_RECORDS = 50_000
+# Sources whose tickers define the collection universe; see _register_roots.
+ROOT_SOURCES = frozenset({"congress_trades", "ark_holdings"})
+_PUNCTUATION = re.compile(r"[./-]")
 DIAGNOSTICS_KEEP_PER_SOURCE = 20
 DIAGNOSTICS_MAX_AGE_DAYS = 30
 RETRYABLE_SQLSTATES = frozenset({"40001", "40P01"})
@@ -165,7 +178,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
+def validate_records(source: str, raw_records: Any) -> List[ContractRecord]:
     """Validate every record; raise ImportFailure describing (without values) what failed."""
     if not isinstance(raw_records, list):
         raise ImportFailure("malformed_input")
@@ -173,7 +186,7 @@ def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
         raise ImportFailure("input_too_large", {"input_count": len(raw_records)})
     model = RECORD_MODELS[source]
     found = _Errors()
-    parsed: List[SourceRecord] = []
+    parsed: List[ContractRecord] = []
     exchanges: Dict[str, str] = {}
     seen: set[str] = set()
     for index, raw in enumerate(raw_records):
@@ -188,6 +201,9 @@ def validate_records(source: str, raw_records: Any) -> List[SourceRecord]:
             ):
                 loc = ".".join(str(part) for part in err.get("loc", ()))
                 found.add(index, loc, err.get("type", "invalid"))
+            continue
+        if not isinstance(record, SourceRecord):
+            parsed.append(record)
             continue
         if source in ONE_ROW_PER_SECURITY:
             if record.ticker in seen:
@@ -219,9 +235,74 @@ def _conflict(symbol: str, column: str) -> ImportFailure:
     )
 
 
-def _resolve_securities(
-    conn: Connection, records: Sequence[SourceRecord]
+def _register_roots(
+    conn: Connection,
+    source: str,
+    tickers: Sequence[str],
+    wanted: Dict[str, Dict[str, Optional[str]]],
 ) -> Dict[str, int]:
+    """
+    Root sources (Congress, ARK) define the universe, so a plain ticker with no
+    alias becomes a new security plus its canonical alias. Counted, not silent.
+    """
+    if source not in ROOT_SOURCES or not tickers:
+        return {}
+    # A spelling that differs from a stored canonical ticker only by [./-]
+    # (BRKB vs BRK.B) is far likelier an alias than a new listing: fail so it
+    # is seeded, instead of guessing either way.
+    stripped = {t: _PUNCTUATION.sub("", t) for t in tickers}
+    taken = set(
+        conn.execute(
+            select(
+                func.regexp_replace(security_identifiers.c.value, "[./-]", "", "g")
+            ).where(
+                security_identifiers.c.scheme == "ticker",
+                func.strpos(security_identifiers.c.value, ":") == 0,
+                func.regexp_replace(security_identifiers.c.value, "[./-]", "", "g").in_(
+                    set(stripped.values())
+                ),
+            )
+        ).scalars()
+    )
+    collisions = [(t, ALIAS_COLLISION) for t in tickers if stripped[t] in taken]
+    if collisions:
+        raise _unresolved(collisions)
+    conn.execute(
+        pg_insert(securities)
+        .values([{"symbol": t, **wanted[t]} for t in tickers])
+        .on_conflict_do_nothing(index_elements=["symbol"])
+    )
+    rows = conn.execute(
+        select(securities.c.symbol, securities.c.id).where(
+            securities.c.symbol.in_(tickers)
+        )
+    ).all()
+    ids = {row.symbol: row.id for row in rows}
+    conn.execute(
+        pg_insert(security_identifiers)
+        .values(
+            [{"scheme": "ticker", "value": t, "security_id": ids[t]} for t in tickers]
+        )
+        .on_conflict_do_nothing(index_elements=["scheme", "value"])
+    )
+    # A concurrent import may have bound the alias first; trust the stored owner.
+    resolved, failures = resolve_tickers(conn, source, tickers)
+    if failures:
+        raise _unresolved(failures)
+    return resolved
+
+
+def _unresolved(failures: Sequence[tuple[str, str]]) -> ImportFailure:
+    return ImportFailure(
+        "unresolved_security",
+        {"failures": [{"unit": t, "code": code} for t, code in failures]},
+    )
+
+
+def _resolve_securities(
+    conn: Connection, source: str, records: Sequence[SourceRecord]
+) -> tuple[Dict[str, int], int]:
+    """Ticker -> security id through stored aliases; returns (ids, registered count)."""
     wanted: Dict[str, Dict[str, Optional[str]]] = {}
     for r in records:
         entry = wanted.setdefault(r.ticker, {"exchange": None, "currency": None})
@@ -231,13 +312,41 @@ def _resolve_securities(
                 raise _conflict(r.ticker, "currency")
             entry["currency"] = r.currency
     if not wanted:
-        return {}
-    symbols = sorted(wanted)  # consistent lock order across concurrent imports
-    conn.execute(
-        pg_insert(securities)
-        .values([{"symbol": s, **wanted[s]} for s in symbols])
-        .on_conflict_do_nothing(index_elements=["symbol"])
-    )
+        return {}, 0
+    ids, failures = resolve_tickers(conn, source, wanted)
+    unknown = [t for t, code in failures if code == UNRESOLVED]
+    if failures and (source not in ROOT_SOURCES or len(unknown) < len(failures)):
+        raise _unresolved(failures)
+    registered = _register_roots(conn, source, unknown, wanted)
+    ids.update(registered)
+
+    # Several spellings may name one security; merge what they say about it.
+    by_security: Dict[int, Dict[str, Optional[str]]] = {}
+    spellings: Dict[int, List[str]] = {}
+    for ticker in sorted(wanted):
+        security_id = ids[ticker]
+        spellings.setdefault(security_id, []).append(ticker)
+        merged = by_security.setdefault(
+            security_id, {"exchange": None, "currency": None}
+        )
+        for column in ("exchange", "currency"):
+            new = wanted[ticker][column]
+            if new and merged[column] and new != merged[column]:
+                raise _conflict(ticker, column)
+            merged[column] = merged[column] or new
+    if source in ONE_ROW_PER_SECURITY:
+        collisions = [
+            t for names in spellings.values() if len(names) > 1 for t in names
+        ]
+        if collisions:
+            raise ImportFailure(
+                "security_conflict",
+                {
+                    "failures": [
+                        {"unit": t, "code": ALIAS_COLLISION} for t in collisions
+                    ]
+                },
+            )
     rows = conn.execute(
         select(
             securities.c.id,
@@ -245,33 +354,31 @@ def _resolve_securities(
             securities.c.exchange,
             securities.c.currency,
         )
-        .where(securities.c.symbol.in_(symbols))
-        .order_by(securities.c.symbol)
+        .where(securities.c.id.in_(by_security))
+        .order_by(securities.c.id)  # consistent lock order across concurrent imports
         .with_for_update()
     ).all()
-    ids: Dict[str, int] = {}
     for row in rows:
-        want = wanted[row.symbol]
+        want = by_security[row.id]
         changes = {}
         for column in ("exchange", "currency"):
             new, existing = want[column], getattr(row, column)
             if new and existing and new != existing:
-                raise _conflict(row.symbol, column)
+                raise _conflict(spellings[row.id][0], column)
             if new and not existing:
                 changes[column] = new
         if changes:
             conn.execute(
                 update(securities).where(securities.c.id == row.id).values(**changes)
             )
-        ids[row.symbol] = row.id
-    if set(symbols) - set(ids):
+    if len(rows) != len(by_security):
         raise RuntimeError("securities could not be resolved")
-    return ids
+    return ids, len(registered)
 
 
 def _write_batch(
     conn: Connection, batch: CanonicalBatch, source_as_of: Optional[date]
-) -> tuple[int, bool]:
+) -> tuple[int, bool, int]:
     batch_id = conn.execute(
         pg_insert(source_batches)
         .values(
@@ -292,22 +399,27 @@ def _write_batch(
                 source_batches.c.content_hash == batch.content_hash,
             )
         ).scalar_one()
-        return existing, True
+        return existing, True, 0
 
-    security_ids = _resolve_securities(conn, batch.records)
+    # Subject-less sources (SUBJECTLESS_SOURCES) never touch securities.
+    subjects = [r for r in batch.records if isinstance(r, SourceRecord)]
+    security_ids, registered = (
+        _resolve_securities(conn, batch.source, subjects) if subjects else ({}, 0)
+    )
     table = SOURCE_TABLES[batch.source]
     has_row_number = "row_number" in table.c
     rows = []
     for position, record in enumerate(batch.records, start=1):
         values = record.db_values()
         values["batch_id"] = batch_id
-        values["security_id"] = security_ids[record.ticker]
+        if isinstance(record, SourceRecord):
+            values["security_id"] = security_ids[record.ticker]
         if has_row_number:
             values["row_number"] = position
         rows.append(values)
     if rows:
         conn.execute(insert(table), rows)
-    return batch_id, False
+    return batch_id, False, registered
 
 
 def _inactive_result(outcome: CollectionOutcome, run_id: int) -> ImportResult:
@@ -463,7 +575,12 @@ def import_collection(
         try:
             with engine.begin() as conn:
                 require_active(conn, run_id, outcome.source, outcome.mode)
-                batch_id, reused = _write_batch(conn, batch, outcome.source_as_of)
+                batch_id, reused, registered = _write_batch(
+                    conn, batch, outcome.source_as_of
+                )
+                diagnostics = dict(outcome.diagnostics or {})
+                if registered:
+                    diagnostics["securities_registered"] = registered
                 if _after_batch_write_hook is not None:
                     _after_batch_write_hook(conn)
                 conn.execute(
@@ -480,7 +597,7 @@ def import_collection(
                         batch_id=batch_id,
                         reused_batch=reused,
                         hash_version=HASH_VERSION,
-                        diagnostics=safe_diagnostics(outcome.diagnostics),
+                        diagnostics=safe_diagnostics(diagnostics),
                         collected_at=collected_at,
                         heartbeat_at=_now(),
                         coverage=safe_coverage(outcome.coverage),
