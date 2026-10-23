@@ -1133,3 +1133,27 @@ def test_an_unknown_collection_mode_fails_closed_without_fetching(mode):
     outcome = collect(adapter, upstream=upstream(holdings=["ZZAA"]), record_mode="fixture")
     assert not outcome.succeeded and outcome.error_code == "fixture_adapter_not_allowed"
     assert adapter.calls == []
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("char", ["\x00", "\x1b", "\x7f", "​"], ids=["NUL", "ESC", "DEL", "ZWSP"])
+@pytest.mark.parametrize("field", ["sector", "industry"])
+def test_labels_with_control_or_format_characters_become_null(engine, field, char):
+    """Auditor note 1: a Unicode "C" character makes a label invalid, so it is NULL.
+
+    NUL used to reach the database and fail the whole run (22P05).
+    """
+    from src.ingestion.market_caps import collect
+
+    seed(engine, "ZZAA", "ZZBB")
+    adapter = StubAdapter({
+        "ZZAA": quote(**{field: f"Tech{char}nology"}),
+        "ZZBB": quote(),  # a clean label in the same batch is kept
+    })
+    result = import_collection(
+        engine, collect(adapter, upstream=upstream(holdings=["ZZAA", "ZZBB"]))
+    )
+    assert result.succeeded, result.error_code
+    rows = stored_caps(engine)
+    assert rows["ZZAA"][field] is None
+    assert rows["ZZBB"][field] == quote().__getattribute__(field)
