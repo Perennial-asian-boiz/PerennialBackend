@@ -1,8 +1,10 @@
 # Production pipeline operations
 
 This runbook describes deployment requirements and the repository tooling. It
-does not record a completed cloud deployment, configured PITR, or approved
-recovery objectives. Each environment needs an accountable deployment owner.
+does not record a completed cloud deployment or a successful recovery drill.
+Bryan approved D6 targets and D14 free-tier operation on 2026-10-21; the M3
+preparation below describes work to configure and prove, not deployed controls.
+Each environment needs an accountable deployment owner.
 
 ## Environment isolation and credentials
 
@@ -79,7 +81,7 @@ an isolated server. The provisioning tool deliberately creates no passwords.
 ## Managed PostgreSQL deployment checklist
 
 - Choose supported PostgreSQL and matching backup client versions; test the
-  migration path (currently revisions through `0003`, use `upgrade head`).
+  migration path at the deployed commit (use `upgrade head`; do not pin an old revision).
 - Configure private network access, TLS with certificate verification, encryption
   at rest, maintenance/failover policy, storage and connection capacity.
 - Use a direct PostgreSQL connection or a session-pooling endpoint for workers.
@@ -89,8 +91,9 @@ an isolated server. The provisioning tool deliberately creates no passwords.
   restrict migration credentials to release operations.
 - Set the application's `DATABASE_URL` to the importer identity and inject the
   required provider secrets. Run migrations and reapply the explicit grants.
-- Enable the service's backups and continuous WAL/PITR retention. Record actual
-  retention, backup region/account separation, access controls and restore steps.
+- Under D14, configure scheduled logical backups and off-site retention as
+  described below. PITR is deferred until launch; do not enable a paid add-on.
+  Record backup storage separation, access controls and restore steps.
 - Configure supervisor, monitoring, alert delivery, on-call ownership and the
   recovery objectives below; exercise them before launch.
 
@@ -110,38 +113,180 @@ the legacy JSON workflow and is not the database production scheduler.
 
 Supervise the process and send logs to the deployment's log sink. Monitor worker
 availability, publication age, source freshness, repeated failed/abandoned runs,
-coverage/lineage failures, database availability/storage, backup age, and PITR
-window. Configure paging destinations, severity and thresholds in the deployment;
+coverage/lineage failures, database availability/storage, backup snapshot age, and backup completion failures. Configure paging destinations, severity and thresholds in the deployment;
 the repository does not install alert integrations. A failed candidate keeps the
 previous current publication. Inspect persisted run status/error codes and the
 current publication before deciding whether to retry or escalate. Avoid bypassing
 coverage, freshness or lineage rules to make a publication appear current.
 
-## Recovery objectives and production PITR exercise
+## M3 database observability plan (Supabase PostgreSQL 17)
 
-The deployment owner must agree and record the real RPO (maximum acceptable
-committed-data loss) and RTO (maximum acceptable recovery outage). **Configurable
-examples only:** RPO 15 minutes, RTO 2 hours, PITR retention 14 days, and a monthly
-restore exercise. These values are not an established Perennial agreement.
-Record chosen targets, alert thresholds, responsible operator, exercise cadence
-and measured results in the deployment record.
+**Not configured by this document.** Bryan owns deployment and live validation.
+Use the existing free-tier project and approved notification destination; this
+plan creates no resources or paid monitoring service. Record the actual database
+quota, disk capacity, usable direct-connection limit, pooler client limit, and
+reserved service headroom from the project dashboard before setting alerts.
+Do not treat `max_connections` as the number available to the worker.
 
-1. Confirm the managed backup/WAL history covers the chosen recovery timestamp
-   and record source identity, target time, expected publication and retained
-   source batches. Preserve evidence outside the source database.
-2. Restore through the managed service to a new isolated instance/database. Keep
-   original production intact, block provider network access, and disable workers
-   so restored credentials cannot trigger live collection.
-3. Measure restore/startup elapsed time and compare committed records immediately
-   before/after the chosen timestamp to measure actual data loss. Verify schema
-   revision, constraints, source row/batch counts, lineage, publication pointer,
-   retained market-cap observations and deterministic publication replay. Restore
-   and inspect effective role grants and authenticated reader/importer access.
-4. Validate a reader smoke check and a synthetic worker path on the recovered
-   instance. Record success/failure, measured RPO/RTO, retention gaps and actions.
-5. Any production cutover requires the deployment owner's authorization and a
-   rollback plan. Isolate/pause writers before changing endpoints; rotate restored
-   secrets as required. Retire only the exercise resources created for this drill.
+Verify `pg_stat_statements` is enabled in Database → Extensions. If absent,
+Bryan enables it through the dashboard, then verifies statistics accumulate.
+Collect counters with a dedicated monitoring identity whose read permissions
+are reviewed; never give the worker elevated privileges for monitoring.
+Use query IDs, call counts and execution durations in reports, not SQL text,
+parameters, URLs or payloads. Query text can contain literals even when many
+statements are normalized. Do not enable blanket statement/parameter logging.
+See [Supabase pg_stat_statements documentation](https://supabase.com/docs/guides/database/extensions/pg_stat_statements).
+
+The following thresholds are initial operational proposals, not measurements.
+Evaluate once a minute on the existing approved runner; persist only safe numeric
+samples. Compare counter deltas over five minutes; if the server restarts or
+statistics reset, discard that comparison and begin a fresh window. Zero calls
+means no latency sample, not zero latency. Missing samples for five minutes
+raise a monitoring-gap notification rather than a healthy result.
+
+| Signal | Proposed alert | Response and proof |
+| --- | --- | --- |
+| Slow queries | SEV3: five-minute mean execution time >1 s with ≥5 calls for one query ID, in two consecutive windows; SEV2: timeout failures preventing publication | Identify query ID and blocking state; review its plan with synthetic inputs. Do not run EXPLAIN ANALYZE on an unreviewed write. Trigger the rule with synthetic slow-query samples. |
+| Direct connections | SEV3: >70% of usable limit for 5 min; SEV2: >85% for 5 min or connection refusal | Check worker/pool counts, transactions and blocked sessions. Drain duplicate workers, reduce pool concurrency, and preserve advisory-lock ownership; do not mass-terminate sessions. Inject numeric samples for threshold tests. |
+| Pooler clients | Same percentages, using the separate dashboard pooler limit | Check pooler client metrics separately: pg_stat_activity counts server sessions, not all pooled clients. Verify both alert paths. |
+| Database and disk | SEV3: either >70% of its quota or projected exhaustion <7 days; SEV2: >85% or projected exhaustion <48 h | Track database size separately from total disk/WAL. Inspect growth by table; never purge pinned batches to quiet an alert. Estimate linear growth from daily samples; re-evaluate after large imports. Test with synthetic samples. |
+| Backups | SEV3: newest verified off-site snapshot >10 min old; SEV2: >15 min or any failed backup job | Check schedule, dump completion, checksum and upload; preserve last good archive. Snapshot time, not upload time, governs age. Exercise failed-upload and missing-schedule paths. |
+| Publication | SEV2: no successful publication for today's trading session at 10:30 America/Los_Angeles | Check fixed run error codes and source freshness; retain prior publication while repairing. Test calendar/DST and missed-run cases synthetically. |
+
+Supabase's [reports](https://supabase.com/docs/guides/observability/reports) and
+[performance guide](https://supabase.com/docs/guides/platform/performance) describe
+connection and disk inspection. Dashboard visibility alone is not alert delivery.
+Implement the small numeric checks on an approved existing runner and send them
+to Bryan's selected destination; if no runner or destination is available, record
+that as an M3 deployment prerequisite. No new paid service is assumed. Alert
+messages contain environment, fixed rule name, numeric value/limit, UTC time and
+this runbook link. Deduplicate until recovery; a recovery notification closes the
+incident. Never include connection strings, SQL, request headers or secret values.
+
+For acceptance, Bryan records each synthetic threshold crossing, received
+notification, recovery notification and delivery delay, then confirms one live
+numeric sample per metric. Agents prepare/test synthetic fixtures only. Keep the
+30-trading-day on-time-publication count to assess the agreed 95% target; a daily
+alarm is not itself proof of the SLO.
+
+## Recovery targets and scheduled logical backups (D6, D14)
+
+**Agreed targets:** publish by 10:30 PT on 95% of trading days; RPO ≤15 minutes;
+RTO ≤1 hour. These remain targets until measured. **Free tiers for now: no PITR
+until launch.** M3 uses scheduled logical backups, one timed pre-launch restore,
+then a yearly drill. Supabase recommends off-site exports for free projects;
+see [Database Backups](https://supabase.com/docs/guides/platform/backups).
+
+Proposed schedule: start a consistent logical dump every five minutes, with only
+one backup running at a time. Include upload/checksum verification in the job.
+A skipped overlapping job or delayed scheduler must alert; do not call it success.
+The recovery point is the dump's snapshot time. With five-minute spacing, dump
+plus off-site verification must finish within ten minutes to keep the worst-case
+recoverable snapshot age within 15 minutes. Monitor the actual age continuously.
+A daily dump, or a dump whose upload has not finished, cannot establish D6.
+If free-tier runtime/storage/egress limits cannot sustain this, report the measured
+gap to Bryan; do not silently relax RPO or enable a paid service.
+
+Use PostgreSQL 17 backup clients and a direct or supported session connection,
+never transaction pooling. Bryan injects connection settings through an approved
+secret mechanism (for libpq, a protected service/passfile), not command arguments
+or shell history. Disable shell tracing. Use TLS verification. See
+[Supabase connection guidance](https://supabase.com/docs/guides/database/connecting-to-postgres).
+
+The backup manifest must identify schema revision, snapshot time, archive checksum,
+completion time and storage receipt, without credentials or data rows. Store
+archives encrypted outside the source project's failure boundary, with restricted
+access and a tested decryption recovery path. Proposed initial retention is all
+five-minute snapshots for 24 hours and one daily for seven days; Bryan must confirm
+that storage fits D14 before configuring it. Never delete the last verified archive
+because a newer attempt started. Do not place real dumps in Git, CI artifacts or
+agent-readable scratch directories.
+
+Back up the application schema/data and separately retain reviewed role/grant
+configuration without password hashes. As app/auth tables land, expand and test
+coverage explicitly: a pipeline-only dump is not a complete account recovery.
+Supabase-managed schemas, Auth configuration and any Storage objects need their
+own documented restore coverage; database dumps do not include Storage file bytes.
+Follow the [Supabase backup/restore procedure](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore)
+for managed-schema restrictions rather than overwriting service-owned roles.
+
+### Timed logical restore drill (Bryan-operated)
+
+1. Record incident-start time, newest verified archive's snapshot time, archive
+   checksum, expected schema revision and safe reference counts. Block provider
+   egress and disable scheduled workers on the isolated restore target. Preserve
+   the source database and existing backups. Choose an already approved isolated
+   target; if none exists, the drill is blocked, not permission to create one.
+2. Retrieve/decrypt the archive and restore schema/data to the isolated target.
+   Recreate reviewed login/group memberships and grants separately with fresh
+   credentials. Do not use a production endpoint or destructive `--clean` option.
+3. Verify migration revision, constraints, table counts, batch/run lineage,
+   publication pointer and byte-identical publication replay. Validate denied
+   importer updates to immutable rows and reader-only access; after M5 include
+   cross-user RLS checks. Exercise the worker with synthetic inputs, no providers.
+4. Measure RPO as incident time minus the restored snapshot time, and RTO from
+   incident declaration through restore and usable-reader verification (including
+   archive retrieval, configuration and checks). Record safe counts, fixed status
+   codes, times and deviations. A successful import alone does not establish RTO.
+5. Keep production unchanged. A real cutover needs Bryan's explicit authorization,
+   writer drain, endpoint change, reader verification and rollback plan. Retire
+   only resources explicitly created for the drill, under their owner's control.
+
+PITR and its measured recovery window become a separate launch decision. Logical
+archives cannot recover arbitrary commits between snapshots. The local synthetic
+drill below remains useful but does not prove the hosted restore time or D6.
+
+## Secret rotation runbook (Bryan-operated; agents use synthetic fixtures)
+
+D3 requires only **FMP** and **Finnhub** keys. Nasdaq short interest and ARK are
+keyless in the current collectors: no secret to create, store or rotate. Revisit
+this inventory if their contracts change. Database passwords belong to independent
+login identities; the NOLOGIN owner/importer/reader groups have no passwords.
+
+Before rotating, inventory consumers, current secret-version identifiers, and
+rollback versions without reading values into reports. Rehearse with synthetic
+credentials in staging; Bryan alone performs live steps. Keep the current
+publication available throughout. Schedule changes between collections, drain the
+worker, and restart it with the new environment because Settings is read at
+process startup. Readers remain running; do not disturb database advisory locks
+held by an active collection. Record only timestamps, version IDs, status codes
+and counts. No secret screenshots, verbose HTTP traces, parameter dumps or URLs.
+
+| Secret | Replacement and verification | Revoke/rollback |
+| --- | --- | --- |
+| FMP_API_KEY | Bryan obtains a replacement in the provider account, checking whether the old key remains valid. Store a new version, restart the drained worker, and run the bounded Congress probe when its separately owned script has landed (command below). Also verify the market-cap consumer with a bounded owner-operated check. | Revoke old key only after both consumers succeed if overlap is supported. Before revocation, rollback uses the old secret version plus restart. If regeneration invalidates immediately, pause collection first; rollback requires provider recovery/new key, not the revoked value. |
+| FINNHUB_API_KEY | Same staged replacement. Verify one known synthetic/test-universe symbol through the existing collector, honoring rate limits and X-Finnhub-Token transport. Bryan prepares a bounded safe-output invocation before performing this live check; no ready probe script is claimed here. | Revoke old key after verification where overlap exists. With immediate invalidation, keep reads on the last publication while repairing; no guaranteed uninterrupted ingestion. |
+| Database importer login | Create a successor login through the approved admin path, with exactly importer membership, session settings and limits; no ownership or administrative rights. Store its new connection secret, verify positive inserts and forbidden updates on staging, then drain and restart the worker. | Keep old login valid until new connections and a safe pipeline check succeed. Roll back the secret version before disabling old login. Then NOLOGIN the old identity and inspect its remaining sessions; drain only known application sessions. |
+| Database reader/API login | Equivalent successor login with only the required reader or API/RLS permissions. Roll readers gradually, health-check fresh connections and user isolation when applicable. | Keep old login during rolling replacement, then disable new authentication and drain its identified connections. Never terminate unrelated Supabase service sessions. |
+| Migration/backup login | Rotate separately from worker/readers. Preserve only the documented group memberships and backup permissions; verify a staging migration or backup/restore before retiring the old identity. | Retain an authorized recovery login throughout. Do not grant superuser/BYPASSRLS merely to pass a check. |
+
+PostgreSQL stores a single password per role, so seamless database rotation uses
+successor login identities rather than pretending one role accepts two passwords.
+Use the protected interactive password mechanism, never a literal password in SQL
+history. See [PostgreSQL ALTER ROLE](https://www.postgresql.org/docs/17/sql-alterrole.html).
+Supabase's managed project/admin password is a separate dashboard-controlled
+credential: inventory all consumers, use the supported reset flow, then replace
+their secrets and reconnect. If overlapping identities are unavailable, Bryan
+must plan that maintenance interval; this document cannot promise zero downtime.
+
+For Bryan, once the D4-B probe script is reviewed and landed, with FMP_API_KEY
+already injected, the bounded Congress check is one command from the repo root:
+
+```bash
+.venv/bin/python development/database/ops/probe_fmp_congress.py
+```
+
+Its contract is status codes, counts and date ranges only, nonzero on 402. This
+command is pending that packet, not a tool installed by M3 docs. Never run the
+scheduler's `--test` as a small rotation probe: it executes the full live pipeline.
+Before a Finnhub or market-cap live check, the coordinator must supply an equally
+bounded command with safe output. Agents do not run any of these live checks.
+
+Rotation acceptance requires fresh connections/requests using the replacement,
+confirmation that the old credential is revoked, continued reader availability,
+and a tested rollback before revocation. Provider overlap support is unverified;
+if unsupported, preserve read availability but record the ingestion interruption.
+No claim of rotation readiness is made until Bryan's rehearsal succeeds.
 
 ## Local synthetic dump/restore drill
 
@@ -171,8 +316,8 @@ target before taking action. Do not retry with a broader target or `--clean`.
 This drill proves snapshot dump/restore and retained row content for a disposable
 database. It excludes ownership/ACL restoration and does not exercise continuous
 WAL, recovery to a timestamp, service failover, cloud permissions, production data
-loss, or production RTO. Only the managed-service exercise above establishes PITR
-evidence. Synthetic archives may be deleted after their evidence is recorded;
+loss, or production RTO. The M3 logical exercise above must separately establish hosted recovery
+evidence; neither exercise establishes PITR. Synthetic archives may be deleted after their evidence is recorded;
 production backup retention is separately owned by the deployment.
 
 ## Phase 0 quality gates

@@ -323,3 +323,14 @@ def test_every_theme_empty_fails_instead_of_a_quiet_success(engine):
     with engine.connect() as conn:
         latest = latest_successful_run(conn, "gdelt_theme_volume")
     assert latest.batch_id == good.results["gdelt_theme_volume"].batch_id
+
+
+@pytest.mark.db
+def test_a_gdelt_run_does_not_mask_a_missed_watchlist_run(engine):
+    """M3's missed-run monitor counts only watchlist sources (merge with #32)."""
+    from src.pipeline.health import health
+
+    run_contract(engine, client(), THEMES, datetime.now(timezone.utc))
+    report = health(engine)
+    assert "pipeline:missed_run" in report["issues"]
+    assert report["advisories"] == []
