@@ -457,8 +457,9 @@ _WRITES = text(
     " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p')"
 )
 # #22's schema app (fix packet, change 5): reads and writes only on its six
-# tables, never TRUNCATE, no CREATE on app, and no USAGE on Supabase's auth
-# schema (the login reaches auth.users only through app.email_is_registered).
+# tables, at table or column level; never TRUNCATE or REFERENCES; no CREATE on
+# app; and no USAGE on Supabase's auth schema (the login reaches auth.users
+# only through app.email_is_registered).
 APP_TABLES = (
     "profiles",
     "preferences",
@@ -472,8 +473,10 @@ _APP = text(
     "  JOIN pg_namespace n ON n.oid = c.relnamespace"
     "  WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p') AND ("
     "   has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER')"
-    "   OR (c.relname <> ALL(CAST(:tables AS text[])) AND has_table_privilege("
-    "    current_user, c.oid, 'INSERT,UPDATE,DELETE')))),"
+    "   OR has_any_column_privilege(current_user, c.oid, 'REFERENCES')"
+    "   OR (c.relname <> ALL(CAST(:tables AS text[])) AND ("
+    "    has_table_privilege(current_user, c.oid, 'INSERT,UPDATE,DELETE')"
+    "    OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE'))))),"
     " coalesce((SELECT has_schema_privilege(current_user, oid, 'CREATE')"
     "  FROM pg_namespace WHERE nspname = 'app'), false),"
     " coalesce((SELECT has_schema_privilege(current_user, oid, 'USAGE')"
@@ -495,7 +498,8 @@ def check_startup(engine: Engine, api_role: str) -> None:
     2 transitive membership is exactly {api_role}; 3 no write privilege on any
     perennial table or column, and at least one table exists; 4 owns nothing and
     has no CREATE on the schema or database. Where #22's schema app exists,
-    clause 3 also allows writes only on its six tables and clause 4 refuses CREATE on app; USAGE on schema auth (Supabase) is
+    clause 3 also allows writes only on its six tables (table or column level)
+    and clause 4 refuses CREATE on app; USAGE on schema auth (Supabase) is
     refused. Every failure, including an error while checking, raises the same
     StartupRefused with no role name, URL or SQL.
     """

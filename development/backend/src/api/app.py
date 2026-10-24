@@ -71,6 +71,7 @@ def create_app(*, api_role: str = "perennial_api") -> FastAPI:
         allow_origins=cors_origins(),
         allow_methods=["GET", "POST", "PUT", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["Retry-After"],  # a 429's hint, readable cross-origin
     )
     app.include_router(router, prefix="/v1")  # decision 17
     app.include_router(read.router)  # already carries /v1
@@ -80,7 +81,12 @@ def create_app(*, api_role: str = "perennial_api") -> FastAPI:
     app.add_exception_handler(read.APIError, api_error)
     app.middleware("http")(private_responses)
     app.get("/health")(health)
-    app.get("/api/watchlist", response_model=DashboardResponse)(dashboard_watchlist)
+    # Public and on the API pool in publication mode: the read bucket, as /v1.
+    app.get(
+        "/api/watchlist",
+        response_model=DashboardResponse,
+        dependencies=[Depends(read.rate_limit)],
+    )(dashboard_watchlist)
     return app
 
 
@@ -176,7 +182,7 @@ def dashboard_watchlist(
     )
     if os.getenv("DASHBOARD_DATA_MODE", default_mode).casefold() == "fixture":
         return temporary_dashboard_response()
-    with engine.begin() as connection:
+    with read.read_transaction(engine) as connection:
         publication = (
             connection.execute(
                 select(models.publications)
