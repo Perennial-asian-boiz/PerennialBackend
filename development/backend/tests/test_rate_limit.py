@@ -494,3 +494,106 @@ def test_rejection_lines_are_capped_at_60_a_minute_across_keys(engine, groups, c
     suppressed = limit_lines(caplog, "rate_limited_suppressed")
     assert len(suppressed) == 1 and re.search(r"\b10\b", suppressed[0])
     assert all("2001:db8" not in line for line in limit_lines(caplog, r"rate_limited\w*"))
+
+
+# ── Edge cases found after the build (9b1cf64) ───────────
+
+
+def test_literal_keys_never_share_a_real_bucket(engine, groups):  # noqa: F811
+    """Key namespaces: a peer named "unknown", or an IP-shaped literal, is its own bucket."""
+    with api_app(engine, groups, burst=2) as (app, _):
+        assert not shares_bucket(app, None, ("unknown", 1), 2)
+        # "2001:db8::/64" is not an address: a literal, never the real /64's bucket.
+        assert not shares_bucket(app, ("2001:db8::1", 1), ("2001:db8::/64", 1), 2)
+        assert not shares_bucket(app, ("198.51.100.1", 1), ("198.51.100.1/32", 1), 2)
+
+
+@pytest.mark.parametrize("entry", ["10.0.0.1/24", "2001:db8::1/64", "10.0.0.0/8, 192.0.2.1/16"])
+def test_proxy_networks_with_host_bits_are_refused(entry, groups, engine, monkeypatch):  # noqa: F811
+    from src.api.read import RateLimitConfigError, create_app
+
+    monkeypatch.setenv("API_TRUSTED_PROXIES", entry)
+    with login(engine, groups) as (api_engine, _, _):
+        with pytest.raises(RateLimitConfigError):
+            create_app(api_engine, api_role=groups["api"])
+        monkeypatch.setenv("API_TRUSTED_PROXIES", "10.0.0.0/24, 2001:db8::/64")
+        create_app(api_engine, api_role=groups["api"])
+
+
+@pytest.mark.parametrize("value, ok", [("1", True), ("0", True), ("yes", False),
+                                       ("true", False), ("2", False), ("", True)])  # empty means unset
+def test_trust_all_accepts_only_1_or_0(value, ok, engine, groups, monkeypatch):  # noqa: F811
+    from src.api.read import RateLimitConfigError, create_app
+
+    monkeypatch.setenv("API_TRUST_ALL_PROXIES", value)
+    with login(engine, groups) as (api_engine, _, _):
+        if ok:
+            create_app(api_engine, api_role=groups["api"])
+        else:
+            with pytest.raises(RateLimitConfigError):
+                create_app(api_engine, api_role=groups["api"])
+
+
+def test_trust_all_0_trusts_no_one(engine, groups, monkeypatch):  # noqa: F811
+    from src.api.read import create_app
+
+    monkeypatch.setenv("API_TRUST_ALL_PROXIES", "0")
+    monkeypatch.setenv("API_RATE_LIMIT_BURST", "2")
+    with login(engine, groups) as (api_engine, _, _):
+        app = create_app(api_engine, api_role=groups["api"])
+        peer = ("203.0.113.9", 1)
+        assert drain(app, 2, client=peer, headers=[("X-Forwarded-For", "6.6.6.6")]) == [404, 404]
+        assert limited(app, client=peer, headers=[("X-Forwarded-For", "6.6.6.7")])
+
+
+def test_an_evicted_key_starts_again_without_its_held_count(engine, groups, caplog):  # noqa: F811
+    caplog.set_level(logging.DEBUG)
+    clock = Clock()
+    a, b = ("198.51.100.1", 1), ("198.51.100.2", 1)
+    with api_app(engine, groups, clock=clock, burst=1, per_minute=6, max_clients=1) as (app, _):
+        caplog.clear()
+        assert call(app, client=a)[0] == 404
+        assert drain(app, 4, client=a) == [429] * 4  # one line, three held back
+        assert call(app, client=b)[0] == 404  # evicts a, its bucket and its log state
+        assert call(app, client=a)[0] == 404  # a full bucket again
+        assert call(app, client=a)[0] == 429  # a new first rejection
+    lines = limit_lines(caplog, "rate_limited")
+    assert len(lines) == 2
+    assert not re.search(r"\b3\b", lines[1]), lines[1]  # the held count did not survive
+
+
+def test_a_missing_limiter_inside_create_app_has_r1s_error_shape(engine, groups):  # noqa: F811
+    with api_app(engine, groups) as (app, _):
+        del app.state.rate_limiter
+        status, _, body = call(app)
+    assert status == 503
+    assert json.loads(body) == {"detail": json.loads(body)["detail"], "code": "rate_limiter_missing"}
+    assert body == json.dumps(json.loads(body), sort_keys=True, separators=(",", ":")).encode()
+
+
+def test_a_rate_that_does_not_divide_a_minute_is_exact(engine, groups):  # noqa: F811
+    """RLB-T1: the float slack lets a token due exactly now through, indefinitely."""
+    clock = Clock()
+    with api_app(engine, groups, clock=clock, burst=1, per_minute=7) as (app, _):
+        assert call(app)[0] == 404
+        status, headers, _ = call(app)
+        assert status == 429 and headers["retry-after"] == "9"  # ceil(60 / 7)
+        clock.advance(60 / 7)
+        assert call(app)[0] == 404
+        for _ in range(200):  # exactly at the refill rate, no drift
+            clock.advance(60 / 7)
+            assert call(app)[0] == 404
+
+
+@pytest.mark.parametrize("fields", [
+    {"per_minute": 0}, {"burst": 0}, {"auth_per_hour": 0}, {"auth_burst": 0},
+    {"max_clients": 0}, {"per_minute": -1}, {"per_minute": 1.5}, {"burst": True},
+    {"trusted_proxies": ("*",)}, {"trusted_proxies": ("10.0.0.1/24",)},
+])
+def test_a_config_built_directly_refuses_with_the_fixed_error(fields):
+    """RLB-T2: never ZeroDivisionError or a TypeError deeper in."""
+    from src.api.read import RateLimitConfig, RateLimitConfigError
+
+    with pytest.raises(RateLimitConfigError) as caught:
+        RateLimitConfig(**fields)
+    assert str(caught.value) == "rate_limit_config_invalid: the rate-limit settings are not valid"
