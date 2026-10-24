@@ -95,6 +95,14 @@ so neither an empty list nor an empty `errors[]` proves success.
   transaction date is not ISO fail the collection instead of being dropped
   by the fetcher's two-year filter. Database insider and short-interest ticker plans
   come from pinned Congress/ARK batches, recorded in `run_dependencies`.
+  Congress House trades come from the Clerk of the House by default
+  (`CONGRESS_HOUSE_SOURCE=house_clerk`): each yearly PTR index and each PTR
+  PDF filed in the last 365 days is a unit. Scanned paper filings complete with
+  no records and are counted (`house_reports_scanned`); a report with stock rows
+  the parser cannot read fails the collection. Parsed reports are reused from
+  `local_data/house_clerk_cache.json`. FMP's Senate feed is added only with
+  `CONGRESS_INCLUDE_FMP_SENATE=true` (off until D4 works on the free plan), and
+  the batch envelope records `chambers` and `house_source`.
   Insider tickers are requested from Finnhub under their provider symbol
   ("RKLB UQ" as RKLB, BRK.B as BRK-B, GOOG as GOOGL); listings with no SEC
   Form 4 filings (e.g. "ETHQ/U") are not requested and are listed in the
@@ -206,6 +214,12 @@ Rules worth knowing:
   dates. Thus an FMP/Watcher pair counts once, but two same-provider rows still
   count twice. Raw snapshot rows are untouched. Replay dispatches by the saved
   ranking version, preserving the original `watchlist-v1` output.
+  `watchlist-v3` (current) ranks exactly like v2 but caps Congress candidates at
+  `max_congress_candidates` (100, stored in `ranking_config`): purchase symbols
+  by distinct buyers, then buy count, then most recent transaction, then symbol.
+  ARK candidates are unchanged. Complete House Clerk data has ~650 purchased
+  symbols a year, and each candidate costs one FMP market-cap request against
+  the 250-a-day free plan. v1/v2 publications replay with their uncapped rule.
 - **Securities and the supported universe.** This sprint covers US equities
   only. Symbols are upper-cased and limited to `A-Z 0-9 . / -`. Placeholders
   (`N/A`, `--`, `NONE`, `NULL`, `NAN`) and any other form fail validation.

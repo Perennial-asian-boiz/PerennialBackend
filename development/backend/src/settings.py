@@ -53,6 +53,12 @@ class ProviderSettings(BaseSettings):
 class Settings(ProviderSettings):
     database_url: SecretStr
     fmp_max_pages: int = Field(default=50, ge=1, le=1000)
+    # House trades come from the Clerk of the House's PTR filings (no key).
+    # "fmp" restores the FMP House feed, which the free plan truncates.
+    congress_house_source: Literal["house_clerk", "fmp"] = "house_clerk"
+    # FMP's Senate feed fails past page 0 on the free plan (D4), so Congress
+    # collection is House-only until this is turned on.
+    congress_include_fmp_senate: bool = False
     quality_thresholds: dict[str, QualityThreshold] = Field(
         default_factory=_quality_defaults
     )

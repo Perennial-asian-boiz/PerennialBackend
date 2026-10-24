@@ -105,7 +105,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "publish":
             settings.require_provider_keys("fmp")
         elif args.command == "fetch":
-            if args.source == "congress_trades":
+            if args.source == "congress_trades" and (
+                settings.congress_house_source == "fmp"
+                or settings.congress_include_fmp_senate
+            ):
+                # House Clerk alone needs no key; FMP chambers do.
                 settings.require_provider_keys("fmp")
             elif args.source == "insider_trades":
                 settings.require_provider_keys("finnhub")

@@ -59,6 +59,11 @@ if not logger.handlers:
 FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
 
 MARKET_CAP_THRESHOLD = 10_000_000_000  # $10 Billion
+# Congress candidates evaluated per run, strongest first (same rule as the
+# database ranking's watchlist-v3). Complete House Clerk data has ~650
+# purchased tickers a year, and each candidate costs one FMP market-cap
+# request against a 250-a-day free plan.
+MAX_CONGRESS_CANDIDATES = 100
 
 
 # ─────────────────────────────────────────────────────────
@@ -179,6 +184,25 @@ def load_congress_signals(file_path: Optional[Path] = None) -> Dict[str, Dict[st
     except Exception as e:
         logger.error(f"Error loading Congress signals: {e}")
         return {}
+
+
+def top_congress_candidates(
+    signals: Dict[str, Dict[str, Any]], limit: Optional[int] = None
+) -> List[str]:
+    """The `limit` strongest Congress purchase tickers: most distinct buyers,
+    then most buys, then most recent purchase, then ticker."""
+    limit = MAX_CONGRESS_CANDIDATES if limit is None else limit
+
+    def strength(ticker: str) -> Tuple[Any, ...]:
+        s = signals[ticker]
+        try:
+            latest = datetime.fromisoformat(s.get("most_recent_transaction_date") or "")
+            day = latest.toordinal()
+        except ValueError:
+            day = 0  # no usable date sorts last among equals
+        return (-s["distinct_buyer_count"], -s["buy_count"], -day, ticker)
+
+    return sorted(signals, key=strength)[:limit]
 
 
 def load_ark_signals(file_path: Optional[Path] = None) -> Dict[str, Dict[str, Any]]:
@@ -556,9 +580,16 @@ def run(
     insider_signals, insider_meta = load_insider_signals(insider_file)
     short_interest_signals = load_short_interest_signals(short_interest_file)
 
-    # Union of candidates from Congress (purchases) and ARK
-    candidate_tickers = sorted(set(congress_signals.keys()) | set(ark_signals.keys()))
-    logger.info(f"Total consensus candidate tickers to evaluate: {len(candidate_tickers)}")
+    # Strongest Congress purchase tickers (distinct buyers, buy count, most
+    # recent purchase), plus every ARK holding
+    candidate_tickers = sorted(
+        set(top_congress_candidates(congress_signals)) | set(ark_signals.keys())
+    )
+    logger.info(
+        f"Total consensus candidate tickers to evaluate: {len(candidate_tickers)} "
+        f"({len(congress_signals)} Congress purchase tickers, top "
+        f"{MAX_CONGRESS_CANDIDATES} kept)"
+    )
 
     market_cap_cache: Dict[str, Optional[float]] = profile_cache if profile_cache is not None else {}
     session = requests.Session()

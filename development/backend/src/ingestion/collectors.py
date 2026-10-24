@@ -190,8 +190,13 @@ def _get_json(
     monotonic: Callable[[], float] = time.monotonic,
     wall_time: Callable[[], float] = time.time,
     deadline_seconds: float = HTTP_DEADLINE_SECONDS,
+    raw: bool = False,
 ) -> _Response:
-    """Bound one HTTP unit, close every response before waiting, never expose input text."""
+    """Bound one HTTP unit, close every response before waiting, never expose input text.
+
+    With raw=True the capped body is returned as bytes instead of parsed JSON
+    (House Clerk ZIP indexes and PTR PDFs).
+    """
     deadline = monotonic() + min(deadline_seconds, HTTP_DEADLINE_SECONDS)
     retries = min(MAX_HTTP_RETRIES, max(0, max_retries))
     for attempt in range(retries + 1):
@@ -224,6 +229,8 @@ def _get_json(
                     return _Response(False, status=status, code="deadline_exceeded")
                 if body is None:
                     return _Response(False, status=status, code="response_too_large")
+                if raw:
+                    return _Response(True, status=status, data=body)
                 try:
                     data = json.loads(body)
                 except (ValueError, RecursionError):
@@ -494,7 +501,7 @@ def collect_ark(
     )
 
 
-# ── Congress (FMP) ───────────────────────────────────────
+# ── Congress (House Clerk + FMP) ─────────────────────────
 
 
 def _string_fields_ok(item: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
@@ -514,34 +521,22 @@ _FMP_KEYS = (
     "district",
     "link",
 )
+_CLERK_TERMINAL = ("parsed", "scanned")
 
 
-def collect_congress(
-    session: Optional[requests.Session] = None,
-    api_key: Optional[str] = None,
-    sleep: Callable[[float], None] = time.sleep,
-    *,
-    settings: Optional[Settings] = None,
-) -> CollectionOutcome:
-    fmp = _fetcher("fmp")
-    if api_key is not None:
-        key = api_key
-    elif settings is not None and settings.fmp_api_key is not None:
-        key = settings.fmp_api_key.get_secret_value()
-    else:
-        key = fmp.FMP_API_KEY
-    if not key or key.lower().startswith("your_"):
-        return CollectionOutcome.failure(
-            "congress_trades", "live", "missing_credential"
-        )
-    page_limit = settings.fmp_max_pages if settings is not None else fmp.MAX_PAGES
-    session = session or requests.Session()
-    # Initially one request per chamber. Full pages discover further required
-    # units; terminated pagination is not unattempted work.
-    page_counts = {"senate_pages_fetched": 0, "house_pages_fetched": 0}
-    tracker = _Tracker("Congress requests", planned=2, extra_counts=page_counts)
+def _collect_fmp_chambers(
+    session: requests.Session,
+    fmp: Any,
+    key: str,
+    chambers: Tuple[str, ...],
+    page_limit: int,
+    tracker: _Tracker,
+    sleep: Callable[[float], None],
+) -> Optional[List[Dict[str, Any]]]:
+    """FMP '-latest' pages for each chamber until a short page; None on any failed unit."""
     raw_fmp: List[Dict[str, Any]] = []
-    for chamber in ("senate", "house"):
+    for chamber in chambers:
+        tracker.extra_counts[f"{chamber}_pages_fetched"] = 0
         for page in range(page_limit):
             unit = f"{chamber} page {page}"
             resp = _get_json(
@@ -552,20 +547,20 @@ def collect_congress(
             )
             if not resp.ok:
                 tracker.fail(unit, resp.code)
-                return tracker.outcome("congress_trades", [])
+                return None
             items = resp.data
             if not isinstance(items, list) or not all(
                 isinstance(i, dict) and _string_fields_ok(i, _FMP_KEYS) for i in items
             ):
                 tracker.fail(unit, "malformed_response")
-                return tracker.outcome("congress_trades", [])
+                return None
             if len(items) > 20:
                 tracker.fail(unit, "malformed_response")
-                return tracker.outcome("congress_trades", [])
-            page_counts[f"{chamber}_pages_fetched"] += 1
+                return None
+            tracker.extra_counts[f"{chamber}_pages_fetched"] += 1
             if len(items) == 20 and page == page_limit - 1:
                 tracker.fail(unit, "pagination_exhausted")
-                return tracker.outcome("congress_trades", [])
+                return None
             tracker.ok()
             for item in items:
                 item["_chamber"] = chamber.capitalize()
@@ -574,8 +569,185 @@ def collect_congress(
                 break
             if tracker.planned is not None:
                 tracker.planned += 1
+    return raw_fmp
+
+
+def _cached_clerk_report(entry: Any) -> bool:
+    """A cache entry the collector may reuse: a final outcome with well-formed trades."""
+    return (
+        isinstance(entry, dict)
+        and entry.get("status") in _CLERK_TERMINAL
+        and isinstance(entry.get("trades"), list)
+        and all(isinstance(t, dict) for t in entry["trades"])
+    )
+
+
+def _collect_house_clerk(
+    session: requests.Session,
+    tracker: _Tracker,
+    sleep: Callable[[float], None],
+    cache_path: Optional[Path],
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    House trades from every PTR filed in house_clerk.LOOKBACK_DAYS; None on
+    any failed unit. Units are each yearly index, then each report. A scanned
+    report (no text layer) completes with no records and is counted; a report
+    with stock rows the parser could not read fails, since its trades would
+    otherwise be dropped. Parsed reports are reused from the House Clerk
+    cache, which holds the same outcome a fresh parse produces.
+    """
+    hc = _fetcher("house_clerk")
+    today = datetime.now(timezone.utc).date()
+    cutoff = date.fromordinal(today.toordinal() - hc.LOOKBACK_DAYS).isoformat()
+    years = sorted({today.year, int(cutoff[:4])})
+    if tracker.planned is not None:
+        tracker.planned += len(years)
+
+    filings: Dict[str, Dict[str, Any]] = {}
+    for year in years:
+        unit = f"house index {year}"
+        resp = _get_json(
+            session,
+            hc.INDEX_URL.format(year=year),
+            headers=hc.HEADERS,
+            timeout=hc.REQUEST_TIMEOUT,
+            sleep=sleep,
+            raw=True,
+        )
+        if not resp.ok:
+            tracker.fail(unit, resp.code)
+            return None
+        try:
+            listed = hc.parse_index(resp.data)
+        except ValueError:
+            tracker.fail(unit, "malformed_response")
+            return None
+        tracker.ok()
+        for f in listed:
+            if f["filing_date"] >= cutoff:
+                filings[f["doc_id"]] = f
+
+    cache = hc.load_cache(cache_path)
+    if tracker.planned is not None:
+        tracker.planned += len(filings)
+    counts = {
+        "house_reports": len(filings),
+        "house_reports_scanned": 0,
+        "house_reports_downloaded": 0,
+        "house_stock_rows_skipped": 0,
+    }
+    tracker.extra_counts.update(counts)
+    trades: List[Dict[str, Any]] = []
+    outcomes: Dict[str, Dict[str, Any]] = {}
+    for doc_id, f in sorted(filings.items()):
+        unit = f"house report {doc_id}"
+        report = cache.get(doc_id)
+        if not _cached_clerk_report(report):
+            resp = _get_json(
+                session,
+                hc.PTR_URL.format(year=f["year"], doc_id=doc_id),
+                headers=hc.HEADERS,
+                timeout=hc.REQUEST_TIMEOUT,
+                sleep=sleep,
+                raw=True,
+            )
+            if not resp.ok:
+                tracker.fail(unit, resp.code)
+                break
+            report = hc.parse_report(resp.data, f)
+            tracker.extra_counts["house_reports_downloaded"] += 1
+            sleep(hc.REQUEST_DELAY)
+        if report["status"] == hc.STATUS_FAILED:
+            tracker.fail(unit, "malformed_response")
+            break
+        if report["status"] == hc.STATUS_PARTIAL:
+            tracker.fail(unit, "parse_error")
+            break
+        outcomes[doc_id] = report
+        if report["status"] == hc.STATUS_SCANNED:
+            tracker.extra_counts["house_reports_scanned"] += 1
+        tracker.extra_counts["house_stock_rows_skipped"] += report.get(
+            "skipped_rows", 0
+        )
+        trades.extend(report["trades"])
+        tracker.ok()
+    # Even a failed collection keeps what it parsed, so the retry is cheaper.
+    hc.save_cache(
+        {**{d: o for d, o in cache.items() if _cached_clerk_report(o)}, **outcomes},
+        cache_path,
+    )
+    return None if tracker.failure_count else trades
+
+
+def collect_congress(
+    session: Optional[requests.Session] = None,
+    api_key: Optional[str] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    *,
+    settings: Optional[Settings] = None,
+    house_source: Optional[str] = None,
+    include_fmp_senate: Optional[bool] = None,
+    house_cache_path: Optional[Path] = None,
+) -> CollectionOutcome:
+    """
+    House trades from the Clerk of the House (or FMP), plus FMP's Senate feed
+    when enabled. Explicit arguments win, then settings. A caller with neither
+    gets the original FMP-only collection of both chambers.
+    """
+    fmp = _fetcher("fmp")
+    if house_source is None:
+        house_source = settings.congress_house_source if settings is not None else "fmp"
+    if include_fmp_senate is None:
+        include_fmp_senate = (
+            settings.congress_include_fmp_senate if settings is not None else True
+        )
+    if house_source not in ("house_clerk", "fmp"):
+        raise ValueError("house_source must be 'house_clerk' or 'fmp'")
+    chambers = tuple(
+        c
+        for c, wanted in (
+            ("senate", include_fmp_senate),
+            ("house", house_source == "fmp"),
+        )
+        if wanted
+    )
+    if not chambers and house_source != "house_clerk":
+        raise ValueError("Congress collection needs at least one chamber")
+
+    key = ""
+    if chambers:
+        if api_key is not None:
+            key = api_key
+        elif settings is not None and settings.fmp_api_key is not None:
+            key = settings.fmp_api_key.get_secret_value()
+        else:
+            key = fmp.FMP_API_KEY or ""
+        if not key or key.lower().startswith("your_"):
+            return CollectionOutcome.failure(
+                "congress_trades", "live", "missing_credential"
+            )
+    page_limit = settings.fmp_max_pages if settings is not None else fmp.MAX_PAGES
+    session = session or requests.Session()
+    # Initially one request per FMP chamber. Full pages discover further
+    # required units, as do the House Clerk indexes' report lists.
+    tracker = _Tracker("Congress requests", planned=len(chambers))
+    if "senate" not in chambers:
+        tracker.extra_counts["senate_pages_fetched"] = 0
+    if "house" not in chambers:
+        tracker.extra_counts["house_pages_fetched"] = 0
+    raw_fmp = _collect_fmp_chambers(
+        session, fmp, key, chambers, page_limit, tracker, sleep
+    )
+    if raw_fmp is None:
+        return tracker.outcome("congress_trades", [])
+    clerk: List[Dict[str, Any]] = []
+    if house_source == "house_clerk":
+        collected = _collect_house_clerk(session, tracker, sleep, house_cache_path)
+        if collected is None:
+            return tracker.outcome("congress_trades", [])
+        clerk = collected
     try:
-        trades = fmp.parse_trades(raw_fmp)
+        trades = fmp.parse_trades(raw_fmp) + clerk
         # filter_recent silently drops rows whose date does not parse, so a
         # malformed required date must fail the collection before it runs.
         if not all(_is_iso_date(t.get("transaction_date")) for t in trades):
@@ -583,11 +755,21 @@ def collect_congress(
         trades = fmp.filter_recent(fmp.deduplicate_proven_repeats(trades), years=2)
     except (TypeError, ValueError, AttributeError, KeyError):
         return tracker.parse_failure("congress_trades")
+    endpoints = [f"{fmp.BASE_URL}/{c}-latest" for c in chambers]
+    if house_source == "house_clerk":
+        endpoints.append(_fetcher("house_clerk").INDEX_URL)
     envelope = {
-        "source": "Financial Modeling Prep (FMP)",
-        "endpoints": [f"{fmp.BASE_URL}/senate-latest", f"{fmp.BASE_URL}/house-latest"],
+        "source": " + ".join(
+            (["Financial Modeling Prep (FMP)"] if chambers else [])
+            + (["Clerk of the House"] if house_source == "house_clerk" else [])
+        ),
+        "endpoints": endpoints,
         "fetched_at": _now_iso(),
         "total_trades": len(trades),
+        "chambers": (["Senate"] if include_fmp_senate else []) + ["House"],
+        "house_source": house_source,
+        "house_reports": tracker.extra_counts.get("house_reports"),
+        "house_reports_scanned": tracker.extra_counts.get("house_reports_scanned"),
     }
     return tracker.outcome(
         "congress_trades",

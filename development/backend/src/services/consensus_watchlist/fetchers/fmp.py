@@ -3,7 +3,12 @@ SOURCE:
     Financial Modeling Prep (FMP) stable endpoints
     Senate: https://financialmodelingprep.com/stable/senate-latest
     House:  https://financialmodelingprep.com/stable/house-latest
-    Free tier: 250 requests/day
+    Free tier: 250 requests/day, and only the 20 latest trades per chamber
+
+    House trades come from the Clerk of the House instead (house_clerk.py):
+    the official PTR filings FMP's House rows link to, every member, no key.
+    FMP's House rows are kept only when that collection fails, and
+    trades_congress.json records which source the House rows came from.
 
 SCHEDULE:
     Runs daily at 9:00am via scheduler/cron.py
@@ -36,6 +41,10 @@ from pathlib import Path
 FMP_API_KEY: str | None = None
 BASE_URL = "https://financialmodelingprep.com/stable"
 MAX_PAGES = 50  # Safety cap per chamber; full final page is not a complete result.
+
+# Take House trades from the Clerk of the House (house_clerk.py). False gives
+# the FMP-only output, byte for byte, which the fab7188 golden test pins.
+INCLUDE_HOUSE_CLERK = True
 
 
 # ─────────────────────────────────────────────────────────
@@ -272,7 +281,12 @@ def analyze_trades(trades: list):
 # SAVE — placeholder until DB is ready
 # ─────────────────────────────────────────────────────────
 
-def save_to_json(trades: list, filename=None):
+def save_to_json(trades: list, filename=None, house: dict | None = None):
+    """
+    `house` is house_clerk.collect()'s result when it was attempted. Its
+    outcome is recorded so a reader can tell where the House rows came from,
+    and why, when the Clerk collection failed and FMP's rows were kept.
+    """
     if filename is None:
         output_dir = LOCAL_DATA_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -285,6 +299,15 @@ def save_to_json(trades: list, filename=None):
         "total_trades": len(trades),
         "trades": trades,
     }
+    if house is not None:
+        from house_clerk import INDEX_URL, SOURCE_NAME
+
+        clerk_used = house["status"] != "failed"
+        if clerk_used:
+            output["source"] = f"FMP (Senate) + {SOURCE_NAME} (House)"
+            output["endpoints"] = [f"{BASE_URL}/senate-latest", INDEX_URL]
+        output["house_source"] = "house_clerk" if clerk_used else "fmp"
+        output["house_clerk"] = {"status": house["status"], **house["coverage"]}
     with open(filename, "w") as f:
         json.dump(output, f, indent=2)
     print(f"[fmp] 💾 Saved {len(trades)} trades → {filename}")
@@ -352,6 +375,27 @@ def run(provider_settings: "ProviderSettings | None" = None):
     # provider transaction identity and provenance via the default parsers.
     fmp_trades = parse_trades(all_raw, preserve_provenance=False)
 
+    house = None
+    if INCLUDE_HOUSE_CLERK:
+        import house_clerk
+
+        print("\n[house_clerk] Collecting House trades from the Clerk of the House "
+              "(official PTR filings)...")
+        house = house_clerk.collect()
+        cov = house["coverage"]
+        print(f"[house_clerk] {house['status'].upper()}: {cov.get('reports', 0)} reports "
+              f"({cov.get('parsed', 0)} parsed, {cov.get('scanned', 0)} scanned, "
+              f"{cov.get('failed', 0)} failed; {cov.get('downloaded_this_run', 0)} "
+              f"downloaded this run) → {len(house['trades'])} House stock trades")
+        if house["status"] == "failed":
+            print("[fmp] ⚠️  House Clerk collection failed — keeping FMP's "
+                  "House rows")
+        else:
+            fmp_trades = [t for t in fmp_trades if t["chamber"] != "House"]
+            fmp_trades += house["trades"]
+            print(f"[fmp] House trades from the Clerk of the House: "
+                  f"{len(house['trades'])} ({house['status']})")
+
     trades = deduplicate(fmp_trades)
 
     # Filter to recent 2 years only
@@ -364,7 +408,7 @@ def run(provider_settings: "ProviderSettings | None" = None):
     # Analyze + print + save
     analysis = analyze_trades(trades)
     print_summary(trades, analysis)
-    save_to_json(trades)
+    save_to_json(trades, house=house)
 
     print("[fmp] ✅ Done.")
     return trades

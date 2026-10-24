@@ -56,6 +56,10 @@ def keyed_provider(monkeypatch):
 
     monkeypatch.setattr(requests.Session, "get", get)
     monkeypatch.setattr(requests.Session, "request", forbidden)
+    # These tests pin FMP key routing, so Congress takes both chambers from FMP;
+    # the House Clerk default is covered by the test at the end of this file.
+    monkeypatch.setenv("CONGRESS_HOUSE_SOURCE", "fmp")
+    monkeypatch.setenv("CONGRESS_INCLUDE_FMP_SENATE", "true")
     for name in ("ark", "insider", "short_interest", "fmp"):
         module = collectors._fetcher(name)
         if hasattr(module, "REQUEST_DELAY"):
@@ -198,3 +202,76 @@ def test_cli_fetch_uses_keys_only_in_settings(
         "ark_holdings": "succeeded",
         "insider_trades": "succeeded",
     }
+
+
+class RawStubResponse(StubResponse):
+    """A binary body (House Clerk ZIP index or PTR PDF)."""
+
+    def __init__(self, body: bytes, status=200):
+        super().__init__(None, status)
+        self._raw = self.content = body
+        self.headers = {"Content-Length": str(len(body))}
+
+
+@pytest.mark.db
+def test_cli_run_pipeline_takes_house_trades_from_the_house_clerk_by_default(
+    engine, db_url, keyed_provider, monkeypatch, capsys, tmp_path
+):
+    """Production defaults: House from the Clerk of the House, no FMP Senate,
+    FMP used only for market caps; the publication ranks with watchlist-v3."""
+    from datetime import date, timedelta
+
+    from src.ingestion import cli, collectors
+    from src.pipeline import ranking
+    from test_house_clerk import index_row, index_zip, ptr_text
+
+    hc = collectors._fetcher("house_clerk")
+    monkeypatch.setattr(hc, "LOCAL_DATA_DIR", tmp_path)  # cache stays in the test
+    monkeypatch.setenv("CONGRESS_HOUSE_SOURCE", "house_clerk")
+    monkeypatch.setenv("CONGRESS_INCLUDE_FMP_SENATE", "false")
+    monkeypatch.setenv("DATABASE_URL", db_url.render_as_string(hide_password=False))
+    monkeypatch.setenv("FMP_API_KEY", FMP_KEY)
+    monkeypatch.setenv("FINNHUB_API_KEY", FINNHUB_KEY)
+
+    recent = (date.today() - timedelta(days=10)).strftime("%m/%d/%Y")
+    index = index_zip([index_row("20000001", recent), index_row("8000002", recent)])
+    text = ptr_text(
+        "Synthetic Gamma Corp Common Stock (ZZCC) [ST]\n"
+        f"P {recent} {recent} $1,001 - $15,000"
+    )
+    monkeypatch.setattr(hc, "extract_text", lambda pdf: text if pdf == b"efiled" else "")
+    original = keyed_provider.get
+
+    def get(session, url, params=None, headers=None, **kwargs):
+        if "disclosures-clerk.house.gov" in url:
+            if url.endswith("FD.zip"):
+                return RawStubResponse(index)
+            return RawStubResponse(b"efiled" if url.endswith("20000001.pdf") else b"scan")
+        return original(session, url, params=params, headers=headers, **kwargs)
+
+    monkeypatch.setattr(keyed_provider, "get", get)
+
+    assert cli.main(["run-pipeline"]) == 0
+    out = capsys.readouterr().out
+    publication_id = json.loads(out[out.rindex("{\n"):])["publication_id"]
+
+    assert keyed_provider.unrouted == []
+    with engine.connect() as conn:
+        congress_batch = conn.execute(
+            select(models.ingestion_runs.c.batch_id).where(
+                models.ingestion_runs.c.source == "congress_trades"
+            )
+        ).scalar_one()
+        from src.db.queries import batch_rows
+
+        rows = batch_rows(conn, "congress_trades", congress_batch)
+        output, version = conn.execute(
+            select(models.publications.c.output, models.publications.c.ranking_version)
+            .where(models.publications.c.id == publication_id)
+        ).one()
+    assert [(r["symbol"], r["chamber"], r["data_source"]) for r in rows] == [
+        ("ZZCC", "House", "house_clerk")
+    ]
+    assert version == output["ranking_version"] == ranking.VERSION
+    tickers = {r["ticker"] for b in ("popular_stable", "affordable_growing") for r in output[b]}
+    assert "ZZCC" in tickers

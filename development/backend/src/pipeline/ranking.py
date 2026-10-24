@@ -10,19 +10,58 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence, cast
 
-VERSION = "watchlist-v2"
-DEFAULT_CONFIG = {"market_cap_threshold": "10000000000"}
+VERSION = "watchlist-v3"
+VERSIONS = ("watchlist-v1", "watchlist-v2", "watchlist-v3")
+# v3 caps Congress candidates. With complete House Clerk data every purchased
+# ticker would otherwise be a candidate (~650 a year), and each candidate
+# costs one FMP market-cap request against a 250-a-day free plan.
+DEFAULT_CONFIG = {"market_cap_threshold": "10000000000", "max_congress_candidates": 100}
 
 
-def candidate_symbols(rows: Mapping[str, Sequence[dict[str, Any]]]) -> list[str]:
-    return sorted(
-        {
-            r["symbol"]
-            for r in rows["congress_trades"]
-            if "purchase" in r["trade_type"].lower()
-        }
-        | {r["symbol"] for r in rows["ark_holdings"]}
+def candidate_symbols(
+    rows: Mapping[str, Sequence[dict[str, Any]]],
+    *,
+    version: str = VERSION,
+    config: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """
+    Symbols a publication evaluates (and fetches market caps for).
+
+    v1/v2: every Congress purchase symbol plus every ARK holding.
+    v3: the top `max_congress_candidates` Congress purchase symbols, by
+    distinct buyers, then buy count, then most recent transaction, then
+    symbol; plus every ARK holding.
+    """
+    ark = {r["symbol"] for r in rows["ark_holdings"]}
+    if version != "watchlist-v3":
+        return sorted(
+            {
+                r["symbol"]
+                for r in rows["congress_trades"]
+                if "purchase" in r["trade_type"].lower()
+            }
+            | ark
+        )
+    limit = int(
+        dict(DEFAULT_CONFIG if config is None else config).get(
+            "max_congress_candidates", DEFAULT_CONFIG["max_congress_candidates"]
+        )
     )
+    purchases: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in _cross_provider_purchases(rows["congress_trades"]):
+        purchases[row["symbol"]].append(row)
+
+    def strength(symbol: str) -> tuple[Any, ...]:
+        trades = purchases[symbol]
+        latest = max(r["transaction_date"] for r in trades)
+        return (
+            -len({r["politician_name"] for r in trades}),
+            -len(trades),
+            -latest.toordinal(),
+            symbol,
+        )
+
+    return sorted(set(sorted(purchases, key=strength)[:limit]) | ark)
 
 
 def json_ready(value: Any) -> Any:
@@ -72,14 +111,14 @@ def calculate(
     *,
     version: str = VERSION,
 ) -> dict[str, Any]:
-    if version not in ("watchlist-v1", "watchlist-v2"):
+    if version not in VERSIONS:
         raise ValueError("unsupported ranking version")
     config = dict(DEFAULT_CONFIG if config is None else config)
     threshold = Decimal(config["market_cap_threshold"])
     congress: dict[str, list[dict[str, Any]]] = defaultdict(list)
     insiders: dict[str, list[dict[str, Any]]] = defaultdict(list)
     congress_rows = rows["congress_trades"]
-    if version == "watchlist-v2":
+    if version != "watchlist-v1":
         congress_rows = _cross_provider_purchases(congress_rows)
     for row in congress_rows:
         if "purchase" in row["trade_type"].lower():
@@ -94,7 +133,7 @@ def calculate(
         "affordable_growing": [],
         "unresolved": [],
     }
-    for symbol in candidate_symbols(rows):
+    for symbol in candidate_symbols(rows, version=version, config=config):
         c, i, a, si = (
             congress.get(symbol),
             insiders.get(symbol),
