@@ -143,37 +143,25 @@ def _volumes(target_count):
 
 
 @pytest.mark.db
-def test_daily_run_stores_days_evidence_and_events_idempotently(engine):
+def test_daily_run_goes_through_the_contract_and_leaves_the_0005_tables(engine):
     theme_map = ThemeMap({"ECON_OILPRICE": {}, "ECON_INFLATION": {}, "ECON_TRADE_DISPUTE": {}},
                          ("reuters.com",))
     now = datetime(2026, 10, 14, 16, 30, tzinfo=timezone.utc)
-    fake = FakeClient({"ECON_OILPRICE": _volumes(90), "ECON_INFLATION": _volumes(31)},
-                      failing={"ECON_TRADE_DISPUTE"})
+    volumes = {"ECON_OILPRICE": _volumes(90), "ECON_INFLATION": _volumes(31),
+               "ECON_TRADE_DISPUTE": _volumes(5)}
+    fake = FakeClient(volumes, failing={"ECON_TRADE_DISPUTE"})
 
     summary = run_gdelt(engine, client=fake, theme_map=theme_map, now=now)
     assert summary.day == DAY
-    assert summary.events == ["ECON_OILPRICE"]
-    assert summary.failed == {"ECON_TRADE_DISPUTE": "http_429"}
-    run_gdelt(engine, client=fake, theme_map=theme_map, now=now)
+    # One failed theme fails the volume batch (G1); articles and the derivation
+    # (nothing to derive from yet) are reported per source with fixed codes.
+    assert summary.failed == {"gdelt_theme_volume": "partial_collection",
+                              "gdelt_spike_results": "missing_upstream"}
+    assert summary.succeeded == ["gdelt_theme_articles"]
 
+    fake.failing = set()
+    summary = run_gdelt(engine, client=fake, theme_map=theme_map, now=now)
+    assert summary.failed == {} and summary.events == ["ECON_OILPRICE"]
     with engine.connect() as conn:
-        days = conn.execute(select(models.gdelt_theme_days)).mappings().all()
-        articles = conn.execute(select(models.gdelt_articles)).mappings().all()
-        checks = conn.execute(select(models.gdelt_spike_checks)
-                              .order_by(models.gdelt_spike_checks.c.theme)).mappings().all()
-    # 28 baseline days + the target day per theme; the incomplete next day is not stored.
-    assert len(days) == 2 * 29 and max(r["day"] for r in days) == DAY
-    assert len(articles) == 2 * 5 and {r["domain"] for r in articles} == {"reuters.com"}
-    assert [(c["theme"], c["article_count"], c["is_spike"]) for c in checks] == [
-        ("ECON_INFLATION", 31, False), ("ECON_OILPRICE", 90, True)]
-    assert float(checks[1]["ratio"]) == 3.0
-
-    fake.volumes["ECON_OILPRICE"] = _volumes(40)
-    run_gdelt(engine, client=fake, theme_map=theme_map, now=now)
-    with engine.connect() as conn:
-        oil = conn.execute(select(models.gdelt_spike_checks).where(
-            models.gdelt_spike_checks.c.theme == "ECON_OILPRICE")).mappings().one()
-        stored = conn.execute(select(models.gdelt_theme_days.c.article_count).where(
-            models.gdelt_theme_days.c.theme == "ECON_OILPRICE",
-            models.gdelt_theme_days.c.day == DAY)).scalar_one()
-    assert (oil["article_count"], oil["is_spike"], stored) == (40, False, 40)
+        for table in (models.gdelt_theme_days, models.gdelt_articles, models.gdelt_spike_checks):
+            assert conn.execute(select(table)).all() == []

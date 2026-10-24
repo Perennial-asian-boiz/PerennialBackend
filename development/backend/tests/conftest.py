@@ -30,6 +30,7 @@ for _name in [n for n in os.environ if n.startswith("PG")]:
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
+
 from src.api.account_models import metadata as account_metadata  # noqa: E402
 from src.db.config import parse_database_url  # noqa: E402
 from src.db.models import metadata  # noqa: E402
@@ -46,9 +47,7 @@ ALLOWED_QUERY_KEYS = {"sslmode"}
 
 
 def pytest_configure(config):
-    if os.environ.get("REQUIRE_DATABASE_TESTS") == "1" and not os.environ.get(
-        "TEST_DATABASE_URL"
-    ):
+    if os.environ.get("REQUIRE_DATABASE_TESTS") == "1" and not os.environ.get("TEST_DATABASE_URL"):
         raise pytest.UsageError("REQUIRE_DATABASE_TESTS=1 requires TEST_DATABASE_URL")
 
 
@@ -65,13 +64,9 @@ def synthetic_finnhub_key(monkeypatch):
 def check_test_server_url(url) -> None:
     """Raise ValueError unless the URL can only reach a loopback *test* database."""
     if url.host not in LOOPBACK or "test" not in (url.database or ""):
-        raise ValueError(
-            "TEST_DATABASE_URL must be a loopback server and a *test* database"
-        )
+        raise ValueError("TEST_DATABASE_URL must be a loopback server and a *test* database")
     if set(url.query) - ALLOWED_QUERY_KEYS:
-        raise ValueError(
-            "TEST_DATABASE_URL may not carry connection-routing query parameters"
-        )
+        raise ValueError("TEST_DATABASE_URL may not carry connection-routing query parameters")
 
 
 def _test_server_url():

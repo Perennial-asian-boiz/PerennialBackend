@@ -1,7 +1,7 @@
 # Perennial database: roadmap to completion
 
 **Owner:** Bryan (product owner, final approver)
-**Written:** 2026-10-13 · **Updated:** 2026-10-18, from `origin/main` at `12e4b1b` · **Rescoped:** 2026-10-20 for a pre-launch team (see "Sizing" below)
+**Written:** 2026-10-13 · **Updated:** 2026-10-23 (state only, from `origin/main` at `5f644c6`); 2026-10-21 (decisions recorded); 2026-10-18, from `origin/main` at `12e4b1b` · **Rescoped:** 2026-10-20 for a pre-launch team (see "Sizing" below)
 **Replaces:** the 2026-10-08 production roadmap (archived at `docs/roadmap/production-roadmap.md`). The process rules in §2 of that document still apply and are not repeated here.
 **Purpose:** take the database from "a working watchlist pipeline that is currently stalled" to "finished": every product data domain modeled, in production, serving the app, and operating unattended. When the last milestone in this document closes, the database is done. Anything after that is a feature, not completion work.
 
@@ -20,18 +20,51 @@ The core pipeline merged in PR #4 and was hardened in PR #6. Keep these properti
 
 Since then, Phase 1/2 work has merged: typed settings (P2-B), database session timeouts and pools (P2-D), FMP pagination (P1-A), hashed lockfiles (P2-C), publication quality checks (P1-B), and Senate Stock Watcher removal. CI also fails on duplicate migration ids or a second Alembic head (#15).
 
-Alembic head is `0005` on `main`. GDELT (#17) merged on 2026-10-20 with `0004` (`sector`/`industry` columns on `market_cap_observations`) and `0005` (`gdelt_theme_days`, `gdelt_articles`, `gdelt_spike_checks`).
+From 2026-10-20 to 2026-10-23, #18 and #23–#40 merged:
+- **M0:** the Finnhub insider collector (#18), the `certifi` CVE fix (#23) and startup `Settings` passed into every collector (#24).
+- **M1:** publication audit events, narrowed overrides and fail-fast publishing (M1-A, #25); the provider contract-drift harness (P1-C, #27); `source_as_of` set from collected content (X1, #28); structured JSON logging with no `print()` in `src/` outside `cron.py` (P2-A, #34); `legacy_*` renames and collector `Protocol` types (P2-E, #35); and an FMP fix so null optional fields no longer crash `parse_trades` (#37).
+- **M2:** degraded publishing (#29), and `cli run-pipeline` reporting `required_source_unavailable` (N1, #31).
+- **M3:** the operations docs (#30), audited rollback, the one-shot scheduled run and the missed-run check (#32), and the scheduled encrypted backup and timed restore drill (#39).
+- **M4:** security identity (#36).
+- **M6:** GDELT through the ingestion contract, in two PRs (#33, #40).
+- **Demo mode** (#38): the full pipeline replays the synthetic fixtures against a guarded `perennial_demo` database, with no network access and no provider keys.
+
+Alembic head is `0009` on `main`. GDELT (#17) merged on 2026-10-20 with `0004` (`sector`/`industry` columns on `market_cap_observations`) and `0005` (`gdelt_theme_days`, `gdelt_articles`, `gdelt_spike_checks`). Since then: `0006` `publication_events` (#25), `0007` one `degraded` event per publication (#29), `0008` security identity (#36) and `0009` the GDELT ingestion contract (#40). CI is green on `main`.
+
+### Milestone state (2026-10-23)
+
+| Milestone | Code | Gate still open |
+|---|---|---|
+| M0 Restore | Merged (#18, #23, #24). The free-plan Congress fix is #42, ready to merge | A live publish needs #42 and Bryan's D4 probe |
+| M1 Correctness | Merged (#25, #27, #28, #34, #35, #37). Congress history (D13) is in #42, and JSON logging on `--once` is in #44; both are ready to merge | Bryan's three staging runs (D3), then the measured counts in `OPERATIONS.md` |
+| M2 Resilient publishing | Merged (#29, #31). The gate tests are in #29 | — |
+| M3 Platform | Partly merged (#30, #32, #39). Not built: hosting, staging, the four new roles | Supabase project and staging; alerts firing in a test; one timed restore drill on staging |
+| M4 Identity | Identity merged (#36). Market caps not started | `insider.py` still maps tickers in code; the market-caps source |
+| M5 App data and API | Not started; Jaden's auth PR #22 conflicts with `main` | All |
+| M6 Score data | GDELT contract merged (#33, #40); legacy-table drop #41 on hold | Fundamentals, news, sentiment and scores not started |
+| M7, M8 | Not started | All |
+
+**Open pull requests:**
+
+| PR | What | State |
+|---|---|---|
+| #42 | Incremental Congress collection on the free FMP plan, with stored history (D4, D13; migration `0010`) | Ready to merge: checker and auditor ACCEPT at `48013e9` |
+| #43 | Design note for #42 (docs only) | Ready to merge, paired with #42 |
+| #44 | JSON logging on the scheduler's `--once` path (MAIN-1) | Ready to merge: checker and auditor ACCEPT at `c80fdae` |
+| #45 | Test that a GDELT run in the demo database doesn't break the walkthrough (DEMO-G1) | Ready to merge: checker ACCEPT at `e958113` |
+| #41 | Drop the legacy GDELT tables (GDELT PR 3, the contract step) | On hold until #40 has shipped for one release; its placeholder migration id is renumbered at merge |
+| #22 | Supabase Auth (Jaden) | Conflicts with `main`; waiting on Jaden's changes, then checker and auditor review |
 
 ### What is wrong right now
 
-| # | Problem | Consequence |
-|---|---|---|
-| 1 | **`run-pipeline` can't succeed.** Since #9, the runner calls each collector without passing `settings`, and `fmp.FMP_API_KEY` is now `None`. | Congress collection always ends with `missing_credential`, so no publication is possible, even with valid keys. |
-| 2 | **The free FMP plan returns HTTP 402 on Senate page 1** (found in #18's live test). | Congress collection ends as `partial_collection`, which is rejected by design. Insider collection then has no upstream input. Blocked on decision D4. |
-| 3 | **The database insider collector still calls SecuritiesDB,** which has been down since 2026-10-07. | Fixed in #18 (Finnhub collector), which is open and needs a merge. |
-| 4 | All-or-nothing publishing | One provider outage freezes the whole watchlist (M2). |
-| 5 | The schema covers the four watchlist sources plus GDELT, which merged outside the ingestion contract. | User data and Confidence Score data are not modeled yet. Supabase Auth is in PR #22. GDELT needs follow-up rework (M6). |
-| 6 | **CI fails on every branch, `main` included,** since PYSEC-2026-4320 was published against `certifi` 2026.6.17. | No PR can go green, including #18. Fix: `certifi` 2026.10.19 on `fix/certifi-cve` (locks recompiled on Linux per ADR 0001). |
+| # | Problem | Consequence | State |
+|---|---|---|---|
+| 1 | **`run-pipeline` can't succeed.** Since #9, the runner calls each collector without passing `settings`, and `fmp.FMP_API_KEY` is now `None`. | Congress collection always ends with `missing_credential`, so no publication is possible, even with valid keys. | **Fixed** by #24 (2026-10-21) |
+| 2 | **The free FMP plan returns HTTP 402 on Senate page 1** (found in #18's live test). | Congress collection ends as `partial_collection`, which is rejected by design. Insider collection then has no upstream input. | Open on `main`. D4 settled as option B. The fix, #42, is ready to merge; Bryan's probe follows |
+| 3 | **The database insider collector still calls SecuritiesDB,** which has been down since 2026-10-07. | Insider collection fails. | **Fixed** by #18 (2026-10-20) |
+| 4 | All-or-nothing publishing | One provider outage freezes the whole watchlist (M2). | **Fixed** by #29 (2026-10-22) |
+| 5 | The schema covers the four watchlist sources plus GDELT, which merged outside the ingestion contract. | User data and Confidence Score data are not modeled yet. | Partly fixed. GDELT goes through the contract (#33, #40), and security identity is modeled (#36). User data (#22) and score data are still open |
+| 6 | **CI fails on every branch, `main` included,** since PYSEC-2026-4320 was published against `certifi` 2026.6.17. | No PR can go green, including #18. | **Fixed** by #23 (2026-10-20) |
 
 ### What "done" means
 
@@ -99,38 +132,42 @@ M0 Restore ──► M1 Correctness ──► M2 Resilient publishing ──► 
 | Merge PR #7 (legacy Senate Watcher) and #8 (legacy Finnhub) | — | **Done** 2026-10-14 |
 | Remove Senate Stock Watcher from `collect_congress` and `fmp.py` (feature dropped) | — | **Done** (#16, landed via #19) |
 | Branch cleanup: stranded stack landed (#19), merged branches deleted, auto-delete of head branches turned on | — | **Done** 2026-10-18 |
-| **Merge #18: move `collect_insider` to Finnhub.** Includes the ticker mapping (`RKLB UQ` → `RKLB`, `BRK.B` → `BRK-B`, `GOOG` → `GOOGL`), skipping listings with no Form 4 filings, honoring Finnhub's rate-limit reset, and deleting the SecuritiesDB code | haohnguyen94-droid; Bryan reviews | Open, updated with `main` 2026-10-20, merges cleanly. CI is red only on the `certifi` audit (problem 6); goes green once `fix/certifi-cve` lands and #18 is updated again. Needs Bryan's review |
-| **Fix the runner's missing settings.** `run_pipeline` and `collect_source` pass the startup `Settings` into every collector, so Congress gets its FMP key and insider its Finnhub key. Add a test that runs the pipeline through the CLI with keys present only in `Settings` | db-implementer | Assigned 2026-10-20 (`fix/runner-settings`) |
-| **D4: FMP plan tier.** Free plan returns 402 on page 1 | Bryan | Decision needed |
+| **Merge #18: move `collect_insider` to Finnhub.** Includes the ticker mapping (`RKLB UQ` → `RKLB`, `BRK.B` → `BRK-B`, `GOOG` → `GOOGL`), skipping listings with no Form 4 filings, honoring Finnhub's rate-limit reset, and deleting the SecuritiesDB code | haohnguyen94-droid; Bryan reviews | **Done** 2026-10-20 (#18) |
+| **Fix the runner's missing settings.** `run_pipeline` and `collect_source` pass the startup `Settings` into every collector, so Congress gets its FMP key and insider its Finnhub key. Add a test that runs the pipeline through the CLI with keys present only in `Settings` | db-implementer | **Done** 2026-10-21 (#24) |
+| **D4 = option B: bounded date-window queries on the free plan.** Then a probe run by Bryan (status codes and row counts only) | dev-sources; Bryan runs the probe | Built as #42: it reads one page per chamber and folds each batch into a stored history. Checker and auditor ACCEPT at `48013e9`; ready to merge. Bryan's probe comes after the merge |
 | Record the provider switch: the first Finnhub batch will differ sharply from the last SecuritiesDB batch, so expect one recorded quality override when it first publishes | primary | When it goes live |
 
 **Gate M0:** with synthetic fixtures, `run-pipeline` started through the CLI publishes with all four sources, using keys supplied only through `Settings`. No code path references SecuritiesDB.
+
+**State (2026-10-23):** the code for the gate is merged (#18, #24). `src/` mentions SecuritiesDB only in a docstring (`insider.py:30`). A live publish on the free FMP plan still needs #42 (problem 2).
 
 ### M1: Correctness and code quality (about 1 week)
 
 The Phase 1/2 packets from `docs/work-items/phase-1-2-kickoff.md` that are **merged:** P2-B settings, P2-D session settings, P1-A FMP pagination, P1-B quality checks, P2-C lockfile.
 
-**Still open from those packets:** P2-A structured logging (no `print()` in `src/`; dev-ops, in progress), P1-C provider contract-test harness (dev-sources; **built, in review** on `test/provider-contracts`), P2-E `legacy_*` renames and `Protocol` interfaces.
+**Merged since:** P1-C provider contract-test harness (#27), P2-A structured logging (#34) and P2-E `legacy_*` renames and `Protocol` interfaces (#35). The scheduler's `--once` path still logs without the JSON configuration. Its fix, MAIN-1 (#44), is ready to merge.
 
-**Follow-ups to merged code. These must land before the first real publication.** The first four are **built and in review** as packet M1-A (`feat/m1-publication-events`, commit `7ed26ee`, 390 tests passing; migration id `publication_events_v1` is a placeholder, renumbered at merge per §4):
+**Follow-ups to merged code. These must land before the first real publication.** The first four **merged** as packet M1-A (#25, 2026-10-21), with migration `0006`:
 
 - **Move the quality audit out of `ranking_config`** (decision D12). P1-B merged storing its audit and override inside `publications.ranking_config`, which is a replay input. Add a `publication_audit` migration (the next free number at merge): one append-only `publication_events` table (`publication_id`, `kind` ∈ {`quality_passed`, `quality_override`, `degraded`, `rollback`}, `actor`, `reason`, `checks` JSONB, `created_at`). It also stores degraded markers (M2) and rollbacks (M3). `ranking_config` goes back to holding ranking inputs only. This is free until the first real publication and permanent after it.
 - **Narrow overrides.** An override skips only the named quality checks, not the observation-date regression guard. Going backwards in time needs a rollback.
 - **Fix the empty-baseline lockout.** When the previous batch had zero rows, the row-count check records `no_baseline` instead of failing every later batch.
 - **Make publishing fail fast.** The session-wide `lock_timeout=5s` from P2-D also applies to the blocking `pg_advisory_xact_lock(170099)` in `publish()`. Switch to `pg_try_advisory_xact_lock` with a fixed `publication_in_progress` code, plus a test with two concurrent publishers.
-- **Congress history window** (new decision D13). Both Congress paths drop trades older than 2 years before storage. If Hong's "keep all the data" is confirmed, store the full history FMP serves and apply the 2-year window in ranking, so the watchlist doesn't change.
+- **Congress history window** (decision D13, settled). Both Congress paths drop trades older than 2 years before storage. Store the full history FMP serves instead, and apply the 2-year window in ranking, so the watchlist doesn't change. **Built in #42**, ready to merge.
 
 **Gate M1** (old Gates 1 and 2 combined):
-- three consecutive successful staging runs against live providers, which needs D3
+- three consecutive successful staging runs against live providers, run by Bryan with the existing keys (D3)
 - quality checks on, with the measured row counts, run times and retry rates recorded in `OPERATIONS.md`
 - zero `print()` calls in `src/` outside `cron.py`
 - the four follow-ups above merged before any real publication
+
+**State (2026-10-23):** two items are met. `src/` has no `print()` call outside `cron.py`, and the four follow-ups are merged (#25). The staging runs are waiting for Bryan, after #42–#45 merge. The measured counts in `OPERATIONS.md` will come from those runs.
 
 ### M2: Resilient publishing (about 1 week; moved up from old Phase 5)
 
 **Goal:** one provider outage makes one source stale, not the whole watchlist.
 
-- **Per-source policy in settings:** `required`, `max_reuse_age` and `max_age`. The recommended defaults are in decision D7.
+- **Per-source policy in settings:** `required`, `max_reuse_age` and `max_age`. The defaults are in decision D7 (settled).
 - **The runner selects instead of aborting.** For each source, it uses the current run's batch if the collection succeeded. Otherwise it reuses the latest good batch, if that batch is within `max_reuse_age`. A required source with nothing usable still aborts the run.
 - **Downstream runs use the upstream batches that were selected.** If Congress fails and yesterday's batch is reused, the insider collection is planned from that same reused batch, and the existing lineage check (`publication.py:102-110`) passes unchanged. That check doesn't need to be relaxed.
 - **Degraded publications are marked.** A publication that reuses any batch gets a `degraded` event in `publication_events`, listing each reused source and its age. The ranking config records each source's as-of date, which it already does. The API (M5) exposes `degraded: true` and the per-source dates.
@@ -140,6 +177,8 @@ The Phase 1/2 packets from `docs/work-items/phase-1-2-kickoff.md` that are **mer
 - a fault-injection test per source: fail it, confirm the publication is degraded and correct
 - a test that a reused batch past its limit aborts the run
 - replay of a degraded publication is byte-identical
+
+**State (2026-10-23):** **merged** in #29 (2026-10-22), with migration `0007` (at most one `degraded` event per publication), and in #31, where `cli run-pipeline` reports `required_source_unavailable`. #29 carries the gate tests: fault injection per source, the abort when a reused batch is past its limit, and byte-identical replay of a degraded publication. The checker ACCEPTED it and the auditor signed it off at `929ad88`, and Bryan signed off the gate by merging #29. Design note: `docs/work-items/m2-degraded-publishing-design-note.md`.
 
 ### M3: Platform (about 1 week; old Phase 3)
 
@@ -157,6 +196,18 @@ Unchanged from old Phase 3 except for these points:
 - **Restore drill:** one timed point-in-time recovery plus logical-backup restore on staging. This is the pre-launch drill M8 relies on.
 
 **Gate M3:** the old Gate 3 checklist for the pipeline, plus the observability alerts firing in a test and one successful, timed restore drill. Shadow comparison moves to M7.
+
+**State (2026-10-23):** the code and docs that don't need a hosted database are **merged**:
+- #30: the observability plan, backup targets and the secret rotation runbook in `OPERATIONS.md`
+- #32: `cli rollback --to` with its `rollback` event, the one-shot `--once` entry point and the missed-run check
+- #39: the scheduled encrypted logical backup and the timed restore drill script
+
+Still open:
+- the Supabase project and the D1 checks (session-mode connection, point-in-time recovery)
+- the staging environment
+- the four new roles, since `provision_roles.py` still defines only `perennial_owner`, `perennial_importer` and `perennial_reader`
+- the alerts firing in a test
+- the rotation rehearsal and the timed restore drill on staging, both run by Bryan
 
 ### M4: Security identity and reference data (1–1.5 weeks; old Phase 5 item 3, moved forward)
 
@@ -183,9 +234,21 @@ Migration (security identity; numbered at merge):
 
 **Gate M4:** every symbol in the current publication resolves to exactly one security. The #18 alias cases (`RKLB UQ`, `BRK.B`, `GOOG`) are regression tests, and the mapping code in `insider.py` is replaced by stored identifiers.
 
+**State (2026-10-23):** security identity is **merged** in #36 (2026-10-23), with migration `0008`. Design note: `docs/work-items/m4-identity-design-note.md`. What it added:
+- the new `securities` columns, `security_identifiers` and `company_profiles`, including `sector` and `industry`
+- seeded aliases for RKLB, BRK.B and BRK-B, GOOG and GOOGL, with tests
+- resolution through the aliases. Congress and ARK register an unknown plain ticker as a new security and count it in run diagnostics. Insider and short interest only look tickers up, and fail with `unresolved_security`.
+
+The sector and industry backfill is seed data applied by `ops/seed_identity.py`, and `market_cap_observations` keeps its copies until the contract step.
+
+Still open:
+- `insider.py` keeps its ticker-mapping function; a test proves the seeds reproduce it
+- the `market_caps` source is not started. Its design note, `docs/work-items/m4-market-caps-design-note.md` (MC-1 to MC-6), is accepted, and the build waits on the shared FMP budget question in the decision register
+- whether every symbol in a current publication resolves to exactly one security needs a live publication to check
+
 ### M5: App data model and read API (1–1.5 weeks; issues #2 and #3; runs in parallel with M4 after M3)
 
-**Status:** Jaden is building on **Supabase Auth** (`codex/supabase-auth-resend`, now **PR #22**). That branch includes account, notification and OTP tables and four migrations. Reviewing it against this section is the M5 work. The requirements that matter most:
+**Status:** Jaden is building on **Supabase Auth** (`codex/supabase-auth-resend`, now **PR #22**). That branch includes account, notification and OTP tables and four migrations. Reviewing it against this section is the M5 work. **As of 2026-10-23,** #22 conflicts with `main`. Bryan has sent Jaden a list of changes, and the checker and auditor review it once Jaden pushes. Nothing else in M5 has started. The requirements that matter most:
 - user tables live in schema `app` with row-level security, not in `perennial`
 - the pipeline role gets **no** write or `DELETE` grants on user tables; only the API role writes them
 - migrations use the repo's numbering convention (see §4), not named revision ids such as `auth_supabase_v1`
@@ -227,6 +290,8 @@ These are the new sources and derivations from `DECISIONS.md`. Each source follo
 - send GDELT through the ingestion contract, with an expand migration that adds batch lineage to the GDELT tables
 - turn spike checks into a derivation run
 
+**State (2026-10-23):** the rework's design note is `docs/work-items/gdelt-contract-design-note.md`. GDELT PR 1 (#33) split the source vocabulary from the watchlist set and allowed records with no security. GDELT PR 2 (#40) sent theme volume, tone and evidence articles through the ingestion contract, with migration `0009`, and made spike detection a derivation (spike-v2). The 0005 tables are no longer written. GDELT PR 3 (#41) drops them as the contract step, and is on hold until #40 has shipped for one release. `company_profiles` now has the sector and industry columns (#36). Company-level `event_company_impacts` is not started, and neither are fundamentals, news and sentiment, or scores.
+
 Recommended answers to the note's four questions:
 1. **Option A.** Extend the ingestion contract to sources that have no security, as its own PR before the GDELT tables.
 2. **Wait for M4** rather than building a partial `company_profiles` on the GDELT branch.
@@ -258,6 +323,8 @@ The rules are the same as for the watchlist:
 
 **Gate M7:** the app is served from production, the shadow differences are resolved, and the legacy code is gone. A search for `json.dump` in `src/services` returns nothing.
 
+**State (2026-10-23):** not started. The P2-E `Protocol` interfaces it builds on merged in #35.
+
 ### M8: Hardening and closeout (about 3–4 days; the "done" gate)
 
 - **Retention (D5):** the recommendation is now to **keep all data** (Hong). Raw payloads stay. If storage grows past budget, unpinned payloads move to object storage behind a content-hash pointer (`payload_location`, a migration at that point), and a replay test proves pinned publications are untouched.
@@ -268,50 +335,56 @@ The rules are the same as for the watchlist:
 
 **Gate M8:** every item in §1's definition of done is checked off. The database is complete.
 
+**State (2026-10-23):** not started.
+
 ---
 
 ## 4. Migration plan
 
-**Numbers are assigned when a migration merges, not when it's written.** GDELT merged first and took `0004` and `0005`. `publication_events` (placeholder `publication_events_v1`) and auth (#22) both still need renumbering. Whoever merges next takes the next free number, starting at `0006`, and rebases onto it. CI (`test_migration_guard.py`) fails any PR that would create a duplicate id or a second head. All revision ids are sequential four-digit numbers; named ids such as `auth_supabase_v1` get renumbered at merge. Each migration still needs its design note first (§2.4 of the 2026-10-08 roadmap).
+**Numbers are assigned when a migration merges, not when it's written.** `0004` to `0009` are taken (see the table). #42 is numbered `0010`, the next free number. Auth (#22) and the GDELT legacy-table drop (#41, placeholder `gdelt_drop_legacy_v1`) still need renumbering. Whoever merges next takes the next free number and rebases onto it. CI (`test_migration_guard.py`) fails any PR that would create a duplicate id or a second head. All revision ids are sequential four-digit numbers; named ids such as `auth_supabase_v1` get renumbered at merge. Each migration still needs its design note first (§2.4 of the 2026-10-08 roadmap).
 
 Expected order, by readiness:
 
 | Order | Milestone | Kind | Contents |
 |---|---|---|---|
-| next | M1 | expand | `publication_events` audit table |
-| then | M5 | expand | Supabase Auth account tables from Jaden's branch, after review: `app` schema, RLS, no pipeline grants |
-| then | M4 | expand | security identity, `company_profiles` (takes GDELT's sector and industry), `market_caps` source |
 | done | M6 | expand | `0004` GDELT `sector`/`industry` columns, `0005` GDELT tables (#17, merged 2026-10-20) |
-| then | M6 | expand | GDELT follow-up: batch lineage through the ingestion contract |
+| done | M1 | expand | `0006` `publication_events` audit table (#25, merged 2026-10-21) |
+| done | M2 | expand | `0007` at most one `degraded` event per publication, a partial unique index (#29, merged 2026-10-22) |
+| done | M4 | expand | `0008` security identity: `securities` columns, `security_identifiers`, `company_profiles` with GDELT's sector and industry (#36, merged 2026-10-23) |
+| done | M6 | expand | `0009` GDELT follow-up: batch lineage through the ingestion contract (#40, merged 2026-10-23) |
+| next | M0/M1 (D4, D13) | expand | `0010` Congress history: `congress_trade_history`, `congress_history_gaps`, `publication_history_watermarks`, `run_dependencies.history_through_id` (#42, ready to merge) |
+| then | M5 | expand | Supabase Auth account tables from Jaden's branch, after review: `app` schema, RLS, no pipeline grants (#22) |
+| then | M4 | expand | `market_caps` source |
+| on hold | M6 | **contract** | Drop the legacy GDELT `0005` tables (#41), after #40 has shipped for one release |
 | later | M6 | expand | fundamentals, news and sentiment, `publications.kind` and `company_scores` |
 | later | M8 | expand | payload storage pointer, only if storage needs it |
 | last | M7/M8 | **contract** | Drop `market_cap_observations` and `publication_market_caps`, and switch the `current_publication` PK to `(kind, channel)`. (`figi` stays nullable after the rescope.) |
 
-Only the last one removes anything, and it runs only after the code that used those objects has been gone for a full release.
+Only the two contract rows remove anything, and each runs only after the code that used those objects has been gone for a full release.
 
 ---
 
 ## 5. Decisions
 
-**Open:**
+**Open:** D8, below. The questions raised since 2026-10-21 are in the rig's decision register, `.local-tools/rigs/database/decisions-for-bryan.md`: the shared FMP daily budget, the insider coverage cap, and one versus named watchlists per user. The coordinator and planner keep that register locally, outside the repo.
 
 | ID | Decision | Needed by | Recommendation |
 |---|---|---|---|
-| D3 | Staging provider keys: FMP, Finnhub, Nasdaq, ARK | M1 gate | Separate staging and prod keys |
-| **D4** | **FMP plan tier** | **M0, now** | The free plan returns 402 on Senate page 1, so Congress can't complete. Choose a paid tier, or a different Congress endpoint or date-window query, recorded in an ADR |
-| D6 | SLOs and on-call | M3 | As proposed: publish by 10:30 PT on 95% of trading days; RPO 15 min, RTO 1 h |
-| D7 | Reuse limits for degraded publishing | M2 | Short interest 15 days; insider, ARK and Congress 3 days; market caps 3 days. Nothing may be reused past its `max_age` |
-| D8 | Terms-of-service review | before M7 cutover | Finnhub's free tier (check redistribution), FMP, Nasdaq, Yahoo, GDELT |
-| D10 | Confidence Score weights and validation | M6 | Accept 60/25/15 as `score-v1` with the Piotroski check. **Blocks M6** |
-| D12 | Quality-check audit storage | before the first real publication | The `publication_events` table, not JSONB in `ranking_config` |
-| D13 | Congress history window | M1 | Store everything FMP serves, and apply the 2-year window in ranking |
-| **D14** | **Monthly cost ceiling** for hosting and data providers | M3 (before D1 is final) | Set one number. It decides the Supabase plan (point-in-time recovery is a paid add-on), the FMP tier (D4) and whether Finnhub's free terms (D8) are enough |
+| D8 | Terms-of-service review | before M7 cutover | Finnhub's free tier (check redistribution), FMP, Nasdaq, Yahoo, GDELT. Nasdaq short interest and ARK come from unofficial public endpoints (`api.nasdaq.com`, `arkfunds.io`), so check whether showing their data to users is allowed |
 
-**Settled:**
+**Settled** (D3, D4, D6, D7, D10, D13 and D14 by Bryan on 2026-10-21):
 
 | ID | Decision | Outcome |
 |---|---|---|
-| D1 | Hosting | Supabase Postgres 17, since auth is on Supabase. Still confirm session-mode connections and point-in-time recovery on the plan |
+| D1 | Hosting | Supabase Postgres 17, since auth is on Supabase. Start on the free plan (D14). Before production, confirm a direct or session-mode connection for the pipeline; point-in-time recovery is a launch-time upgrade, and until then the restore drill uses scheduled logical backups |
+| D3 | Staging provider keys | Only FMP and Finnhub need keys; Nasdaq and ARK need none. Use the existing FMP and Finnhub keys for staging for now, stored outside the repo; get separate production keys at launch. Agents never handle real keys: Bryan runs live probes and staging runs |
+| D4 | FMP plan tier | **Stay on the free plan; option B.** The Congress collector queries bounded date windows instead of deep pagination. Bryan verifies it with a probe that reports only status codes and row counts. If the free plan still returns 402, fall back to a paid tier or another provider, recorded in an ADR |
+| D6 | SLOs | Publish by 10:30 PT on 95% of trading days; RPO 15 min, RTO 1 h. Targets for alerts and the restore drill, not an on-call commitment |
+| D7 | Reuse limits for degraded publishing | Short interest 15 days; insider, ARK and Congress 3 days; market caps 3 days. Nothing may be reused past its `max_age` |
+| D10 | Confidence Score weights | 60/25/15 as `score-v1`, validated against the Piotroski F-Score. Weights are versioned, so retuning is cheap |
+| D12 | Quality-check audit storage | The `publication_events` table, not JSONB in `ranking_config` (#25) |
+| D13 | Congress history window | Store everything FMP serves, and apply the 2-year window in ranking, so the watchlist doesn't change |
+| D14 | Monthly cost ceiling | **Free tiers only for now;** revisit once there is a budget. Paid items (point-in-time recovery, any paid provider tier) are launch-time upgrades, not blockers |
 | D2 | Versions | Python 3.12, PostgreSQL 17 |
 | D5 | Retention | Keep all data (Hong). Move unpinned payloads to object storage only if storage requires it |
 | D11 | API data path | FastAPI is the only path to user data, with Supabase Auth JWTs and RLS as a second defense |
@@ -333,7 +406,7 @@ Only the last one removes anything, and it runs only after the code that used th
 | Coordination state in `/private/tmp` lost again | Mitigated | Durable state goes in GitHub issues and `docs/`; worktrees go outside `/private/tmp` |
 | Stacked PRs merged into a stack branch instead of `main` | Mitigated (happened 2026-10-14) | Head branches are deleted automatically on merge, so GitHub moves stacked PRs to `main` |
 | Parallel branches claim the same migration number | Mitigated | CI migration guard; numbers assigned at merge |
-| The free FMP tier blocks Congress collection | Happening now | D4 |
+| The free FMP tier blocks Congress collection | Happening now (until #42 merges) | D4 option B, built in #42 as one page per chamber plus a stored history; paid tier or another provider if the probe still fails |
 
 ---
 
@@ -351,6 +424,6 @@ Re-baselined on 2026-10-18.
 | 6.5–7 | M7 cutover; M8 |
 
 About **7 weeks to a finished database** after the rescope, down from 9. The time saved comes mainly from M7's shorter shadow run and M8's lighter capacity and recovery work; the added items (account deletion, observability, secret rotation) cost a few days. The things most likely to stretch it:
-- D4, which blocks a live publication now
-- D3, D10 and D14
+- whether D4 option B works on the free FMP plan
+- free-tier limits under D14 (no point-in-time recovery until launch; Finnhub rate limits)
 - entity-resolution quality in M4 and M6

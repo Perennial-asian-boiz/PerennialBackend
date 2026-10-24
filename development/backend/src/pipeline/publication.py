@@ -4,6 +4,9 @@ Only this module changes the production pointer. Importing/backfilling remains
 independent. Defaults are deliberately visible policy, configurable by the caller.
 """
 
+import re
+import unicodedata
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, Mapping, Sequence, cast
@@ -14,8 +17,15 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 
 from src.db import models as m
 from src.db.queries import batch_rows
+from src.ingestion.diagnostics import safe_code
+from src.pipeline import congress_history
+from src.pipeline.demo_guard import (
+    DEMO_MODES,
+    LIVE_MODES,
+    check_demo_database,
+)
 from src.pipeline.ranking import DEFAULT_CONFIG, VERSION, calculate, candidate_symbols
-from src.settings import QualityThreshold, _quality_defaults
+from src.settings import QualityThreshold, _quality_defaults, _source_policy_defaults
 
 MAX_AGE = {
     "congress_trades": timedelta(days=3),
@@ -23,6 +33,33 @@ MAX_AGE = {
     "insider_trades": timedelta(days=3),
     "short_interest": timedelta(days=45),
 }
+DOWNSTREAM = ("insider_trades", "short_interest")
+QUALITY_CHECKS = ("row_count", "null_share", "source_as_of")
+PUBLICATION_LOCK = 170099
+
+# Override audit text is append-only and ends up in backups, so unsafe input is
+# refused rather than redacted: no redactor can prove free text holds no secret.
+# Actor is an identity handle; reason is one line of plain prose.
+_SAFE_ACTOR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,199}")
+_UNSAFE_REASON = (
+    re.compile(r"(?i)[a-z][a-z0-9+.-]*://|\bwww\."),  # URLs
+    # Credential vocabulary anywhere, whatever follows: quoting, spacing or
+    # separators cannot smuggle a value past a delimiter check. "_" counts as a
+    # boundary so x_api_key matches; plain "key" is too common and is below.
+    re.compile(
+        r"(?i)(?<![a-z0-9])(api[\s_-]?keys?|(access|auth|refresh|session)[\s_-]?tokens?|"
+        r"tokens?|secrets?|client[\s_-]?secret|private[\s_-]?key|passwords?|passwd|pwd|"
+        r"passphrase|credentials?|authorization|bearer|cookies?)(?![a-z0-9])"
+    ),
+    # key/sig/signature used as a field name, quoted or not.
+    re.compile(r"(?i)(?<![a-z0-9])(key|sig|signature)[\"'`]?\s*[:=]"),
+    # Any quoted field name followed by a value separator: JSON or dict dumps.
+    re.compile(r"[\"'`]\s*[:=]"),
+    # Structured-dump and assignment syntax has no place in a one-line reason.
+    re.compile(r"[{}=<>`\\]"),
+    # Key-shaped runs: 20+ token characters with a digit, or 32+ of any kind.
+    re.compile(r"(?=[A-Za-z0-9_+/=-]*\d)[A-Za-z0-9_+/=-]{20,}|[A-Za-z0-9_+/=-]{32,}"),
+)
 
 
 class PublicationError(ValueError):
@@ -41,6 +78,89 @@ class PublicationQualityError(PublicationError):
         super().__init__("publication quality checks failed: " + ", ".join(self.checks))
 
 
+class OverrideInputError(ValueError):
+    """Override actor or reason is not safe to retain; the input is never echoed."""
+
+    code = "override_input_rejected"
+
+
+def _check_override_text(actor: str, reason: str) -> None:
+    if not _SAFE_ACTOR.fullmatch(actor):
+        raise OverrideInputError(
+            "override actor must be 1 to 200 characters of letters, digits and ._@+-"
+        )
+    if (
+        not reason
+        or len(reason) > 500
+        or any(unicodedata.category(ch).startswith("C") for ch in reason)
+        or any(pattern.search(reason) for pattern in _UNSAFE_REASON)
+    ):
+        raise OverrideInputError(
+            "override reason must be 1 to 500 characters of plain one-line text "
+            "without URLs, credential words, field syntax, tokens or control characters"
+        )
+
+
+class PublicationRegressionError(PublicationError):
+    """A source's observation date would go backwards against the prior publication."""
+
+    code = "observation_regressed"
+
+    def __init__(self, source: str):
+        self.source = source
+        super().__init__("publication would regress observation date")
+
+
+class PublicationReuseError(PublicationError):
+    """A reused run is no longer pinned by the current publication or is too old."""
+
+    code = "reuse_not_current"
+
+
+@dataclass(frozen=True)
+class Reuse:
+    """Why a source pins the previous publication's run instead of a fresh one.
+
+    failure_code is the fixed code of today's failed attempt, or None for a
+    source reused only to keep a reused downstream run's lineage intact (cohort).
+    """
+
+    failure_code: str | None
+    failed_run_id: int | None = None
+    cohort: bool = False
+    unpublished_run_id: int | None = None
+
+
+@dataclass(frozen=True)
+class PinnedRun:
+    run_id: int
+    batch_id: int
+    collected_at: datetime
+    dependencies: dict[str, int]
+    reusable: bool
+
+
+@dataclass(frozen=True)
+class PriorPublication:
+    publication_id: int
+    pins: dict[str, PinnedRun]
+
+
+class RollbackError(PublicationError):
+    """A rollback target is missing, already current, or not reproducible."""
+
+    code = "rollback_rejected"
+
+
+class PublicationInProgressError(PublicationError):
+    """Another publisher holds the pointer lock; fail fast instead of queueing."""
+
+    code = "publication_in_progress"
+
+    def __init__(self) -> None:
+        super().__init__("another publication is in progress")
+
+
 def _null_share(rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> float:
     if not rows or not fields:
         return 0.0
@@ -56,15 +176,16 @@ def _quality_failures(
     candidate_as_of: date | None,
     threshold: QualityThreshold,
 ) -> list[str]:
-    """Return fixed check names; exact thresholds pass at their boundary."""
+    """Return fixed check names; exact thresholds pass at their boundary.
+
+    An empty baseline has no ratio to compare against, so row_count is not
+    evaluated; the caller records it as no_baseline.
+    """
     issues = []
     before, after = len(previous), len(candidate)
-    if (before == 0 and after > 0) or (
-        before > 0
-        and (
-            after < before * threshold.min_count_ratio
-            or after > before * threshold.max_count_ratio
-        )
+    if before > 0 and (
+        after < before * threshold.min_count_ratio
+        or after > before * threshold.max_count_ratio
     ):
         issues.append("row_count")
     if _null_share(candidate, threshold.null_fields) > (
@@ -88,10 +209,17 @@ def _quality_audit(
     batches: Mapping[str, int],
     rows: Mapping[str, list[dict[str, Any]]],
     thresholds: Mapping[str, QualityThreshold],
+    reused: frozenset[str] = frozenset(),
+    modes: Sequence[str] = LIVE_MODES,
 ) -> tuple[dict[str, Any], list[str]]:
     audit: dict[str, Any] = {}
     failed: list[str] = []
-    for source in m.SOURCES:
+    for source in m.WATCHLIST_SOURCES:
+        if source in reused:
+            # Already passed when first published; comparing it against newer,
+            # unpublished batches would only produce spurious failures.
+            audit[source] = {"status": "reused", "batch_id": batches[source]}
+            continue
         candidate = runs[source]
         previous = (
             conn.execute(
@@ -103,7 +231,7 @@ def _quality_audit(
                 .where(
                     m.ingestion_runs.c.source == source,
                     m.ingestion_runs.c.status == "succeeded",
-                    m.ingestion_runs.c.collection_mode == "live",
+                    m.ingestion_runs.c.collection_mode.in_(modes),
                     m.ingestion_runs.c.id != candidate["id"],
                     m.ingestion_runs.c.finished_at <= candidate["finished_at"],
                     m.source_batches.c.id != batches[source],
@@ -138,6 +266,8 @@ def _quality_audit(
             "baseline_batch_id": previous["id"],
             "failed_checks": issues,
         }
+        if not earlier_rows:
+            audit[source]["no_baseline_checks"] = ["row_count"]
         failed.extend(f"{source}:{issue}" for issue in issues)
     return audit, sorted(failed)
 
@@ -150,64 +280,142 @@ def _time_ok(value: Any, now: datetime, max_age: timedelta) -> bool:
     )
 
 
+def _check_run(
+    conn: Connection,
+    source: str,
+    run_id: int,
+    now: datetime,
+    max_age: timedelta,
+    modes: Sequence[str] = LIVE_MODES,
+) -> tuple[RowMapping, list[dict[str, Any]], date | None]:
+    """Every per-source publication rule; shared by publishing and reuse planning."""
+    run = (
+        conn.execute(select(m.ingestion_runs).where(m.ingestion_runs.c.id == run_id))
+        .mappings()
+        .one_or_none()
+    )
+    if not run or run["source"] != source or run["status"] != "succeeded":
+        raise PublicationError("source run is not successful")
+    if run["collection_mode"] not in modes:
+        raise PublicationError("production requires live collection mode")
+    if not _time_ok(run["collected_at"], now, max_age):
+        raise PublicationError("source collection is stale or future-dated")
+    if not run["coverage"] or run["coverage"].get("complete") is not True:
+        raise PublicationError("source coverage is incomplete or unknown")
+    batch = (
+        conn.execute(
+            select(m.source_batches).where(m.source_batches.c.id == run["batch_id"])
+        )
+        .mappings()
+        .one()
+    )
+    day = batch["source_as_of"]
+    if day and day > now.date():
+        raise PublicationError("source observation is future-dated")
+    if source == "ark_holdings" and (
+        day is None or day < (now - timedelta(days=7)).date()
+    ):
+        raise PublicationError("ARK observation date is stale or unknown")
+    rows = batch_rows(conn, source, run["batch_id"])
+    if source == "short_interest" and any(
+        r["settlement_date"] > now.date()
+        or r["settlement_date"] < (now - timedelta(days=45)).date()
+        for r in rows
+    ):
+        raise PublicationError("short-interest observation is stale or future-dated")
+    return run, rows, day
+
+
+def _prior_pins(conn: Connection) -> tuple[int | None, dict[str, Any]]:
+    prior = conn.execute(
+        select(m.current_publication.c.publication_id).where(
+            m.current_publication.c.channel == "production"
+        )
+    ).scalar_one_or_none()
+    if prior is None:
+        return None, {}
+    pins = {
+        row.source: row
+        for row in conn.execute(
+            select(
+                m.publication_sources.c.source,
+                m.publication_sources.c.run_id,
+                m.publication_sources.c.batch_id,
+                m.ingestion_runs.c.collected_at,
+            )
+            .join(
+                m.ingestion_runs,
+                m.ingestion_runs.c.id == m.publication_sources.c.run_id,
+            )
+            .where(m.publication_sources.c.publication_id == prior)
+        )
+    }
+    return prior, pins
+
+
+def prior_publication(
+    engine: Engine,
+    now: datetime,
+    max_age: Mapping[str, timedelta],
+    reuse_limits: Mapping[str, timedelta],
+    modes: Sequence[str] = LIVE_MODES,
+) -> PriorPublication | None:
+    """The current production publication's pins, marking which may be reused.
+
+    A pin is reusable while it passes every publication rule and was collected
+    within its source's max_reuse_age. Nothing else is ever reused.
+    """
+    with engine.connect() as conn:
+        prior, pins = _prior_pins(conn)
+        if prior is None:
+            return None
+        result = {}
+        for source, pin in pins.items():
+            try:
+                _check_run(conn, source, pin.run_id, now, max_age[source], modes)
+                reusable = now - pin.collected_at <= reuse_limits[source]
+            except PublicationError:
+                reusable = False
+            deps = dict(
+                conn.execute(
+                    select(
+                        m.run_dependencies.c.source, m.run_dependencies.c.batch_id
+                    ).where(m.run_dependencies.c.run_id == pin.run_id)
+                )
+                .tuples()
+                .all()
+            )
+            result[source] = PinnedRun(
+                pin.run_id, pin.batch_id, pin.collected_at, deps, reusable
+            )
+        return PriorPublication(prior, result)
+
+
 def _selected(
     conn: Connection,
     run_ids: Mapping[str, int],
     now: datetime,
     max_age: Mapping[str, timedelta],
+    modes: Sequence[str] = LIVE_MODES,
 ) -> tuple[
     dict[str, RowMapping],
     dict[str, int],
     dict[str, list[dict[str, Any]]],
     dict[str, str | None],
 ]:
-    if set(run_ids) != set(m.SOURCES):
+    if set(run_ids) != set(m.WATCHLIST_SOURCES):
         raise PublicationError("all source run IDs are required")
     runs: dict[str, RowMapping] = {}
     batches: dict[str, int] = {}
     rows: dict[str, list[dict[str, Any]]] = {}
     as_of: dict[str, str | None] = {}
-    for source in m.SOURCES:
-        run = (
-            conn.execute(
-                select(m.ingestion_runs).where(m.ingestion_runs.c.id == run_ids[source])
-            )
-            .mappings()
-            .one_or_none()
+    for source in m.WATCHLIST_SOURCES:
+        run, source_rows, day = _check_run(
+            conn, source, run_ids[source], now, max_age[source], modes
         )
-        if not run or run["source"] != source or run["status"] != "succeeded":
-            raise PublicationError("source run is not successful")
-        if run["collection_mode"] != "live":
-            raise PublicationError("production requires live collection mode")
-        if not _time_ok(run["collected_at"], now, max_age[source]):
-            raise PublicationError("source collection is stale or future-dated")
-        if not run["coverage"] or run["coverage"].get("complete") is not True:
-            raise PublicationError("source coverage is incomplete or unknown")
-        batch = (
-            conn.execute(
-                select(m.source_batches).where(m.source_batches.c.id == run["batch_id"])
-            )
-            .mappings()
-            .one()
-        )
-        day = batch["source_as_of"]
-        if day and day > now.date():
-            raise PublicationError("source observation is future-dated")
-        if source == "ark_holdings" and (
-            day is None or day < (now - timedelta(days=7)).date()
-        ):
-            raise PublicationError("ARK observation date is stale or unknown")
         runs[source], batches[source] = run, run["batch_id"]
-        rows[source] = batch_rows(conn, source, run["batch_id"])
+        rows[source] = source_rows
         as_of[source] = day.isoformat() if day else None
-        if source == "short_interest" and any(
-            r["settlement_date"] > now.date()
-            or r["settlement_date"] < (now - timedelta(days=45)).date()
-            for r in rows[source]
-        ):
-            raise PublicationError(
-                "short-interest observation is stale or future-dated"
-            )
     expected = {s: batches[s] for s in ("congress_trades", "ark_holdings")}
     for source in ("insider_trades", "short_interest"):
         deps = (
@@ -227,7 +435,10 @@ def _selected(
 
 
 def _caps(
-    observations: Mapping[str, dict[str, Any]], symbols: Sequence[str], now: datetime
+    observations: Mapping[str, dict[str, Any]],
+    symbols: Sequence[str],
+    now: datetime,
+    retrieval_limit: timedelta = timedelta(days=1),
 ) -> dict[str, dict[str, Any]]:
     if set(observations) != set(symbols):
         raise PublicationError("market-cap coverage does not match candidate universe")
@@ -238,7 +449,7 @@ def _caps(
             raise PublicationError("market-cap observation is malformed")
         if obs.get("currency") != "USD" or obs.get("provider") != "fmp":
             raise PublicationError("unsupported market-cap currency or provider")
-        if not _time_ok(obs.get("retrieved_at"), now, timedelta(days=1)):
+        if not _time_ok(obs.get("retrieved_at"), now, retrieval_limit):
             raise PublicationError("market-cap retrieval is stale or future-dated")
         observed = obs.get("observed_at")
         if observed is not None and not _time_ok(observed, now, timedelta(days=3)):
@@ -276,6 +487,70 @@ def _caps(
     return normalized
 
 
+def _validate_reuse(
+    conn: Connection,
+    reuse: Mapping[str, Reuse],
+    runs: Mapping[str, RowMapping],
+    now: datetime,
+    max_age: Mapping[str, timedelta],
+    reuse_limits: Mapping[str, timedelta],
+) -> dict[str, Any] | None:
+    """Re-check reuse under the publication lock; return the degraded event body."""
+    if not reuse:
+        return None
+    prior, pins = _prior_pins(conn)
+    reused: dict[str, Any] = {}
+    for source, why in sorted(reuse.items()):
+        pin = pins.get(source)
+        run = runs[source]
+        if pin is None or pin.run_id != run["id"]:
+            raise PublicationReuseError(
+                "reused run is not pinned by the current publication"
+            )
+        age = now - run["collected_at"]
+        if age > reuse_limits[source]:
+            raise PublicationReuseError("reused run is older than its reuse limit")
+        reused[source] = {
+            "run_id": run["id"],
+            "batch_id": run["batch_id"],
+            "from_publication_id": prior,
+            "collected_at": run["collected_at"].isoformat(),
+            "age_seconds": int(age.total_seconds()),
+            "failed_run_id": why.failed_run_id,
+            "failure_code": None
+            if why.failure_code is None
+            else safe_code(why.failure_code),
+            "unpublished_run_id": why.unpublished_run_id,
+        }
+    return {
+        "reused": reused,
+        "cohort": sorted(s for s, why in reuse.items() if why.cohort),
+        "all_sources_reused": set(reuse) == set(m.WATCHLIST_SOURCES),
+        "policy": {
+            s: {
+                "required": True,
+                "max_reuse_age_seconds": int(reuse_limits[s].total_seconds()),
+                "max_age_seconds": int(max_age[s].total_seconds()),
+            }
+            for s in m.WATCHLIST_SOURCES
+        },
+    }
+
+
+def _with_market_cap_fallback(
+    degraded: dict[str, Any] | None, cap_data: Mapping[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Add the market-cap fallback (M2 Q3) to the degraded event body."""
+    body = degraded or {"reused": {}, "cohort": [], "all_sources_reused": False}
+    retrieved = [o["retrieved_at"] for o in cap_data.values() if o["value"] is not None]
+    body["market_caps"] = {
+        "fallback": True,
+        "oldest_retrieved_at": min(retrieved).isoformat() if retrieved else None,
+        "unavailable": sum(o["value"] is None for o in cap_data.values()),
+    }
+    return body
+
+
 def publish(
     engine: Engine,
     run_ids: Mapping[str, int],
@@ -285,36 +560,80 @@ def publish(
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
     override_reason: str | None = None,
     override_actor: str | None = None,
+    override_checks: Sequence[str] | None = None,
+    reuse: Mapping[str, Reuse] | None = None,
+    reuse_limits: Mapping[str, timedelta] | None = None,
+    market_cap_fallback: timedelta | None = None,
+    demo: bool = False,
 ) -> int:
+    """Publish and promote; an override skips only the named failed checks.
+
+    override_checks are "source:check" names exactly as a refused publish
+    reported them. Every failure must be named, every name must have failed,
+    and no override relaxes the observation-date regression guard.
+
+    reuse names sources whose run_ids are the current publication's pins
+    (degraded publishing, roadmap M2). Each is re-validated under the lock
+    against reuse_limits and recorded in one `degraded` event.
+
+    market_cap_fallback, when set, means the observations are earlier stored
+    ones (M2 Q3): retrieval may be that old, and the publication is degraded.
+    """
+    reuse = dict(reuse or {})
+    if reuse_limits is None:
+        reuse_limits = {
+            s: p.max_reuse_age for s, p in _source_policy_defaults().items()
+        }
+    if set(reuse) - set(m.WATCHLIST_SOURCES) or set(reuse_limits) != set(
+        m.WATCHLIST_SOURCES
+    ):
+        raise ValueError("reuse must name known sources with limits for every source")
     max_age = dict(MAX_AGE if max_age is None else max_age)
-    if set(max_age) != set(m.SOURCES) or any(
+    if set(max_age) != set(m.WATCHLIST_SOURCES) or any(
         v.total_seconds() <= 0 for v in max_age.values()
     ):
         raise ValueError("freshness policy must cover every source with positive ages")
     quality_thresholds = (
         _quality_defaults() if quality_thresholds is None else quality_thresholds
     )
-    if set(quality_thresholds) != set(m.SOURCES):
+    if set(quality_thresholds) != set(m.WATCHLIST_SOURCES):
         raise ValueError("quality policy must cover every source")
+    overridden: list[str] = []
     if override_reason is not None:
         override_reason = override_reason.strip()
         override_actor = (override_actor or "").strip()
-        if not override_reason or len(override_reason) > 500:
-            raise ValueError("override reason must be 1 to 500 characters")
-        if not override_actor or len(override_actor) > 200:
-            raise ValueError("override actor must be 1 to 200 characters")
-    elif override_actor is not None:
-        raise ValueError("override actor requires a reason")
+        _check_override_text(override_actor, override_reason)
+        valid = {f"{s}:{c}" for s in m.WATCHLIST_SOURCES for c in QUALITY_CHECKS}
+        if not override_checks or not set(override_checks) <= valid:
+            raise ValueError("override must name one or more known source:check names")
+        overridden = sorted(set(override_checks))
+    elif override_actor is not None or override_checks is not None:
+        raise ValueError("override actor and checks require a reason")
     now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         # Serialize pointer changes and compare against the actual prior publication.
-        conn.execute(text("SELECT pg_advisory_xact_lock(170099)"))
-        runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age)
+        # Try, never wait: under the session lock_timeout a wait ends in an opaque
+        # driver error, and a second publisher has nothing to add anyway.
+        if not conn.execute(
+            text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": PUBLICATION_LOCK}
+        ).scalar_one():
+            raise PublicationInProgressError()
+        if demo:
+            # Only the marked local demo database may pin fixture-mode runs.
+            check_demo_database(conn)
+        modes = DEMO_MODES if demo else LIVE_MODES
+        runs, batches, rows, as_of = _selected(conn, run_ids, now, max_age, modes)
+        degraded = _validate_reuse(conn, reuse, runs, now, max_age, reuse_limits)
         source_audit, failed_checks = _quality_audit(
-            conn, runs, batches, rows, quality_thresholds
+            conn, runs, batches, rows, quality_thresholds, frozenset(reuse), modes
         )
-        if failed_checks and override_reason is None:
+        if override_reason is None:
+            if failed_checks:
+                raise PublicationQualityError(failed_checks)
+        elif not set(failed_checks) <= set(overridden):
             raise PublicationQualityError(failed_checks)
+        elif set(overridden) - set(failed_checks):
+            raise PublicationError("override names checks that did not fail")
         prior = conn.execute(
             select(m.current_publication.c.publication_id).where(
                 m.current_publication.c.channel == "production"
@@ -345,34 +664,55 @@ def publish(
             for old in previous:
                 if runs[old.source]["collected_at"] < old.collected_at:
                     raise PublicationError("publication would regress collection time")
-                if (
-                    override_reason is None
-                    and old.source_as_of
-                    and (
-                        as_of[old.source] is None
-                        or as_of[old.source] < old.source_as_of.isoformat()
-                    )
+                if old.source_as_of and (
+                    as_of[old.source] is None
+                    or as_of[old.source] < old.source_as_of.isoformat()
                 ):
-                    raise PublicationError("publication would regress observation date")
-        symbols = candidate_symbols(rows)
-        cap_data = _caps(observations, symbols, now)
-        quality_audit: dict[str, Any] = {"sources": source_audit}
+                    raise PublicationRegressionError(old.source)
+        # Quality checks above judge the day's observation batch; ranking reads
+        # the accumulated Congress history it was folded into (v3).
+        congress_history.derive(conn, runs["congress_trades"]["id"], modes)
+        try:
+            planned = congress_history.planned_watermark(conn, run_ids)
+        except ValueError:
+            raise PublicationError(
+                "downstream runs were planned from different Congress history"
+            ) from None
+        # Pin the history the downstream plans covered. Runs planned before
+        # CI-1 recorded none; they rank the history visible now, as before.
+        through = congress_history.watermark(conn) if planned is None else planned
+        if not congress_history.covers_batch(conn, through, batches["congress_trades"]):
+            raise PublicationError(
+                "downstream plans predate the selected Congress batch"
+            )
+        ranked = {
+            **rows,
+            "congress_trades": congress_history.ranking_rows(conn, through, now),
+        }
+        history = congress_history.summary(conn, through, now)
+        symbols = candidate_symbols(ranked)
+        cap_data = _caps(
+            observations, symbols, now, market_cap_fallback or timedelta(days=1)
+        )
+        if market_cap_fallback is not None:
+            degraded = _with_market_cap_fallback(degraded, cap_data)
+        if history["gaps_in_window"]["count"]:
+            degraded = degraded or {
+                "reused": {},
+                "cohort": [],
+                "all_sources_reused": False,
+            }
+            degraded["congress_gaps"] = history["gaps_in_window"]
         config = {
             **DEFAULT_CONFIG,
+            "congress_window_years": congress_history.WINDOW_YEARS,
             "source_as_of": as_of,
             "freshness_seconds": {
                 s: int(age.total_seconds()) for s, age in max_age.items()
             },
-            "quality_audit": quality_audit,
         }
-        if override_reason is not None:
-            quality_audit["override"] = {
-                "actor": override_actor,
-                "reason": override_reason,
-                "checks": failed_checks,
-            }
         output = calculate(
-            rows, {s: o["value"] for s, o in cap_data.items()}, now, config
+            ranked, {s: o["value"] for s, o in cap_data.items()}, now, config
         )
         pub_id = conn.execute(
             insert(m.publications)
@@ -385,6 +725,35 @@ def publish(
             .returning(m.publications.c.id)
         ).scalar_one()
         conn.execute(
+            insert(m.publication_events).values(
+                publication_id=pub_id,
+                kind="quality_passed"
+                if override_reason is None
+                else "quality_override",
+                actor=override_actor,
+                reason=override_reason,
+                checks={
+                    "sources": source_audit,
+                    "failed": failed_checks,
+                    "overridden": overridden,
+                    "congress_history": history,
+                    # Demo publications are marked in their audit event, not in
+                    # ranking_config (ranking inputs only).
+                    **({"demo": True} if demo else {}),
+                },
+                created_at=now,
+            )
+        )
+        if degraded is not None:
+            conn.execute(
+                insert(m.publication_events).values(
+                    publication_id=pub_id,
+                    kind="degraded",
+                    checks=degraded,
+                    created_at=now,
+                )
+            )
+        conn.execute(
             insert(m.publication_sources),
             [
                 dict(
@@ -393,8 +762,15 @@ def publish(
                     run_id=run_ids[s],
                     batch_id=batches[s],
                 )
-                for s in m.SOURCES
+                for s in m.WATCHLIST_SOURCES
             ],
+        )
+        conn.execute(
+            insert(m.publication_history_watermarks).values(
+                publication_id=pub_id,
+                source="congress_trades",
+                through_history_id=through,
+            )
         )
         security_ids = dict(
             conn.execute(
@@ -427,6 +803,68 @@ def publish(
             )
         )
         return cast(int, pub_id)
+
+
+def rollback(engine: Engine, to_publication_id: int, *, actor: str, reason: str) -> int:
+    """Point production back at an earlier publication (roadmap M3).
+
+    This is the only way to serve older observations: publish() keeps refusing
+    any observation date older than the current publication's. The target must
+    replay byte-identically, the actor and reason pass the override text policy,
+    and a `rollback` event on the target records who moved the pointer from where.
+    """
+    actor, reason = actor.strip(), reason.strip()
+    _check_override_text(actor, reason)
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        if not conn.execute(
+            text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": PUBLICATION_LOCK}
+        ).scalar_one():
+            raise PublicationInProgressError()
+        prior = conn.execute(
+            select(m.current_publication.c.publication_id).where(
+                m.current_publication.c.channel == "production"
+            )
+        ).scalar_one_or_none()
+        target = (
+            conn.execute(
+                select(m.publications.c.output).where(
+                    m.publications.c.id == to_publication_id
+                )
+            )
+            .tuples()
+            .one_or_none()
+        )
+        if target is None:
+            raise RollbackError("rollback target does not exist")
+        if prior == to_publication_id:
+            raise RollbackError("rollback target is already the current publication")
+        if replay(engine, to_publication_id) != target[0]:
+            raise RollbackError("rollback target does not replay identically")
+        conn.execute(
+            pg_insert(m.current_publication)
+            .values(
+                channel="production", publication_id=to_publication_id, promoted_at=now
+            )
+            .on_conflict_do_update(
+                index_elements=["channel"],
+                set_={"publication_id": to_publication_id, "promoted_at": now},
+            )
+        )
+        conn.execute(
+            insert(m.publication_events).values(
+                publication_id=to_publication_id,
+                kind="rollback",
+                actor=actor,
+                reason=reason,
+                checks={
+                    "from_publication_id": prior,
+                    "to_publication_id": to_publication_id,
+                },
+                created_at=now,
+            )
+        )
+    return prior if prior is not None else to_publication_id
 
 
 def current(engine: Engine) -> dict[str, Any] | None:
@@ -468,6 +906,19 @@ def replay(engine: Engine, publication_id: int) -> dict[str, Any]:
         rows = {
             s["source"]: batch_rows(conn, s["source"], s["batch_id"]) for s in sources
         }
+        through = conn.execute(
+            select(m.publication_history_watermarks.c.through_history_id).where(
+                m.publication_history_watermarks.c.publication_id == publication_id,
+                m.publication_history_watermarks.c.source == "congress_trades",
+            )
+        ).scalar_one_or_none()
+        if through is not None:  # v3: the pinned history, not one batch
+            rows["congress_trades"] = congress_history.ranking_rows(
+                conn,
+                through,
+                pub["created_at"],
+                pub["ranking_config"]["congress_window_years"],
+            )
         caps = dict(
             conn.execute(
                 select(m.securities.c.symbol, m.market_cap_observations.c.value)

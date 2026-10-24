@@ -31,14 +31,10 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-# Gate the database path and Supabase account surface. Legacy services and
-# separately owned contract tests are not swept into formatting-only rewrites.
+# T20 covers all source modules; preserve the previous E/F/I and formatter
+# boundary for untouched legacy modules until their owners migrate them.
 include = [
-    "development/backend/src/api/**/*.py",
-    "development/backend/src/settings.py",
-    "development/backend/src/db/**/*.py",
-    "development/backend/src/ingestion/**/*.py",
-    "development/backend/src/pipeline/**/*.py",
+    "development/backend/src/**/*.py",
     "development/database/ops/quality_gate.py",
     "development/database/ops/provision_api_role.py",
     "development/backend/tests/test_supabase_accounts.py",
@@ -47,11 +43,32 @@ include = [
 ]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I"]
+select = ["E4", "E7", "E9", "F", "I", "T20"]
+
+[tool.ruff.lint.per-file-ignores]
+"development/backend/src/services/consensus_watchlist/scheduler/cron.py" = ["T20", "E4", "E7", "E9", "F", "I"]
+# These files remain subject to T20; only their pre-existing lint scope is retained.
+"development/backend/src/services/consensus_watchlist/consensus.py" = ["E4", "E7", "E9", "F", "I"]
+"development/backend/src/services/gdelt/client.py" = ["E4", "E7", "E9", "F", "I"]
+"development/backend/src/services/news/news_fetcher.py" = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.format]
+exclude = [
+    "development/backend/src/services/consensus_watchlist/consensus.py",
+    "development/backend/src/services/consensus_watchlist/paths.py",
+    "development/backend/src/services/consensus_watchlist/scheduler/cron.py",
+    "development/backend/src/services/gdelt/client.py",
+    "development/backend/src/services/gdelt/spikes.py",
+    "development/backend/src/services/gdelt/themes.py",
+    "development/backend/src/services/news/news_fetcher.py",
+]
 
 [tool.mypy]
 python_version = "3.12"
-mypy_path = "development/backend"
+# The fetchers load as top-level modules (fmp, ark, ...) next to paths.py, as
+# scheduler/cron.py and collectors._fetcher import them at runtime. They are
+# checked strictly through src/ingestion/adapters.py, which imports them.
+mypy_path = "development/backend,development/backend/src/services/consensus_watchlist,development/backend/src/services/consensus_watchlist/fetchers"
 files = [
     "development/backend/src/settings.py",
     "development/backend/src/db",
@@ -65,6 +82,11 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = ["src.services.*"]
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# Shared legacy path helpers: analyzed for the fetchers' types, not yet strict.
+module = ["paths"]
+follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = ["apscheduler.*"]

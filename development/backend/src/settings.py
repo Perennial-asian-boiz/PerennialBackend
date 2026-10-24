@@ -1,10 +1,18 @@
 """Validated process settings. Secrets are resolved only at startup."""
 
 import os
+from datetime import date, time, timedelta
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, SecretStr, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SecretStr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.db.config import DatabaseConfigError, parse_database_url
@@ -25,14 +33,62 @@ class QualityThreshold(BaseModel):
 
 def _quality_defaults() -> dict[str, QualityThreshold]:
     return {
-        "congress_trades": QualityThreshold(null_fields=("disclosure_date",)),
+        "congress_trades": QualityThreshold(
+            allow_equal_as_of=True, null_fields=("disclosure_date",)
+        ),
         "ark_holdings": QualityThreshold(null_fields=("share_price",)),
-        "insider_trades": QualityThreshold(null_fields=("shares", "value")),
+        "insider_trades": QualityThreshold(
+            allow_equal_as_of=True, null_fields=("shares", "value")
+        ),
         "short_interest": QualityThreshold(
             allow_equal_as_of=True,
             null_fields=("short_interest_shares", "average_daily_volume"),
         ),
     }
+
+
+class SourcePolicy(BaseModel):
+    """M2 degraded publishing policy for one source (roadmap decision D7).
+
+    max_age bounds any run a publication may pin; max_reuse_age bounds a run
+    reused from the previous publication after today's collection failed.
+    Every source is required: optional sources are not supported (M2 Q2).
+    """
+
+    required: Literal[True] = True
+    max_reuse_age: timedelta
+    max_age: timedelta
+
+    @model_validator(mode="after")
+    def reuse_within_max_age(self) -> "SourcePolicy":
+        if not timedelta(0) < self.max_reuse_age <= self.max_age:
+            raise ValueError("max_reuse_age must be positive and at most max_age")
+        return self
+
+
+def _source_policy_defaults() -> dict[str, SourcePolicy]:
+    days = timedelta(days=1)
+    return {
+        "congress_trades": SourcePolicy(max_reuse_age=3 * days, max_age=3 * days),
+        "ark_holdings": SourcePolicy(max_reuse_age=3 * days, max_age=3 * days),
+        "insider_trades": SourcePolicy(max_reuse_age=3 * days, max_age=3 * days),
+        "short_interest": SourcePolicy(max_reuse_age=15 * days, max_age=45 * days),
+    }
+
+
+MARKET_CAP_MAX_REUSE_AGE = timedelta(days=3)  # D7
+PUBLICATION_DEADLINE = time(10, 30)  # D6, in PUBLICATION_TIMEZONE
+PUBLICATION_TIMEZONE = "America/Los_Angeles"
+# NYSE full-day closures (M2 Q6). Weekends are never trading days. Extend yearly.
+TRADING_HOLIDAYS: tuple[date, ...] = tuple(
+    date.fromisoformat(d)
+    for d in (
+        "2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25",
+        "2026-06-19", "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25",
+        "2027-01-01", "2027-01-18", "2027-02-15", "2027-03-26", "2027-05-31",
+        "2027-06-18", "2027-07-05", "2027-09-06", "2027-11-25", "2027-12-24",
+    )
+)  # fmt: skip
 
 
 class ProviderSettings(BaseSettings):
@@ -52,10 +108,29 @@ class ProviderSettings(BaseSettings):
 
 class Settings(ProviderSettings):
     database_url: SecretStr
-    fmp_max_pages: int = Field(default=50, ge=1, le=1000)
+    # Pages per chamber per Congress run. The free FMP plan serves only page 0;
+    # raise this on a paid tier (docs/work-items/congress-incremental-design-note.md).
+    fmp_max_pages: int = Field(default=1, ge=1, le=1000)
     quality_thresholds: dict[str, QualityThreshold] = Field(
         default_factory=_quality_defaults
     )
+    source_policies: dict[str, SourcePolicy] = Field(
+        default_factory=_source_policy_defaults
+    )
+    market_cap_max_reuse_age: timedelta = Field(
+        default=MARKET_CAP_MAX_REUSE_AGE, gt=timedelta(0)
+    )
+    trading_holidays: tuple[date, ...] = TRADING_HOLIDAYS
+
+    @field_validator("source_policies")
+    @classmethod
+    def complete_source_policies(
+        cls, value: dict[str, SourcePolicy]
+    ) -> dict[str, SourcePolicy]:
+        defaults = _source_policy_defaults()
+        if set(value) - set(defaults):
+            raise ValueError("unknown source")
+        return {**defaults, **value}
 
     @model_validator(mode="after")
     def complete_quality_thresholds(self) -> "Settings":
