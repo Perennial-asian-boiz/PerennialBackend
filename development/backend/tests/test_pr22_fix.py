@@ -877,3 +877,142 @@ def test_a_startup_failure_logs_json_with_the_fixed_code(engine, pr22_roles, mon
     assert "api_login_refused" in shown  # R1's fixed code
     for hidden in (user, pw, "postgresql", "psycopg"):
         assert hidden not in shown
+
+
+# ── RB-7f: app.email_is_registered re-homed to the provisioning admin ─
+# The auditor's option (a), security-m5-pr22-packet-report.md: provision_api_role
+# runs ALTER FUNCTION ... OWNER TO CURRENT_USER, with five constraints.
+
+LOOKUP = "app.email_is_registered(text)"
+
+
+def _lookup(conn):
+    return conn.execute(text(
+        "SELECT pg_get_userbyid(proowner) AS owner, prosecdef, proconfig, provolatile,"
+        " proacl::text[] AS acl FROM pg_proc WHERE oid = CAST(:f AS regprocedure)"), {"f": LOOKUP}).one()
+
+
+def _api_module():
+    from pr22_support import ops_module
+
+    return ops_module("provision_api_role")
+
+
+@pytest.mark.parametrize("group", ["owner", "importer", "reader", "api"])
+def test_provisioning_refuses_to_run_as_any_group_role(engine, pr22_roles, group):  # noqa: F811
+    """(1) The definer must never become a group role."""
+    with engine.connect() as conn:
+        before = _lookup(conn).owner
+        conn.execute(text(f'SET ROLE "{pr22_roles[group]}"'))
+        try:
+            with pytest.raises(ValueError) as caught:
+                _api_module().provision(
+                    conn.connection.driver_connection, pr22_roles["api"],
+                    owner=pr22_roles["owner"], importer=pr22_roles["importer"],
+                    reader=pr22_roles["reader"])
+            assert not any(n in str(caught.value) for n in pr22_roles.values())
+        finally:
+            conn.rollback()
+            conn.execute(text("RESET ROLE"))
+        assert _lookup(conn).owner == before
+
+
+def test_the_lookup_is_a_pinned_definer_owned_by_the_admin(engine, pr22_roles):  # noqa: F811
+    """(2) Shape after the ALTER: owner = current user, definer, empty search_path, STABLE."""
+    provision_api(engine, pr22_roles)
+    with engine.connect() as conn:
+        admin = conn.execute(text("SELECT current_user")).scalar()
+        row = _lookup(conn)
+    assert row.owner == admin and row.prosecdef is True and row.provolatile == "s"
+    assert any(re.fullmatch(r'search_path=("")?', c) for c in (row.proconfig or [])), row.proconfig
+
+
+def test_an_unpinned_search_path_is_refused(engine, pr22_roles):  # noqa: F811
+    """(2) A later definition that loosens search_path fails provisioning."""
+    with engine.connect() as conn:
+        original = conn.execute(text("SELECT pg_get_functiondef(CAST(:f AS regprocedure))"),
+                                {"f": LOOKUP}).scalar()
+    loosened = re.sub(r"\s*SET search_path TO ''[^\n]*\n", "\n", original)
+    assert loosened != original
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(loosened))
+        with pytest.raises(ValueError):
+            provision_api(engine, pr22_roles)
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(original))
+
+
+def test_execute_is_exclusive_to_the_api_role(engine, pr22_roles):  # noqa: F811
+    """(3) and (4): no other grantee, the owner included; PUBLIC revoked."""
+    suffix = secrets.token_hex(4)
+    supabase = tuple(f"rb_{r}_{suffix}" for r in ("anon", "authenticated", "service_role"))
+    try:
+        with engine.begin() as conn:
+            for name in supabase:
+                conn.execute(text(f'CREATE ROLE "{name}" NOLOGIN'))
+        provision_api(engine, pr22_roles, supabase_roles=supabase)
+        with engine.connect() as conn:
+            admin = conn.execute(text("SELECT current_user")).scalar()
+            grantees = {entry.split("=")[0] for entry in (_lookup(conn).acl or [])}
+            for role in (pr22_roles["owner"], pr22_roles["importer"], pr22_roles["reader"],
+                         *supabase):
+                assert not conn.execute(text("SELECT has_function_privilege(:r, :f, 'EXECUTE')"),
+                                        {"r": role, "f": LOOKUP}).scalar(), role
+            assert conn.execute(text("SELECT has_function_privilege(:r, :f, 'EXECUTE')"),
+                                {"r": pr22_roles["api"], "f": LOOKUP}).scalar()
+        assert grantees <= {pr22_roles["api"], admin} and "" not in grantees  # no PUBLIC
+    finally:
+        drop_roles(engine, supabase)
+
+
+def test_a_supabase_role_that_can_execute_an_app_function_is_refused(engine, pr22_roles):  # noqa: F811
+    """(3) PostgREST exposes callable functions as RPC: part of the exposure refusal."""
+    suffix = secrets.token_hex(4)
+    supabase = tuple(f"rb_{r}_{suffix}" for r in ("anon", "authenticated", "service_role"))
+    try:
+        with engine.begin() as conn:
+            for name in supabase:
+                conn.execute(text(f'CREATE ROLE "{name}" NOLOGIN'))
+            conn.execute(text(f'GRANT EXECUTE ON FUNCTION {LOOKUP} TO "{supabase[0]}"'))
+        with pytest.raises(ValueError) as caught:
+            provision_api(engine, pr22_roles, supabase_roles=supabase)
+        assert not any(n in str(caught.value) for n in supabase)
+    finally:
+        drop_roles(engine, supabase)
+
+
+def test_provisioning_re_homes_a_lookup_the_owner_migrated(engine, pr22_roles):  # noqa: F811
+    """The migration ran as perennial_owner: the function starts owner-owned."""
+    with engine.begin() as conn:
+        conn.execute(text(f'ALTER FUNCTION {LOOKUP} OWNER TO "{pr22_roles["owner"]}"'))
+    provision_api(engine, pr22_roles)
+    with engine.connect() as conn:
+        admin = conn.execute(text("SELECT current_user")).scalar()
+        assert _lookup(conn).owner == admin
+        assert not conn.execute(text("SELECT has_function_privilege(:r, :f, 'EXECUTE')"),
+                                {"r": pr22_roles["owner"], "f": LOOKUP}).scalar()
+
+
+def test_re_runs_are_idempotent_and_another_admin_takes_ownership(engine, pr22_roles):  # noqa: F811
+    """(5) Same admin: no change. Another admin: ownership moves to it, accepted."""
+    provision_api(engine, pr22_roles)
+    with engine.connect() as conn:
+        first = _lookup(conn)
+    provision_api(engine, pr22_roles)
+    with engine.connect() as conn:
+        assert _lookup(conn) == first
+    other = f"rb_admin_{secrets.token_hex(4)}"
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE ROLE "{other}" SUPERUSER NOLOGIN'))
+    try:
+        with engine.begin() as conn:  # SET LOCAL: the pooled connection never keeps the role
+            conn.execute(text(f'SET LOCAL ROLE "{other}"'))
+            _api_module().provision(conn.connection.driver_connection, pr22_roles["api"],
+                                    owner=pr22_roles["owner"])
+        with engine.connect() as conn:
+            assert _lookup(conn).owner == other
+    finally:
+        provision_api(engine, pr22_roles)  # back to the test admin
+        drop_roles(engine, [other])

@@ -716,7 +716,12 @@ def test_forgot_password_does_not_disclose_unknown_email_or_send_email(api):
 
 
 def test_rls_for_non_owner_even_without_where_clause(api):
-    _, _, engine = api
+    # Adapted (RB-11, A6): the policies now name only the API role (change 6,
+    # RB-8e), so the subject part runs as that role. Any other NOBYPASSRLS role
+    # with SELECT sees no rows, even with a subject set. The "no subject sees
+    # nothing" and "pool context does not leak" halves are kept.
+    client, _, engine = api
+    api_role = client.app.state.api_role
     first, _ = register(api)
     register(api, "two@example.com")
     role = "auth_test_" + uuid4().hex[:12]
@@ -726,7 +731,7 @@ def test_rls_for_non_owner_even_without_where_clause(api):
         conn.execute(text(f"GRANT SELECT ON app.profiles TO {role}"))
     try:
         with engine.begin() as conn:
-            conn.execute(text(f"SET LOCAL ROLE {role}"))
+            conn.execute(text(f'SET LOCAL ROLE "{api_role}"'))
             assert conn.execute(select(tables.profiles)).all() == []
             conn.execute(
                 text("SELECT set_config('request.jwt.claim.sub', :id, true)"),
@@ -736,10 +741,17 @@ def test_rls_for_non_owner_even_without_where_clause(api):
                 first["user"]["id"]
             ]
         with engine.begin() as conn:
-            conn.execute(text(f"SET LOCAL ROLE {role}"))
+            conn.execute(text(f'SET LOCAL ROLE "{api_role}"'))
             assert (
                 conn.execute(select(tables.profiles)).all() == []
             )  # Pool context did not leak.
+        with engine.begin() as conn:
+            conn.execute(text(f"SET LOCAL ROLE {role}"))
+            conn.execute(
+                text("SELECT set_config('request.jwt.claim.sub', :id, true)"),
+                {"id": first["user"]["id"]},
+            )
+            assert conn.execute(select(tables.profiles)).all() == []  # not the API role
     finally:
         with engine.begin() as conn:
             conn.execute(text(f"DROP OWNED BY {role}"))
