@@ -303,21 +303,27 @@ Each limit runs **before any other dependency or validation that touches the eng
 ### How a client is keyed
 
 - **The key comes from `request.client`**, as uvicorn's middleware leaves it. App code never parses `X-Forwarded-For` or `Forwarded` itself.
-- **Normalization, in this order:**
+- **Normalization, in this order. Parse first, and strip only known forms:**
   1. **No peer** (`request.client` is `None`, as with a unix-socket listener or a transport with no peer information): one shared `unknown` bucket. It is never exempt, and never a 500.
-  2. **The host string.** Strip one pair of surrounding brackets and a trailing `:port`, so `[2001:db8::1]:443` becomes `2001:db8::1` and `198.51.100.1:5678` becomes `198.51.100.1`. Uvicorn passes a forwarded value through unvalidated, and a proxy that writes `ip:port` would otherwise give every source port its own bucket.
-  3. **IPv4** is keyed by its full address.
-  4. **IPv4-mapped IPv6** (`::ffff:a.b.c.d`, which is how a dual-stack `::` listener presents every IPv4 client) is keyed by its embedded IPv4 address, exactly as IPv4 is. Without this step, every IPv4 client would share one /64 bucket.
-  5. **Other IPv6** is keyed by its /64, because one host commonly controls a whole /64. A client with a /48 still controls 65,536 /64 buckets, which is acceptable for "basic", since the edge limit is the global answer.
-  6. **Anything still not an IP address** (TestClient's `testclient`, a misbehaving proxy) is keyed by the literal string, truncated to 64 characters. It is never exempt.
+  2. **Parse the host string as an IP address as it is.** A bare IPv6 address such as `2001:db8::1`, or `::ffff:198.51.100.1`, parses here and goes straight to steps 3 to 5. **Never strip anything from an unbracketed string that contains more than one colon.** Doing so would cut `2001:db8::1` and `2001:db8::2` down to the same text, and put `::ffff:198.51.100.1` into `::/64`.
+  3. **Only if that fails, strip one of exactly two forms:**
+     - `[<v6>]` or `[<v6>]:<port>` becomes `<v6>`
+     - `<a.b.c.d>:<port>`, a dotted-quad IPv4 address followed by a single `:` and digits, becomes `<a.b.c.d>`
+
+     Then parse again. Uvicorn passes a forwarded value through unvalidated, and a proxy that writes `ip:port` would otherwise give every source port its own bucket.
+  4. **IPv4** is keyed by its full address.
+  5. **IPv4-mapped IPv6** (`::ffff:a.b.c.d`, which is how a dual-stack `::` listener presents every IPv4 client) is keyed by its embedded IPv4 address, exactly as IPv4 is. Without this step, every IPv4 client would share one /64 bucket.
+  6. **Other IPv6** is keyed by its /64, because one host commonly controls a whole /64. A client with a /48 still controls 65,536 /64 buckets, which is acceptable for "basic", since the edge limit is the global answer.
+  7. **Anything still not an IP address** (TestClient's `testclient`, a misbehaving proxy) is keyed by the literal string, truncated to 64 characters. It is never exempt.
 - **Trusted proxies: list every hop.**
   - `API_TRUSTED_PROXIES` lists **every** proxy hop the host guarantees in front of the API, by IP or CIDR, and is empty by default (trust no one).
   - Uvicorn keys by the rightmost address in `X-Forwarded-For` that isn't trusted, so a missing hop collapses every client onto that hop's address. For example, if the chain is a CDN then the host's proxy and only the host's proxy is listed, everyone is keyed by the CDN's egress address and throttled together.
-  - The literal `*` is refused. Trusting every peer needs the separately named `API_TRUST_ALL_PROXIES=1`, which is for a host that guarantees all traffic passes through a proxy that overwrites client-supplied forwarded headers. A permissive value is then never a typo away.
+  - The literal `*` is refused. Trusting every peer needs the separately named `API_TRUST_ALL_PROXIES=1`. A permissive value is then never a typo away.
+  - **What trust-all actually does.** With every peer trusted, uvicorn keys by the **first** `X-Forwarded-For` entry, which the client controls. The checker's probe: `6.6.6.6, 203.0.113.9` is keyed as `6.6.6.6`. So the anti-spoofing below holds only for listed proxies. `API_TRUST_ALL_PROXIES` is safe only on a host whose proxy **overwrites** `X-Forwarded-For` with the real peer, instead of appending to it.
 - **The run commands** turn uvicorn's own proxy handling off, so only the installer's middleware runs and uvicorn's default trust of `127.0.0.1` never applies behind the operator's back:
   - `--no-proxy-headers` on the command line
   - `proxy_headers=False` in the #22 branch's `python -m src.api` entry
-- **Spoofing.** A client that sends `X-Forwarded-For` from an untrusted address is keyed by its real peer address. Fake entries that a client prepends are skipped, because the key is the rightmost untrusted address.
+- **Spoofing (listed proxies only).** A client that sends `X-Forwarded-For` from an untrusted address is keyed by its real peer address. Fake entries that a client prepends are skipped, because with listed proxies the key is the rightmost untrusted address.
 - **Deployment checklist:**
   - The host's proxy must append the real peer to `X-Forwarded-For`. Uvicorn's middleware reads only `X-Forwarded-For`, not RFC 7239 `Forwarded`.
   - Every hop is listed in `API_TRUSTED_PROXIES`.
@@ -331,6 +337,7 @@ Each limit runs **before any other dependency or validation that touches the eng
 - **Auth bucket** (`read.auth_rate_limit`, signup and forgot-password together): capacity 5, refilling at 30 an hour.
   - Configuration: `API_AUTH_RATE_LIMIT_BURST=5`, `API_AUTH_RATE_LIMIT_PER_HOUR=30`.
   - A person signs up or asks for recovery a few times at most. Each call answers "is this email registered?", so the bucket is deliberately small. It's a separate bucket per client key, so reads don't spend auth tokens.
+  - **Shared addresses share it.** Behind carrier-grade NAT or an office NAT, many people share one auth bucket, and a busy shared address can block signups for a while. That's accepted for "basic" (decision 33, an FYI to Bryan). The limits are configurable, and the edge layer can key more finely later.
 - **Every request to a limited route costs one token, before any database work.** That includes `304` responses and `404` and `422` errors. A 304 still opens a read transaction to look up the pointer (`read.py`, `get_watchlist`), so not counting 304s would leave the database unprotected. A limited auth request calls neither `email_is_registered` nor Supabase.
 - **Over the limit:**
   - `429`
@@ -378,6 +385,10 @@ Each limit runs **before any other dependency or validation that touches the eng
   - **IPv6 /64:** two addresses in one /64 share a bucket, and addresses in different /64s don't.
   - **IPv4-mapped:** `::ffff:198.51.100.1` and `198.51.100.1` share a bucket. `::ffff:198.51.100.1` and `::ffff:198.51.100.2` don't.
   - **Ports and brackets:** `198.51.100.1:5678` and `198.51.100.1:5679` share `198.51.100.1`'s bucket, and `[2001:db8::1]:443` shares `2001:db8::1`'s /64.
+  - **Bare IPv6 is parsed, never stripped (RL-D):**
+    - `2001:db8::1` and `2001:db8::2` share one /64 bucket, and `2001:db8:1::1` is in a different one. Neither ever becomes a literal or truncated key.
+    - A bare `::ffff:198.51.100.1` is keyed as `198.51.100.1`, the same bucket as plain `198.51.100.1`. It never goes into `::/64`.
+    - These cases fail on an implementation that strips before parsing.
 - **RL-6b** **Non-IP and missing peers.** A request with no `request.client` uses the shared `unknown` bucket. A non-IP host string uses its own literal-string bucket, truncated to 64 characters. Neither is exempt, and neither causes a 500.
 
 **Cost and safety**
@@ -402,7 +413,10 @@ Each limit runs **before any other dependency or validation that touches the eng
   - `API_TRUSTED_PROXIES` (every hop), `API_TRUST_ALL_PROXIES`, the run flags, and the `X-Forwarded-For` requirement
 
   The OpenAPI snapshot includes `429` on both read routes.
-- **RL-13** **Logs.** At most one JSON `rate_limited` log line per key per `Retry-After` window, carrying a count of the rejections it covers. Never one line per 429, which would turn a flood into a log flood. The line has no client address, path or header values.
+- **RL-13** **Logs.** Never one line per 429, which would turn a flood into a log flood. No line has a client address, path or header values.
+  - **Per key:** the **first** rejection for a key writes one JSON `rate_limited` line immediately. Further rejections for that key are counted until its `Retry-After` window has passed. The next line for that key carries the count. If the key goes quiet, the count is dropped.
+  - **Global cap:** at most 60 `rate_limited` lines a minute across all keys, because per-key capping alone still floods under /64 rotation. Beyond the cap, one `rate_limited_suppressed` line a minute carries the number of lines held back.
+  - The test drives both with the fake clock.
 
 ### For Bryan
 
