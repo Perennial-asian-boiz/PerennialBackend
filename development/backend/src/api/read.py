@@ -499,13 +499,15 @@ _WRITES = text(
     " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
     " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
 )
-# #22's schema app (fix packet, change 5): reads and writes only on its six
-# tables, at table or column level; never TRUNCATE, REFERENCES or TRIGGER; no
-# write through any other app object (table, view, materialized view, foreign
-# table) and no USAGE or UPDATE on an app sequence (none exists; if one of the
-# six gains an identity column, allow its sequence like the six); no CREATE on
-# app; and no USAGE on Supabase's auth schema (the login reaches auth.users
-# only through app.email_is_registered).
+# #22's schema app (fix packet, change 5), as for perennial: the login holds
+# exactly what provisioning grants. Reads and writes on the six tables (table
+# or column level), never TRUNCATE, REFERENCES or TRIGGER; no privilege at all
+# on any other app relation (table, view, materialized view, foreign table) or
+# sequence (none exists; if one of the six gains an identity column, allow its
+# sequence like the six); EXECUTE only on app.email_is_registered(text),
+# excluded by catalog name and signature, since resolving it by name would
+# need USAGE on app; no CREATE on app; and no USAGE on Supabase's auth schema
+# (the login reaches auth.users only through that function).
 APP_TABLES = (
     "profiles",
     "preferences",
@@ -518,13 +520,21 @@ _APP = text(
     "SELECT (SELECT count(*) FROM pg_class c"
     "  JOIN pg_namespace n ON n.oid = c.relnamespace"
     "  WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
-    "  AND CASE WHEN c.relkind = 'S'"
-    "   THEN has_sequence_privilege(current_user, c.oid, 'USAGE,UPDATE')"
-    "   ELSE has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER')"
-    "    OR has_any_column_privilege(current_user, c.oid, 'REFERENCES')"
-    "    OR (c.relname <> ALL(CAST(:tables AS text[])) AND ("
-    "     has_table_privilege(current_user, c.oid, 'INSERT,UPDATE,DELETE')"
-    "     OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE'))) END),"
+    "  AND CASE"
+    "   WHEN c.relkind = 'S'"
+    "    THEN has_sequence_privilege(current_user, c.oid, 'USAGE,SELECT,UPDATE')"
+    "   WHEN c.relkind IN ('r', 'p') AND c.relname = ANY(CAST(:tables AS text[]))"
+    "    THEN has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER')"
+    "     OR has_any_column_privilege(current_user, c.oid, 'REFERENCES')"
+    "   ELSE has_table_privilege(current_user, c.oid,"
+    "     'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')"
+    "    OR has_any_column_privilege("
+    "     current_user, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') END)"
+    " + (SELECT count(*) FROM pg_proc p"
+    "  JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE pn.nspname = 'app'"
+    "  AND NOT (p.proname = 'email_is_registered' AND p.pronargs = 1"
+    "   AND p.proargtypes[0] = 'text'::regtype)"
+    "  AND has_function_privilege(current_user, p.oid, 'EXECUTE')),"
     " coalesce((SELECT has_schema_privilege(current_user, oid, 'CREATE')"
     "  FROM pg_namespace WHERE nspname = 'app'), false),"
     " coalesce((SELECT has_schema_privilege(current_user, oid, 'USAGE')"
