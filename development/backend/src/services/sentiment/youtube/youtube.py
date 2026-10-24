@@ -29,7 +29,6 @@ DATA_DIR.mkdir(exist_ok=True)
 UTILS_DIR = BACKEND_DIR/"src"/"utils"
 LOG_DIR = BACKEND_DIR/"logs"
 LOG_DIR.mkdir(exist_ok=True)
-TICKERS_FILE = "tickers.json"
 COOKIES_FILE = "youtube_cookies.txt"
 # scratch space for downloaded subtitle/audio files, one sub-folder per ticker.
 TMP_DIR = DATA_DIR/"tmp"
@@ -64,7 +63,7 @@ MIN_TAIL_WORDS = 25      # a final chunk shorter than this is merged into the pr
 if str(UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_DIR))
 from ..sentiment_scorer import score_texts, load_scores
-
+from ....utils.fetch_tickers import fetch_ticker_list
 
 def safe_name(text):
     """ make a ticker safe to use inside a filename (e.g. 'BRK/B' -> 'BRK_B') """
@@ -1117,7 +1116,9 @@ async def async_main(time_limit_minutes=None, days=7, scores_file=SCORES_FILE):
     returns (the path of the chunk-level scores file), or None if no scores exist. Per-video and
     per-ticker averages are additionally written to VIDEO_SCORES_FILE.
     """
-    tickers = load_tickers(TICKERS_FILE)
+    tickers = await fetch_ticker_list()
+    if not tickers:
+        raise SystemExit("Could not find, read, or parse any tickers from the ticker source")
     print(f"Searching for {len(tickers)} tickers: {', '.join(tickers)} "
           f"(videos from the last {days:g} day(s))")
 
