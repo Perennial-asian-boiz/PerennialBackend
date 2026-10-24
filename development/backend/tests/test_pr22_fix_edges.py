@@ -16,6 +16,7 @@ import base64
 import inspect
 import json
 import re
+import secrets
 import subprocess
 import time
 from contextlib import contextmanager
@@ -653,3 +654,68 @@ def test_the_drill_passes_every_group_name_to_provision_api_role(
             "importer": names["importer"], "reader": names["reader"]}
     finally:
         drop_roles(engine, names.values())
+
+
+# ── RB-6, completed: a write through any object in app ───
+# As R1's RA-15 follow-up (test_read_api_write_objects.py): _APP counts tables
+# (r, p) only. Already refused by #22's check, so not repeated here: TRUNCATE,
+# REFERENCES and TRIGGER on app tables (test_startup_refuses_truncate_...).
+
+
+@pytest.fixture
+def app_write_objects(engine):
+    """A standalone sequence, an auto-updatable view over app.profiles and a foreign
+    table, all in app and outside the six; made by the superuser test login."""
+    suffix = secrets.token_hex(4)
+    objects = {"sequence": f"app.rb_seq_{suffix}", "view": f"app.rb_view_{suffix}",
+               "foreign": f"app.rb_foreign_{suffix}"}
+    wrapper = f"rb_fdw_{suffix}"
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE SEQUENCE {objects['sequence']}"))
+        conn.execute(text(  # the view's owner bypasses RLS: its writes reach every row
+            f"CREATE VIEW {objects['view']} AS SELECT id, email, full_name FROM app.profiles"))
+        conn.execute(text(f"CREATE FOREIGN DATA WRAPPER {wrapper}"))  # no handler needed
+        conn.execute(text(f"CREATE SERVER {wrapper}_server FOREIGN DATA WRAPPER {wrapper}"))
+        conn.execute(text(
+            f"CREATE FOREIGN TABLE {objects['foreign']} (id bigint) SERVER {wrapper}_server"))
+    try:
+        yield objects
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP VIEW IF EXISTS {objects['view']}"))
+            conn.execute(text(f"DROP SEQUENCE IF EXISTS {objects['sequence']}"))
+            conn.execute(text(f"DROP FOREIGN DATA WRAPPER IF EXISTS {wrapper} CASCADE"))
+
+
+APP_OBJECT_WRITES = {
+    "sequence_update": "GRANT UPDATE ON SEQUENCE {sequence} TO {login}",  # setval
+    "sequence_usage": "GRANT USAGE ON SEQUENCE {sequence} TO {login}",  # nextval
+    "view_update": "GRANT UPDATE ON {view} TO {login}",
+    "view_column_update": "GRANT UPDATE (email) ON {view} TO {login}",
+    "foreign_table_insert": "GRANT INSERT ON {foreign} TO {login}",
+}
+
+
+@pytest.mark.parametrize("case", sorted(APP_OBJECT_WRITES))
+def test_startup_refuses_a_write_through_any_app_object_outside_the_six(
+    engine, pr22_roles, monkeypatch, caplog, app_write_objects, case  # noqa: F811
+):
+    grant = APP_OBJECT_WRITES[case]
+    for key, name in app_write_objects.items():
+        grant = grant.replace("{" + key + "}", name)
+    refused = _refused(engine, pr22_roles, monkeypatch, caplog, grants=[grant])
+    reference = _refused(engine, pr22_roles, monkeypatch, caplog, options="BYPASSRLS")
+    assert refused == reference
+
+
+def test_app_objects_alone_or_a_sequence_read_do_not_refuse_startup(
+    engine, pr22_roles, monkeypatch, app_write_objects  # noqa: F811
+):
+    """The control: the objects exist and SELECT on the sequence reads it; a
+    correctly provisioned login still starts."""
+    from fastapi.testclient import TestClient
+
+    grant = f"GRANT SELECT ON SEQUENCE {app_write_objects['sequence']} TO {{login}}"
+    with integrated_app(engine, pr22_roles, monkeypatch, grants=[grant]) as (app, _, _), \
+            TestClient(app) as client:
+        assert client.get("/health").status_code == 200
