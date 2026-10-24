@@ -1,15 +1,11 @@
-"""Supabase-owned identities with isolated application data and RLS.
-
-Legacy identity tables remain untouched for recovery; runtime code no longer
-reads them. This revision is named uniquely until the team's merge review.
-"""
+"""Supabase-owned identities with isolated application data and RLS."""
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "auth_supabase_v1"
-down_revision = "auth_settings_v1"
+revision = "0011"
+down_revision = "0010"
 branch_labels = None
 depends_on = None
 

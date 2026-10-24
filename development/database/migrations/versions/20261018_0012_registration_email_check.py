@@ -2,8 +2,8 @@
 
 from alembic import op
 
-revision = "auth_email_lookup_v1"
-down_revision = "auth_supabase_v1"
+revision = "0012"
+down_revision = "0011"
 branch_labels = None
 depends_on = None
 
