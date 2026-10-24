@@ -635,7 +635,8 @@ def test_downgrade_refuses_while_history_state_exists(engine, fixture_path, stat
             command.downgrade(alembic_config(conn), "0009")
         conn.rollback()
         # Atomic: still at head, and every history table and column is intact.
-        assert _version(conn) == head == "0010"
+        # Later migrations (0011 market_caps) sit above 0010; any head refuses.
+        assert _version(conn) == head and head >= "0010"
         for table in (
             "congress_trade_history",
             "congress_history_gaps",
@@ -654,12 +655,13 @@ def test_downgrade_still_works_without_history(engine):
     from tests.conftest import alembic_config
 
     with engine.connect() as conn:
+        head = _version(conn)
         command.downgrade(alembic_config(conn), "0009")
         conn.commit()
         assert _version(conn) == "0009"
         command.upgrade(alembic_config(conn), "head")
         conn.commit()
-        assert _version(conn) == "0010"
+        assert _version(conn) == head and head >= "0010"
 
 
 # ── demo mode: fixture runs feed history only in the guarded demo database ──

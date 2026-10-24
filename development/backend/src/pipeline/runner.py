@@ -17,6 +17,7 @@ from src.db import models as m
 from src.db.queries import batch_rows, latest_successful_run
 from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
+from src.ingestion.market_caps import ADAPTERS, MarketCapAdapter, collect
 from src.pipeline import congress_history
 from src.pipeline.demo_guard import DEMO_MODES, LIVE_MODES, check_demo_database
 from src.pipeline.lifecycle import (
@@ -197,7 +198,8 @@ def collect_source(
     with source_lock(engine, source):
         dependencies = {}
         missing = False
-        downstream = source in ("insider_trades", "short_interest")
+        # market_caps (M4 MC-B) plans from the same upstream rows and lineage.
+        downstream = source in ("insider_trades", "short_interest", "market_caps")
         history_through = None
         with engine.begin() as conn:
             if downstream:
@@ -503,11 +505,17 @@ def run_pipeline(
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
     settings: Settings | None = None,
     demo: bool = False,
+    market_cap_adapter: MarketCapAdapter | None = None,
 ) -> int:
     """Stop on a failed stage; all publication writes commit together at the end.
 
     demo=True records fixture-mode runs and publishes only into the marked local
     demo database (checked here and again inside publish()).
+
+    market_cap_adapter, else settings.market_cap_adapter, selects the M4 path:
+    one market_caps collection per call and pinned rows at publish. Neither set
+    keeps the legacy market-cap collector. A fixture adapter runs only in demo,
+    and a live one only outside it.
     """
     if demo:
         with engine.connect() as conn:
@@ -520,6 +528,7 @@ def run_pipeline(
             quality_thresholds=quality_thresholds,
             settings=settings,
             demo=demo,
+            market_cap_adapter=market_cap_adapter,
         )
 
 
@@ -532,10 +541,23 @@ def _run_pipeline(
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
     settings: Settings | None = None,
     demo: bool = False,
+    market_cap_adapter: MarketCapAdapter | None = None,
 ) -> int:
     from src.ingestion.collectors import COLLECTORS
 
     record_mode, modes = ("fixture", DEMO_MODES) if demo else ("live", LIVE_MODES)
+
+    adapter = market_cap_adapter
+    if adapter is None and settings is not None and settings.market_cap_adapter:
+        adapter = ADAPTERS[settings.market_cap_adapter](settings)
+    if adapter is not None:
+        # MCB-2e: refuse before any collection; collect() guards again (MCA-3g).
+        if adapter.collection_mode != record_mode:
+            raise ValueError("market-cap adapter mode does not match the pipeline")
+        if market_cap_collector is not None:
+            raise ValueError(
+                "pass a market-cap adapter or a legacy collector, not both"
+            )
 
     collectors = COLLECTORS if collectors is None else collectors
     if market_cap_collector is None:
@@ -575,6 +597,17 @@ def _run_pipeline(
         return outcome
 
     chosen = select_sources(prior, attempt)
+    cap_run_id = None
+    if adapter is not None:
+        # MCB-2a/2b: once per call, planned from the selected upstream; a failed
+        # collection is recorded and publish() falls back to earlier rows.
+        cap_run_id = collect_source(
+            engine,
+            "market_caps",
+            upstream_batches={s: chosen.batches[s] for s in UPSTREAM},
+            collector=partial(collect, adapter, record_mode=record_mode),
+            record_mode=record_mode,
+        ).run_id
     cap_limit = (
         settings.market_cap_max_reuse_age
         if settings is not None
@@ -584,6 +617,21 @@ def _run_pipeline(
     cap_cache: dict[tuple[str, ...], tuple[Mapping[str, dict[str, Any]], bool]] = {}
 
     def publish_selection(selection: Selection) -> int:
+        if adapter is not None:  # MCB-8: a Q7 retry reselects stored rows
+            return publish(
+                engine,
+                selection.runs,
+                None,
+                max_age=max_age,
+                quality_thresholds=quality_thresholds,
+                reuse=selection.reuse,
+                reuse_limits=reuse_limits,
+                demo=demo,
+                market_caps="pinned",
+                market_cap_max_age=cap_limit,
+                market_cap_run_id=cap_run_id,
+                market_cap_adapter=adapter.name,
+            )
         # Candidates must match what publish() ranks: the history the
         # downstream runs were planned from.
         with engine.begin() as conn:

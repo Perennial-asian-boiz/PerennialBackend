@@ -65,6 +65,8 @@ ERROR_SUMMARIES = {
     "unresolved_security": "a ticker does not resolve to exactly one active security",
     "missing_upstream": "upstream rows or fetcher files are missing or malformed",
     "plan_too_large": "too many tickers planned; collection refused rather than truncated",
+    "fixture_adapter_not_allowed": "a fixture adapter cannot record a non-fixture run",
+    "adapter_mode_mismatch": "a live adapter cannot record a non-live run",
     "database_error": "database write failed",
     "internal_error": "unexpected error; nothing was written",
 }
@@ -76,6 +78,7 @@ UNIT_KINDS = frozenset(
         "Congress requests",
         "insider tickers",
         "short-interest tickers",
+        "market-cap tickers",
         "upstream files",
     }
 )

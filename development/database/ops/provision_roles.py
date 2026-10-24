@@ -26,6 +26,8 @@ MUTABLE += ("gdelt_theme_days", "gdelt_spike_checks")
 # Profiles are reviewed seed data written by the owner; the pipeline only reads them.
 IMMUTABLE += ("security_identifiers",)
 REFERENCE = ("company_profiles",)
+# M4 market caps through the ingestion contract: batch rows and publication pins.
+IMMUTABLE += ("market_caps", "publication_market_cap_rows")
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 
 

@@ -189,6 +189,7 @@ SOURCE_LOCK_KEYS = {
     "gdelt_theme_volume": 170014,
     "gdelt_theme_articles": 170015,
     "gdelt_spike_results": 170016,
+    "market_caps": 170017,
     "pipeline": 170098,
 }
 
