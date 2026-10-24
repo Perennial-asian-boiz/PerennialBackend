@@ -39,7 +39,12 @@ def user_id():
 
 
 def upgrade():
-    op.execute("CREATE SCHEMA IF NOT EXISTS app")
+    # Bootstrap creates app for the owner, who holds no CREATE on the database, and
+    # PostgreSQL checks that right before IF NOT EXISTS: look in the catalog instead.
+    op.execute(
+        "DO $$ BEGIN IF to_regnamespace('app') IS NULL"
+        " THEN CREATE SCHEMA app; END IF; END $$"
+    )
     op.execute("REVOKE ALL ON SCHEMA app FROM PUBLIC")
     op.create_table(
         "profiles",

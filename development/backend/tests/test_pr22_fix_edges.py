@@ -4,7 +4,7 @@ Spec: docs/work-items/m5-pr22-fix-packet.md (FINAL at 596a68f), OPERATIONS.md an
 ADR 0001. These pin edges the first pass (test_pr22_fix.py, test_pr22_restore.py)
 did not: the column-level and TRUNCATE/REFERENCES/TRIGGER forms of the startup
 check, provisioning's refusal for an owner that can reach auth, the downgrade
-order with users present, restoring a
+order with users present, the documented migrate-as-owner path, restoring a
 backup from an older revision, Jaden's flows under the auth limit and with
 expired tokens, the lazy module-level app, and the two locks agreeing.
 
@@ -182,6 +182,85 @@ def test_a_refused_downgrade_leaves_0012_and_the_lookup_in_place(engine, pr22_ro
                 provision_api(engine, pr22_roles)
 
 
+# ── The documented deploy order (OPERATIONS.md, README:329) ─
+
+
+def _upgrade_as_the_owner_then_provision(scratch, names):
+    """`alembic upgrade head` as the owner (the migration login's session role), then
+    --phase grants and provision_api_role.py; the API ends exactly provisioned."""
+    from alembic import command
+
+    from tests.conftest import alembic_config
+
+    with scratch.connect() as conn:
+        _session_role(conn, names["owner"])
+        try:
+            command.upgrade(alembic_config(conn), "head")
+        finally:
+            _reset_role(conn)
+        assert _version(conn) == _script().get_current_head()
+    provision_roles(scratch, names, "grants")
+    provision_api(scratch, names)
+    with scratch.connect() as conn:
+        assert conn.execute(text(
+            "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'app'"
+        )).scalar() == names["owner"]
+    assert _app_privileges(scratch, names["api"]) == EXPECTED_APP
+
+
+def _deployed_at_0010(engine, scratch, names):
+    """Main's deployment today: bootstrapped and granted by today's code (so no
+    schema app), migrated to 0010."""
+    from alembic import command
+
+    from tests.conftest import alembic_config
+
+    provision_roles(scratch, names, "bootstrap")
+    with scratch.connect() as conn:
+        command.upgrade(alembic_config(conn), "0010")  # however 0001-0010 were applied
+        conn.commit()
+    provision_roles(scratch, names, "grants")
+    with scratch.begin() as conn:  # newer provisioning makes an (empty) app; today's doesn't
+        conn.execute(text("DROP SCHEMA IF EXISTS app"))
+
+
+def test_mo2_a_deployment_at_0010_rebootstraps_then_upgrades_as_the_owner(engine):
+    """MO-2 (decision 37, option 2): re-running bootstrap, then upgrade head as the
+    owner, then the grants, gives MO-1's end state."""
+    names = role_names("rd")
+    try:
+        with _database(engine) as (_, scratch):
+            _deployed_at_0010(engine, scratch, names)
+            provision_roles(scratch, names, "bootstrap")  # before every upgrade
+            _upgrade_as_the_owner_then_provision(scratch, names)
+    finally:
+        drop_roles(engine, names.values())
+
+
+def test_mo2_without_rebootstrap_the_owners_upgrade_fails_and_stays_at_0010(engine):
+    """MO-2: skip the bootstrap and the upgrade fails at 0011, in one transaction."""
+    from alembic import command
+
+    from tests.conftest import alembic_config
+
+    names = role_names("rd")
+    try:
+        with _database(engine) as (_, scratch):
+            _deployed_at_0010(engine, scratch, names)
+            with scratch.connect() as conn:
+                _session_role(conn, names["owner"])
+                try:
+                    with pytest.raises(DBAPIError) as caught:
+                        command.upgrade(alembic_config(conn), "head")
+                finally:
+                    _reset_role(conn)
+                assert caught.value.orig.sqlstate == "42501"  # permission denied
+                assert _version(conn) == "0010"
+                assert conn.execute(text("SELECT to_regnamespace('app')")).scalar() is None
+    finally:
+        drop_roles(engine, names.values())
+
+
 # ── RB-13: a backup from an older revision ───────────────
 
 
@@ -237,8 +316,9 @@ def test_an_older_backup_fails_closed_in_the_documented_restore_order(engine, ol
                 with pytest.raises(Exception):
                     provision_roles(scratch, names, "grants")
                     provision_api(scratch, names)
-                with scratch.connect() as conn:
-                    assert conn.execute(text("SELECT to_regnamespace('app')")).scalar() is None
+                with scratch.connect() as conn:  # option 2's provisioning may leave app empty
+                    assert conn.execute(text("SELECT count(*) FROM pg_class"
+                                             " WHERE relnamespace = to_regnamespace('app')")).scalar() == 0
             finally:
                 _release(scratch, names)
     finally:

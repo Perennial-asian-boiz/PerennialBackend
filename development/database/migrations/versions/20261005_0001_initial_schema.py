@@ -36,7 +36,12 @@ def _security_fk(table):
 
 
 def upgrade() -> None:
-    op.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}")
+    # Bootstrap creates the schema for the owner, who holds no CREATE on the database.
+    # PostgreSQL checks that right before IF NOT EXISTS, so look in the catalog instead.
+    op.execute(
+        f"DO $$ BEGIN IF to_regnamespace('{SCHEMA}') IS NULL"
+        f" THEN CREATE SCHEMA {SCHEMA}; END IF; END $$"
+    )
 
     op.create_table(
         "securities",
