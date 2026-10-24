@@ -38,40 +38,62 @@ ROWS KEPT:
 
 import io
 import json
+import logging
 import os
 import re
+
+# ── shared path resolution (see paths.py) ──
+import sys as _sys
 import time
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from pathlib import Path as _Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
-# ── shared path resolution (see paths.py) ──
-import sys as _sys
-from pathlib import Path as _Path
-_sys.path.insert(0, str(next(
-    p for p in _Path(__file__).resolve().parents if p.name == "consensus_watchlist"
-)))
-from paths import LOCAL_DATA_DIR
+
+_sys.path.insert(
+    0,
+    str(
+        next(
+            p
+            for p in _Path(__file__).resolve().parents
+            if p.name == "consensus_watchlist"
+        )
+    ),
+)
+# Support direct script execution as well as package imports.
+_sys.path.insert(
+    0, str(next(p for p in _Path(__file__).resolve().parents if p.name == "backend"))
+)
+from paths import LOCAL_DATA_DIR  # noqa: E402
+from src.utils.logger import configure_logging  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────────────────
 
-INDEX_URL       = "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip"
-PTR_URL         = "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/{year}/{doc_id}.pdf"
-SOURCE_NAME     = "Clerk of the House (Periodic Transaction Reports)"
-HEADERS         = {"User-Agent": "Perennial research pipeline (Congress trade signals)"}
+INDEX_URL = (
+    "https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip"
+)
+PTR_URL = "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/{year}/{doc_id}.pdf"
+SOURCE_NAME = "Clerk of the House (Periodic Transaction Reports)"
+HEADERS = {"User-Agent": "Perennial research pipeline (Congress trade signals)"}
 
-LOOKBACK_DAYS   = 365     # PTRs filed in the last year; fmp.py then keeps its 2-year trade window
-REQUEST_DELAY   = 0.25    # seconds between report downloads
-REQUEST_TIMEOUT = 30      # seconds
+LOOKBACK_DAYS = (
+    365  # PTRs filed in the last year; fmp.py then keeps its 2-year trade window
+)
+REQUEST_DELAY = 0.25  # seconds between report downloads
+REQUEST_TIMEOUT = 30  # seconds
 MAX_INDEX_BYTES = 20 * 1024 * 1024
-MAX_PDF_BYTES   = 10 * 1024 * 1024
-PARSER_VERSION  = 4
+MAX_PDF_BYTES = 10 * 1024 * 1024
+PARSER_VERSION = 4
 
 # A run that could not answer at least this share of its reports (downloaded,
 # then parsed or recognized as scanned) is failed, and fmp.py falls back to
@@ -80,10 +102,10 @@ MIN_USABLE_SUCCESS_RATE = 0.9
 
 # Report outcomes. Cached outcomes are final; a failed download is retried
 # on the next run.
-STATUS_PARSED  = "parsed"    # text layer read; every stock row accounted for
-STATUS_PARTIAL = "partial"   # text read, but some [ST] rows did not parse
-STATUS_SCANNED = "scanned"   # no text layer — a scanned paper filing
-STATUS_FAILED  = "failed"    # download or PDF read failed — unknown, not cached
+STATUS_PARSED = "parsed"  # text layer read; every stock row accounted for
+STATUS_PARTIAL = "partial"  # text read, but some [ST] rows did not parse
+STATUS_SCANNED = "scanned"  # no text layer — a scanned paper filing
+STATUS_FAILED = "failed"  # download or PDF read failed — unknown, not cached
 
 TRADE_TYPES = {
     "P": "Purchase",
@@ -95,21 +117,26 @@ TRADE_TYPES = {
 # STOCK Act value ranges, keyed by lower bound, so an amount whose upper
 # bound wrapped to another line is still labeled exactly.
 AMOUNT_RANGES = {
-    "1,001":      "$1,001 - $15,000",
-    "15,001":     "$15,001 - $50,000",
-    "50,001":     "$50,001 - $100,000",
-    "100,001":    "$100,001 - $250,000",
-    "250,001":    "$250,001 - $500,000",
-    "500,001":    "$500,001 - $1,000,000",
-    "1,000,001":  "$1,000,001 - $5,000,000",
-    "5,000,001":  "$5,000,001 - $25,000,000",
+    "1,001": "$1,001 - $15,000",
+    "15,001": "$15,001 - $50,000",
+    "50,001": "$50,001 - $100,000",
+    "100,001": "$100,001 - $250,000",
+    "250,001": "$250,001 - $500,000",
+    "500,001": "$500,001 - $1,000,000",
+    "1,000,001": "$1,000,001 - $5,000,000",
+    "5,000,001": "$5,000,001 - $25,000,000",
     "25,000,001": "$25,000,001 - $50,000,000",
 }
 
 # The table header repeats on every page of a PTR.
 _HEADER_LINES = {
-    "ID Owner Asset Transaction", "Type", "Date Notification", "Date",
-    "Amount Cap.", "Gains >", "$200?",
+    "ID Owner Asset Transaction",
+    "Type",
+    "Date Notification",
+    "Date",
+    "Amount Cap.",
+    "Gains >",
+    "$200?",
 }
 _TABLE_START = "ID Owner Asset Transaction"
 _TABLE_END = "* For the complete list of asset type abbreviations"
@@ -150,7 +177,8 @@ _OWNER_PREFIX = re.compile(r"^(?:SP|JT|DC)\s+")
 # INDEX — which PTRs were filed
 # ─────────────────────────────────────────────────────────
 
-def _iso(us_date: str):
+
+def _iso(us_date: str) -> Optional[str]:
     """'09/01/2026' → '2026-09-01'; None if it does not parse."""
     try:
         return datetime.strptime(us_date.strip(), "%m/%d/%Y").date().isoformat()
@@ -158,7 +186,7 @@ def _iso(us_date: str):
         return None
 
 
-def parse_index(zip_bytes: bytes):
+def parse_index(zip_bytes: bytes) -> List[Dict[str, str]]:
     """
     Reads the yearly {year}FD.zip and returns its PTR filings:
     [{doc_id, year, name, district, filing_date}, ...]. Raises ValueError
@@ -180,18 +208,23 @@ def parse_index(zip_bytes: bytes):
         doc_id = row.get("DocID", "")
         if not filing_date or not doc_id.isdigit():
             raise ValueError("index row has no valid FilingDate or DocID")
-        filings.append({
-            "doc_id":      doc_id,
-            "year":        row.get("Year") or filing_date[:4],
-            "name":        " ".join(p for p in (row.get("First"), row.get("Last"),
-                                                row.get("Suffix")) if p),
-            "district":    row.get("StateDst", ""),
-            "filing_date": filing_date,
-        })
+        filings.append(
+            {
+                "doc_id": doc_id,
+                "year": row.get("Year") or filing_date[:4],
+                "name": " ".join(
+                    p
+                    for p in (row.get("First"), row.get("Last"), row.get("Suffix"))
+                    if p
+                ),
+                "district": row.get("StateDst", ""),
+                "filing_date": filing_date,
+            }
+        )
     return filings
 
 
-def _get_capped(session, url: str, max_bytes: int) -> bytes:
+def _get_capped(session: requests.Session, url: str, max_bytes: int) -> bytes:
     resp = session.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT, stream=True)
     try:
         if resp.status_code != 200:
@@ -209,6 +242,7 @@ def _get_capped(session, url: str, max_bytes: int) -> bytes:
 # ─────────────────────────────────────────────────────────
 # PARSE — one PTR's text into trade records
 # ─────────────────────────────────────────────────────────
+
 
 def extract_text(pdf_bytes: bytes) -> str:
     """The PDF's text layer ('' for a scanned filing). Raises on an unreadable PDF."""
@@ -229,12 +263,16 @@ def _table_text(text: str) -> str:
     if start < 0:
         return ""
     end = text.find(_TABLE_END, start)
-    body = text[start:end if end >= 0 else len(text)]
+    body = text[start : end if end >= 0 else len(text)]
 
     kept = []
     for line in body.splitlines():
         stripped = line.strip()
-        if not stripped or stripped in _HEADER_LINES or stripped.startswith("Filing ID #"):
+        if (
+            not stripped
+            or stripped in _HEADER_LINES
+            or stripped.startswith("Filing ID #")
+        ):
             continue
         kept.append(_BOUNDARY if _LABEL_LINE.match(stripped) else stripped)
     return "\n".join(kept)
@@ -249,23 +287,27 @@ def _amount_label(raw: str) -> str:
     return AMOUNT_RANGES.get(lower, raw)
 
 
-def _asset_description(block: str, asset, deal) -> str:
+def _asset_description(
+    block: str, asset: "re.Match[str]", deal: "Optional[re.Match[str]]"
+) -> str:
     """
     The asset name: the line holding '(TICKER)' and the line above it, with
     any type/date/amount text and the owner code removed. Earlier lines in a
     block are usually the previous sub-row's wrapped note, so they are left out.
     """
     if deal is not None and deal.start() < asset.start():
-        before = block[:deal.start()] + " " + block[deal.end():asset.start()]
+        before = block[: deal.start()] + " " + block[deal.end() : asset.start()]
     else:
-        before = block[:asset.start()]
+        before = block[: asset.start()]
     lines = [line for line in before.split("\n") if line.strip()][-2:]
     name = " ".join(" ".join(lines).split())
     name = _OWNER_PREFIX.sub("", name)
     return name[-200:].strip(" -")
 
 
-def parse_ptr_text(text: str, filing: dict):
+def parse_ptr_text(
+    text: str, filing: Dict[str, str]
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
     Returns (trades, stats) for one PTR. stats counts the [ST] rows the
     report lists and how many parsed, so a layout the parser does not
@@ -297,39 +339,50 @@ def parse_ptr_text(text: str, filing: dict):
             if not tdate:
                 continue
             disclosure = filing["filing_date"]
-            days = (datetime.fromisoformat(disclosure)
-                    - datetime.fromisoformat(tdate)).days
+            days = (
+                datetime.fromisoformat(disclosure) - datetime.fromisoformat(tdate)
+            ).days
             raw_type = " ".join(deal.group("type").upper().split()).replace("S(", "S (")
-            trades.append({
-                "politician_name":   filing["name"],
-                "chamber":           "House",
-                "ticker":            asset.group("ticker").upper(),
-                "asset_description": _asset_description(
-                    block, asset, deal if len(assets) == 1 else None),
-                "asset_type":        "Stock",
-                "trade_type":        TRADE_TYPES[raw_type],
-                "amount_range":      _amount_label(deal.group("amount")),
-                "transaction_date":  tdate,
-                "disclosure_date":   disclosure,
-                "days_to_disclose":  days,
-                "district":          filing["district"],
-                "source_link":       PTR_URL.format(year=filing["year"],
-                                                    doc_id=filing["doc_id"]),
-                "data_source":       "house_clerk",
-                "fetched_at":        fetched_at,
-            })
+            trades.append(
+                {
+                    "politician_name": filing["name"],
+                    "chamber": "House",
+                    "ticker": asset.group("ticker").upper(),
+                    "asset_description": _asset_description(
+                        block, asset, deal if len(assets) == 1 else None
+                    ),
+                    "asset_type": "Stock",
+                    "trade_type": TRADE_TYPES[raw_type],
+                    "amount_range": _amount_label(deal.group("amount")),
+                    "transaction_date": tdate,
+                    "disclosure_date": disclosure,
+                    "days_to_disclose": days,
+                    "district": filing["district"],
+                    "source_link": PTR_URL.format(
+                        year=filing["year"], doc_id=filing["doc_id"]
+                    ),
+                    "data_source": "house_clerk",
+                    "fetched_at": fetched_at,
+                }
+            )
 
-    return trades, {"stock_rows": stock_rows, "parsed_rows": len(trades),
-                    "skipped_rows": skipped}
+    return trades, {
+        "stock_rows": stock_rows,
+        "parsed_rows": len(trades),
+        "skipped_rows": skipped,
+    }
 
 
-def parse_report(pdf_bytes: bytes, filing: dict) -> dict:
+def parse_report(pdf_bytes: bytes, filing: Dict[str, str]) -> Dict[str, Any]:
     """One report's cache entry: status, trades and row counts."""
     try:
         text = extract_text(pdf_bytes)
     except Exception as e:
-        return {"status": STATUS_FAILED, "trades": [],
-                "error": f"unreadable PDF ({type(e).__name__})"}
+        return {
+            "status": STATUS_FAILED,
+            "trades": [],
+            "error": f"unreadable PDF ({type(e).__name__})",
+        }
 
     if not text.strip():
         return {"status": STATUS_SCANNED, "trades": []}
@@ -344,11 +397,12 @@ def parse_report(pdf_bytes: bytes, filing: dict) -> dict:
 # CACHE
 # ─────────────────────────────────────────────────────────
 
+
 def _cache_path() -> Path:
     return LOCAL_DATA_DIR / "house_clerk_cache.json"
 
 
-def load_cache(path=None) -> dict:
+def load_cache(path: Optional[str | Path] = None) -> Dict[str, Any]:
     """Cached report outcomes for this PARSER_VERSION; {} when absent or stale."""
     path = Path(path or _cache_path())
     try:
@@ -362,7 +416,7 @@ def load_cache(path=None) -> dict:
     return reports if isinstance(reports, dict) else {}
 
 
-def save_cache(reports: dict, path=None):
+def save_cache(reports: Dict[str, Any], path: Optional[str | Path] = None) -> None:
     """Atomic write — a crash mid-save must not leave a truncated cache."""
     path = Path(path or _cache_path())
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -376,8 +430,13 @@ def save_cache(reports: dict, path=None):
 # COLLECT
 # ─────────────────────────────────────────────────────────
 
-def collect(lookback_days: int = LOOKBACK_DAYS, session=None, cache_path=None,
-            sleep=time.sleep) -> dict:
+
+def collect(
+    lookback_days: int = LOOKBACK_DAYS,
+    session: Optional[requests.Session] = None,
+    cache_path: Optional[str | Path] = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Dict[str, Any]:
     """
     House trades from every PTR filed in the last `lookback_days`.
 
@@ -396,14 +455,22 @@ def collect(lookback_days: int = LOOKBACK_DAYS, session=None, cache_path=None,
     filings = []
     for year in years:
         try:
-            filings += parse_index(_get_capped(session, INDEX_URL.format(year=year),
-                                               MAX_INDEX_BYTES))
+            filings += parse_index(
+                _get_capped(session, INDEX_URL.format(year=year), MAX_INDEX_BYTES)
+            )
         except (requests.RequestException, ValueError) as e:
-            print(f"[house_clerk] ❌ {year}FD.zip unusable — {type(e).__name__}: {e}"[:200])
-            return {"status": STATUS_FAILED, "trades": [],
-                    "coverage": {"error": f"index_unusable:{year}"}}
+            logger.error(
+                "house_clerk_index_unusable year=%d error=%s", year, type(e).__name__
+            )
+            return {
+                "status": STATUS_FAILED,
+                "trades": [],
+                "coverage": {"error": f"index_unusable:{year}"},
+            }
     # One entry per report, even if two yearly indexes ever list the same DocID.
-    filings = list({f["doc_id"]: f for f in filings if f["filing_date"] >= cutoff}.values())
+    filings = list(
+        {f["doc_id"]: f for f in filings if f["filing_date"] >= cutoff}.values()
+    )
 
     cache = load_cache(cache_path)
     outcomes = {}
@@ -415,42 +482,62 @@ def collect(lookback_days: int = LOOKBACK_DAYS, session=None, cache_path=None,
             outcomes[doc_id] = cached
             continue
         try:
-            pdf = _get_capped(session, PTR_URL.format(year=filing["year"], doc_id=doc_id),
-                              MAX_PDF_BYTES)
+            pdf = _get_capped(
+                session,
+                PTR_URL.format(year=filing["year"], doc_id=doc_id),
+                MAX_PDF_BYTES,
+            )
             outcomes[doc_id] = parse_report(pdf, filing)
         except (requests.RequestException, ValueError) as e:
-            outcomes[doc_id] = {"status": STATUS_FAILED, "trades": [],
-                                "error": f"{type(e).__name__}: {e}"[:200]}
+            outcomes[doc_id] = {
+                "status": STATUS_FAILED,
+                "trades": [],
+                "error": f"{type(e).__name__}: {e}"[:200],
+            }
         downloaded += 1
         if downloaded % 50 == 0:
-            print(f"[house_clerk] … {downloaded} new reports read")
+            logger.info("house_clerk_progress downloaded=%d", downloaded)
         sleep(REQUEST_DELAY)
 
     # Keep final outcomes only; failures are retried next run.
-    save_cache({d: o for d, o in {**cache, **outcomes}.items()
-                if o.get("status") != STATUS_FAILED}, cache_path)
+    save_cache(
+        {
+            d: o
+            for d, o in {**cache, **outcomes}.items()
+            if o.get("status") != STATUS_FAILED
+        },
+        cache_path,
+    )
 
     statuses = Counter(o["status"] for o in outcomes.values())
     answered = len(filings) - statuses[STATUS_FAILED]
     rate = answered / len(filings) if filings else 0.0
     trades = [t for o in outcomes.values() for t in o.get("trades", [])]
     coverage = {
-        "lookback_days":       lookback_days,
-        "filed_since":         cutoff,
-        "reports":             len(filings),
-        "parsed":              statuses[STATUS_PARSED],
-        "partial":             statuses[STATUS_PARTIAL],
-        "scanned":             statuses[STATUS_SCANNED],
-        "failed":              statuses[STATUS_FAILED],
+        "lookback_days": lookback_days,
+        "filed_since": cutoff,
+        "reports": len(filings),
+        "parsed": statuses[STATUS_PARSED],
+        "partial": statuses[STATUS_PARTIAL],
+        "scanned": statuses[STATUS_SCANNED],
+        "failed": statuses[STATUS_FAILED],
         "downloaded_this_run": downloaded,
-        "unparsed_stock_rows": sum(max(0, o.get("stock_rows", 0) - o.get("parsed_rows", 0)
-                                       - o.get("skipped_rows", 0))
-                                   for o in outcomes.values()),
-        "skipped_stock_rows":  sum(o.get("skipped_rows", 0) for o in outcomes.values()),
-        "failed_reports":      sorted(d for d, o in outcomes.items()
-                                      if o["status"] == STATUS_FAILED)[:25],
-        "scanned_reports":     sorted(d for d, o in outcomes.items()
-                                      if o["status"] == STATUS_SCANNED)[:25],
+        "unparsed_stock_rows": sum(
+            max(
+                0,
+                o.get("stock_rows", 0)
+                - o.get("parsed_rows", 0)
+                - o.get("skipped_rows", 0),
+            )
+            for o in outcomes.values()
+        ),
+        "skipped_stock_rows": sum(o.get("skipped_rows", 0) for o in outcomes.values()),
+        "failed_reports": sorted(
+            d for d, o in outcomes.items() if o["status"] == STATUS_FAILED
+        )[:25],
+        "scanned_reports": sorted(
+            d for d, o in outcomes.items() if o["status"] == STATUS_SCANNED
+        )[:25],
     }
     if not filings or rate < MIN_USABLE_SUCCESS_RATE:
         status = STATUS_FAILED
@@ -465,30 +552,39 @@ def collect(lookback_days: int = LOOKBACK_DAYS, session=None, cache_path=None,
 # MAIN — standalone check; fmp.py is what writes trades_congress.json
 # ─────────────────────────────────────────────────────────
 
-def run():
-    print("[house_clerk] Reading House PTRs from the Clerk of the House...")
+
+def run() -> Dict[str, Any]:
+    logger.info("house_clerk_collect_start")
     result = collect()
     cov = result["coverage"]
     trades = result["trades"]
     purchases = [t for t in trades if t["trade_type"] == "Purchase"]
-
-    print("\n" + "=" * 60)
-    print("  PERENNIAL — House Clerk PTR Summary")
-    print("=" * 60)
-    print(f"  Status                 : {result['status'].upper()}")
-    for key in ("reports", "parsed", "partial", "scanned", "failed",
-                "downloaded_this_run", "unparsed_stock_rows", "skipped_stock_rows"):
-        if key in cov:
-            print(f"  {key.replace('_', ' ').capitalize():<23}: {cov[key]}")
-    print(f"  Stock trades           : {len(trades)} ({len(purchases)} purchases)")
-    top = Counter(t["ticker"] for t in purchases).most_common(10)
-    if top:
-        print("\n  📊 Top House purchase tickers:")
-        for ticker, count in top:
-            print(f"  {ticker:<8} {'█' * min(count, 30)} {count}")
-    print()
+    logger.info(
+        "house_clerk_summary status=%s reports=%d parsed=%d partial=%d scanned=%d "
+        "failed=%d downloaded=%d unparsed_stock_rows=%d skipped_stock_rows=%d "
+        "trades=%d purchases=%d",
+        result["status"],
+        *(
+            cov.get(k, 0)
+            for k in (
+                "reports",
+                "parsed",
+                "partial",
+                "scanned",
+                "failed",
+                "downloaded_this_run",
+                "unparsed_stock_rows",
+                "skipped_stock_rows",
+            )
+        ),
+        len(trades),
+        len(purchases),
+    )
+    for ticker, count in Counter(t["ticker"] for t in purchases).most_common(10):
+        logger.info("house_clerk_top_purchase ticker=%s purchases=%d", ticker, count)
     return result
 
 
 if __name__ == "__main__":
+    configure_logging()
     run()

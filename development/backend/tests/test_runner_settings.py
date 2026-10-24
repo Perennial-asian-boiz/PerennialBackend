@@ -95,13 +95,13 @@ def test_cli_run_pipeline_publishes_with_keys_only_in_settings(
                 models.publication_sources.c.publication_id == publication_id
             )
         ).scalars()
-        assert sorted(pinned) == sorted(models.SOURCES)
+        assert sorted(pinned) == sorted(models.WATCHLIST_SOURCES)
         statuses = dict(
             conn.execute(
                 select(models.ingestion_runs.c.source, models.ingestion_runs.c.status)
             ).all()
         )
-    assert statuses == {source: "succeeded" for source in models.SOURCES}
+    assert statuses == {source: "succeeded" for source in models.WATCHLIST_SOURCES}
 
 
 @pytest.mark.db
@@ -218,7 +218,7 @@ def test_cli_run_pipeline_takes_house_trades_from_the_house_clerk_by_default(
     engine, db_url, keyed_provider, monkeypatch, capsys, tmp_path
 ):
     """Production defaults: House from the Clerk of the House, no FMP Senate,
-    FMP used only for market caps; the publication ranks with watchlist-v3."""
+    FMP used only for market caps; the publication ranks with watchlist-v4."""
     from datetime import date, timedelta
 
     from src.ingestion import cli, collectors

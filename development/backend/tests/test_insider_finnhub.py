@@ -105,7 +105,7 @@ def test_fetch_sends_key_in_header_and_returns_payload(insider, monkeypatch):
         return FakeResponse(body={"data": [], "symbol": "ZZAA"})
 
     monkeypatch.setattr(insider.requests, "get", fake_get)
-    result = insider.fetch_insider_activity("ZZAA")
+    result = insider.legacy_fetch_insider_activity("ZZAA")
     assert result["status"] == insider.STATUS_SUCCESS
     url, params, headers = calls[0]
     assert url == insider.FINNHUB_URL and params["symbol"] == "ZZAA"
@@ -119,14 +119,14 @@ def test_fetch_sends_key_in_header_and_returns_payload(insider, monkeypatch):
 )
 def test_fetch_http_failures_are_classified(insider, monkeypatch, status, code):
     monkeypatch.setattr(insider.requests, "get", lambda *a, **kw: FakeResponse(status))
-    result = insider.fetch_insider_activity("ZZAA")
+    result = insider.legacy_fetch_insider_activity("ZZAA")
     assert result["status"] == insider.STATUS_FAILED and result["error_code"] == code
 
 
 def test_fetch_retries_after_rate_limit(insider, monkeypatch):
     responses = [FakeResponse(429), FakeResponse(429), FakeResponse(body={"data": []})]
     monkeypatch.setattr(insider.requests, "get", lambda *a, **kw: responses.pop(0))
-    assert insider.fetch_insider_activity("ZZAA")["status"] == insider.STATUS_SUCCESS
+    assert insider.legacy_fetch_insider_activity("ZZAA")["status"] == insider.STATUS_SUCCESS
 
     calls = []
 
@@ -135,7 +135,7 @@ def test_fetch_retries_after_rate_limit(insider, monkeypatch):
         return FakeResponse(429)
 
     monkeypatch.setattr(insider.requests, "get", always_limited)
-    assert insider.fetch_insider_activity("ZZAA")["error_code"] == "rate_limited"
+    assert insider.legacy_fetch_insider_activity("ZZAA")["error_code"] == "rate_limited"
     assert len(calls) == 1 + insider.RATE_LIMIT_RETRIES
 
 
@@ -144,11 +144,11 @@ def test_rate_limit_waits_until_window_reset(insider, monkeypatch):
     reset = lambda seconds: FakeResponse(  # noqa: E731
         429, headers={"X-Ratelimit-Reset": str(1_000_000 + seconds)}
     )
-    assert insider.rate_limit_wait(reset(30)) == 31  # one second of slack
+    assert insider.legacy_rate_limit_wait(reset(30)) == 31  # one second of slack
     # Missing, garbage, past or implausibly far resets fall back to the default.
     for resp in (FakeResponse(429), FakeResponse(429, headers={"X-Ratelimit-Reset": "x"}),
                  reset(-5), reset(3600)):
-        assert insider.rate_limit_wait(resp) == insider.RATE_LIMIT_WAIT
+        assert insider.legacy_rate_limit_wait(resp) == insider.RATE_LIMIT_WAIT
 
 
 def test_fetch_non_json_body_is_bad_response(insider, monkeypatch):
@@ -156,7 +156,7 @@ def test_fetch_non_json_body_is_bad_response(insider, monkeypatch):
         insider.requests, "get", lambda *a, **kw: FakeResponse(body=ValueError("x"))
     )
     assert (
-        insider.fetch_insider_activity("ZZAA")["error_code"] == insider.ERR_BAD_RESPONSE
+        insider.legacy_fetch_insider_activity("ZZAA")["error_code"] == insider.ERR_BAD_RESPONSE
     )
 
 
@@ -169,10 +169,10 @@ def test_missing_key_fails_every_ticker_without_calling_provider(
 
     monkeypatch.setattr(insider, "FINNHUB_API_KEY", key)
     monkeypatch.setattr(insider.requests, "get", forbidden)
-    buys, outcomes = insider.scan_tickers(["ZZAA", "ZZBB"], "b", "label")
+    buys, outcomes = insider.legacy_scan_tickers(["ZZAA", "ZZBB"], "b", "label")
     assert buys == []
     assert [o["error_code"] for o in outcomes] == ["credential_error"] * 2
-    coverage = insider.build_coverage(outcomes, {})
+    coverage = insider.legacy_build_coverage(outcomes, {})
     assert coverage["run_status"] == insider.STATUS_FAILED
     assert coverage["errors_by_code"]["credential_error"]["category"] == "config"
 
@@ -185,7 +185,7 @@ def test_rejected_key_stops_calling_provider_after_first_ticker(insider, monkeyp
         return FakeResponse(401)
 
     monkeypatch.setattr(insider.requests, "get", fake_get)
-    _buys, outcomes = insider.scan_tickers(["ZZAA", "ZZBB", "ZZCC"], "b", "label")
+    _buys, outcomes = insider.legacy_scan_tickers(["ZZAA", "ZZBB", "ZZCC"], "b", "label")
     assert len(calls) == 1
     assert [o["status"] for o in outcomes] == [insider.STATUS_FAILED] * 3
 
@@ -199,9 +199,9 @@ def test_scan_separates_buys_no_buys_and_unknown(insider, monkeypatch):
     monkeypatch.setattr(
         insider.requests, "get", lambda url, params=None, **kw: bodies[params["symbol"]]
     )
-    buys, outcomes = insider.scan_tickers(list(bodies), "b", "label")
+    buys, outcomes = insider.legacy_scan_tickers(list(bodies), "b", "label")
     assert [b["ticker"] for b in buys] == ["ZZAA"]
-    coverage = insider.build_coverage(outcomes, {})
+    coverage = insider.legacy_build_coverage(outcomes, {})
     assert coverage["run_status"] == insider.STATUS_PARTIAL
     assert coverage["with_buys"] == 1 and coverage["confirmed_no_buys"] == 1
     assert coverage["failed_tickers"] == ["ZZCC"]
@@ -239,7 +239,7 @@ def test_fetch_asks_for_provider_symbol(insider, monkeypatch):
         return FakeResponse(body={"data": [txn()]})
 
     monkeypatch.setattr(insider.requests, "get", fake_get)
-    buys, outcomes = insider.scan_tickers(["RKLB UQ"], "b", "label")
+    buys, outcomes = insider.legacy_scan_tickers(["RKLB UQ"], "b", "label")
     assert seen == ["RKLB"]
     assert [b["ticker"] for b in buys] == ["RKLB UQ"]  # planned ticker kept
     assert outcomes[0]["ticker"] == "RKLB UQ"
@@ -253,9 +253,9 @@ def test_unsupported_listing_is_skipped_and_not_counted_as_no_buys(insider, monk
         return FakeResponse(body={"data": []})
 
     monkeypatch.setattr(insider.requests, "get", fake_get)
-    _buys, outcomes = insider.scan_tickers(["ETHQ/U", "ZZAA"], "b", "label")
+    _buys, outcomes = insider.legacy_scan_tickers(["ETHQ/U", "ZZAA"], "b", "label")
     assert seen == ["ZZAA"]
-    coverage = insider.build_coverage(outcomes, {})
+    coverage = insider.legacy_build_coverage(outcomes, {})
     assert coverage["run_status"] == insider.STATUS_SUCCESS
     assert coverage["tickers_checked"] == 1 and coverage["confirmed_no_buys"] == 1
     assert coverage["scanned_tickers"] == ["ZZAA"]

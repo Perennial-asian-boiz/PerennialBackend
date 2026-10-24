@@ -323,7 +323,7 @@ def fmp(monkeypatch, tmp_path):
     module = collectors._fetcher("fmp")
     monkeypatch.setattr(module, "FMP_API_KEY", "synthetic-key")
     monkeypatch.setattr(module, "LOCAL_DATA_DIR", tmp_path)
-    monkeypatch.setattr(module, "fetch_chamber_trades", lambda c: [
+    monkeypatch.setattr(module, "legacy_fetch_chamber_trades", lambda c, **kw: [
         fmp_item(c.capitalize(), "ZZSN" if c == "senate" else "ZZFH")])
     return module
 
@@ -475,12 +475,34 @@ def test_collector_adds_fmp_senate_when_enabled(clerk_http):
 
 
 def test_collector_settings_choose_the_sources(clerk_http):
+    """Defaults: House from the Clerk, Senate from FMP's single free page."""
+    from src.settings import Settings
+    from tests.test_collectors import FakeResponse as HttpResponse
+
+    make_session, routes = clerk_http
+    routes["senate-latest"] = HttpResponse(body=[])
+    settings = Settings(
+        database_url="postgresql+psycopg://u@127.0.0.1/x_test", fmp_api_key="synthetic"
+    )
+    assert (settings.congress_house_source, settings.congress_include_fmp_senate) == (
+        "house_clerk", True)
+    session = make_session()
+    outcome = collectors.collect_congress(session, sleep=NO_SLEEP, settings=settings)
+    assert outcome.succeeded and outcome.envelope["chambers"] == ["Senate", "House"]
+    fmp_pages = [p.get("page") for url, p in session.calls if "financialmodelingprep" in url]
+    assert fmp_pages == [0]  # Senate only, page 0 only
+    # Clerk rows never look like a full FMP page to the history gap check.
+    assert outcome.diagnostics["house_rows_served"] == 0
+
+
+def test_house_only_settings_need_no_fmp_key(clerk_http):
     from src.settings import Settings
 
     make_session, _ = clerk_http
-    settings = Settings(database_url="postgresql+psycopg://u@127.0.0.1/x_test")
-    assert (settings.congress_house_source, settings.congress_include_fmp_senate) == (
-        "house_clerk", False)
+    settings = Settings(
+        database_url="postgresql+psycopg://u@127.0.0.1/x_test",
+        congress_include_fmp_senate=False,
+    )
     session = make_session()
     outcome = collectors.collect_congress(session, sleep=NO_SLEEP, settings=settings)
     assert outcome.succeeded and outcome.envelope["chambers"] == ["House"]

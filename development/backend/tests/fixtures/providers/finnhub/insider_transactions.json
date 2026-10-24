@@ -1,0 +1,25 @@
+{
+  "symbol": "ZZAA",
+  "data": [
+    {
+      "symbol": "ZZAA",
+      "name": "Synthetic Person",
+      "transactionCode": "P",
+      "isDerivative": false,
+      "transactionDate": "2026-10-01",
+      "filingDate": "2026-10-02",
+      "change": 2000,
+      "transactionPrice": 50.0
+    },
+    {
+      "symbol": "ZZAA",
+      "name": null,
+      "transactionCode": "S",
+      "isDerivative": false,
+      "transactionDate": "2026-10-01",
+      "filingDate": "2026-10-02",
+      "change": -100,
+      "transactionPrice": null
+    }
+  ]
+}

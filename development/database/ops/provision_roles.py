@@ -14,12 +14,19 @@ from sqlalchemy.engine import make_url
 IMMUTABLE = (
     "source_batches", "congress_trades", "ark_holdings", "insider_trades", "short_interest",
     "run_dependencies", "publications", "publication_events", "publication_sources", "market_cap_observations",
+    "gdelt_theme_volume", "gdelt_theme_articles", "gdelt_spike_results",
     "publication_market_caps",
 )
 MUTABLE = ("ingestion_runs", "current_publication")
 IMMUTABLE += ("gdelt_articles",)
+# Congress history (free-plan accumulation): append-only like source batches.
+IMMUTABLE += ("congress_trade_history", "congress_history_gaps", "publication_history_watermarks")
 MUTABLE += ("gdelt_theme_days", "gdelt_spike_checks")
-TABLES = (*IMMUTABLE, *MUTABLE, "securities")
+# M4 identity. Aliases are append-only: root imports register canonical tickers.
+# Profiles are reviewed seed data written by the owner; the pipeline only reads them.
+IMMUTABLE += ("security_identifiers",)
+REFERENCE = ("company_profiles",)
+TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 
 
 def provision(conn, roles, *, phase):
@@ -81,7 +88,9 @@ def provision(conn, roles, *, phase):
         # Table REVOKE leaves any old column grants intact, so remove those explicitly too.
         conn.execute(sql.SQL("REVOKE ALL ({}) ON TABLE {} FROM PUBLIC, {}, {}")
                      .format(sql.SQL(", ").join(columns), ident, sql.Identifier(importer), sql.Identifier(reader)))
-        conn.execute(sql.SQL("GRANT SELECT, INSERT ON TABLE {} TO {}").format(ident, sql.Identifier(importer)))
+        importer_privileges = "SELECT" if table in REFERENCE else "SELECT, INSERT"
+        conn.execute(sql.SQL("GRANT {} ON TABLE {} TO {}")
+                     .format(sql.SQL(importer_privileges), ident, sql.Identifier(importer)))
         conn.execute(sql.SQL("GRANT SELECT ON TABLE {} TO {}").format(ident, sql.Identifier(reader)))
         if table in MUTABLE:
             conn.execute(sql.SQL("GRANT UPDATE ON TABLE {} TO {}").format(ident, sql.Identifier(importer)))

@@ -37,6 +37,25 @@ snapshots, publication inputs and publication outputs are immutable for the
 runtime role; only run state, the current pointer and security metadata may be
 updated. Readers only need `SELECT`. See [operations](../../docs/technical-specs/OPERATIONS.md).
 
+### Security identity (M4)
+
+Imports resolve tickers through `security_identifiers` (canonical tickers plus
+provider spellings such as `FINNHUB:BRK-B`). Congress and ARK define the
+universe, so a plain ticker they report with no alias registers a new security
+and its canonical alias; the run's diagnostics count `securities_registered`.
+Insider and short-interest imports only look up: an unknown or inactive ticker
+fails the run with `unresolved_security`. After migrating and granting, apply
+the reviewed seeds (share-class aliases, issuer profiles) and backfill profile
+sector/industry, as the owner:
+
+```bash
+OPS_DATABASE_URL=... python development/database/ops/seed_identity.py
+```
+
+It runs in one transaction, prints counts only, is idempotent, and refuses
+(rolling back) when the manifest disagrees with stored identity. Additions to
+`seeds/identity.json` need Bryan's approval.
+
 ## Importing
 
 Run from `development/backend`. Exit code 0 means the import succeeded, 1
@@ -100,9 +119,11 @@ so neither an empty list nor an empty `errors[]` proves success.
   PDF filed in the last 365 days is a unit. Scanned paper filings complete with
   no records and are counted (`house_reports_scanned`); a report with stock rows
   the parser cannot read fails the collection. Parsed reports are reused from
-  `local_data/house_clerk_cache.json`. FMP's Senate feed is added only with
-  `CONGRESS_INCLUDE_FMP_SENATE=true` (off until D4 works on the free plan), and
-  the batch envelope records `chambers` and `house_source`.
+  `local_data/house_clerk_cache.json`. Senate trades come from FMP's free page
+  (`CONGRESS_INCLUDE_FMP_SENATE=true`, the default), accumulated into history
+  like before. House Clerk rows report `house_rows_served=0`, so the history
+  derivation's page-edge gap check never fires on them. The batch envelope
+  records `chambers` and `house_source`.
   Insider tickers are requested from Finnhub under their provider symbol
   ("RKLB UQ" as RKLB, BRK.B as BRK-B, GOOG as GOOGL); listings with no SEC
   Form 4 filings (e.g. "ETHQ/U") are not requested and are listed in the
@@ -202,7 +223,7 @@ Rules worth knowing:
   mismatch: valid short-interest signals now populate the JSON watchlist where
   they were always null at `fab7188`.
 - **Congress adapters and versioned ranking.** The legacy JSON writer uses
-  `fmp.deduplicate`, retaining the first row for the `fab7188` key
+  `fmp.legacy_deduplicate`, retaining the first row for the `fab7188` key
   `(politician_name.lower(), ticker, transaction_date, trade_type.lower())`.
   The database collector uses `deduplicate_proven_repeats`, preserving
   cross-provider observations and unidentified repeats without changing hash v2.
@@ -214,12 +235,13 @@ Rules worth knowing:
   dates. Thus an FMP/Watcher pair counts once, but two same-provider rows still
   count twice. Raw snapshot rows are untouched. Replay dispatches by the saved
   ranking version, preserving the original `watchlist-v1` output.
-  `watchlist-v3` (current) ranks exactly like v2 but caps Congress candidates at
+  `watchlist-v3` ranks accumulated Congress history (2-year window) with v2's
+  scoring. `watchlist-v4` (current) is v3 with Congress candidates capped at
   `max_congress_candidates` (100, stored in `ranking_config`): purchase symbols
   by distinct buyers, then buy count, then most recent transaction, then symbol.
   ARK candidates are unchanged. Complete House Clerk data has ~650 purchased
   symbols a year, and each candidate costs one FMP market-cap request against
-  the 250-a-day free plan. v1/v2 publications replay with their uncapped rule.
+  the 250-a-day free plan. v1-v3 publications replay with their uncapped rule.
 - **Securities and the supported universe.** This sprint covers US equities
   only. Symbols are upper-cased and limited to `A-Z 0-9 . / -`. Placeholders
   (`N/A`, `--`, `NONE`, `NULL`, `NAN`) and any other form fail validation.

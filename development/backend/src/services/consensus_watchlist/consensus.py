@@ -60,7 +60,7 @@ FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
 
 MARKET_CAP_THRESHOLD = 10_000_000_000  # $10 Billion
 # Congress candidates evaluated per run, strongest first (same rule as the
-# database ranking's watchlist-v3). Complete House Clerk data has ~650
+# database ranking's watchlist-v4). Complete House Clerk data has ~650
 # purchased tickers a year, and each candidate costs one FMP market-cap
 # request against a 250-a-day free plan.
 MAX_CONGRESS_CANDIDATES = 100

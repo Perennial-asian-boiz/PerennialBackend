@@ -48,6 +48,25 @@ ENVELOPE_KEYS = {
         "unsupported_tickers",
     ),
     "short_interest": ("schema_version", "source", "fetched_at", "total_records"),
+    # GDELT: missing timeline days are coverage gaps ("THEME:YYYY-MM-DD"), never
+    # zero rows; lists keep the first MAX_LIST_ITEMS, the count is exact.
+    "gdelt_theme_volume": (
+        "source",
+        "target_day",
+        "window_days",
+        "themes",
+        "missing_days",
+        "missing_days_count",
+    ),
+    "gdelt_theme_articles": ("source", "target_day", "themes", "skipped_articles"),
+    "gdelt_spike_results": (
+        "rule_version",
+        "spike_ratio",
+        "baseline_days",
+        "min_baseline_days",
+        "min_articles",
+        "input_batch_id",
+    ),
 }
 MAX_LIST_ITEMS = 20
 

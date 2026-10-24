@@ -10,12 +10,18 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence, cast
 
-VERSION = "watchlist-v3"
-VERSIONS = ("watchlist-v1", "watchlist-v2", "watchlist-v3")
-# v3 caps Congress candidates. With complete House Clerk data every purchased
-# ticker would otherwise be a candidate (~650 a year), and each candidate
-# costs one FMP market-cap request against a 250-a-day free plan.
-DEFAULT_CONFIG = {"market_cap_threshold": "10000000000", "max_congress_candidates": 100}
+# v3 ranks accumulated Congress history (2-year window) instead of one batch;
+# the scoring itself is unchanged from v2.
+# v4 is v3 with Congress candidates capped at max_congress_candidates. With
+# complete House Clerk data every purchased ticker would otherwise be a
+# candidate (~650 a year), and each candidate costs one FMP market-cap request
+# against a 250-a-day free plan.
+VERSION = "watchlist-v4"
+VERSIONS = ("watchlist-v1", "watchlist-v2", "watchlist-v3", "watchlist-v4")
+DEFAULT_CONFIG = {
+    "market_cap_threshold": "10000000000",
+    "max_congress_candidates": 100,
+}
 
 
 def candidate_symbols(
@@ -27,13 +33,13 @@ def candidate_symbols(
     """
     Symbols a publication evaluates (and fetches market caps for).
 
-    v1/v2: every Congress purchase symbol plus every ARK holding.
-    v3: the top `max_congress_candidates` Congress purchase symbols, by
+    v1-v3: every Congress purchase symbol plus every ARK holding.
+    v4: the top `max_congress_candidates` Congress purchase symbols, by
     distinct buyers, then buy count, then most recent transaction, then
     symbol; plus every ARK holding.
     """
     ark = {r["symbol"] for r in rows["ark_holdings"]}
-    if version != "watchlist-v3":
+    if version != "watchlist-v4":
         return sorted(
             {
                 r["symbol"]
@@ -42,8 +48,9 @@ def candidate_symbols(
             }
             | ark
         )
+    settings = dict(DEFAULT_CONFIG if config is None else config)
     limit = int(
-        dict(DEFAULT_CONFIG if config is None else config).get(
+        settings.get(
             "max_congress_candidates", DEFAULT_CONFIG["max_congress_candidates"]
         )
     )
