@@ -15,7 +15,10 @@ from typing import Any, Mapping, Sequence, cast
 # v4 is v3 with Congress candidates capped at max_congress_candidates. With
 # complete House Clerk data every purchased ticker would otherwise be a
 # candidate (~650 a year), and each candidate costs one FMP market-cap request
-# against a 250-a-day free plan.
+# against a 250-a-day free plan. v4 also ignores purchases dated after their
+# own disclosure: a trade cannot be reported before it happens, so the date is
+# a filer's typo (e.g. a 2025 trade written as 2026), and it would otherwise
+# become the ticker's "most recent" buy. Stored rows keep the date as filed.
 VERSION = "watchlist-v4"
 VERSIONS = ("watchlist-v1", "watchlist-v2", "watchlist-v3", "watchlist-v4")
 DEFAULT_CONFIG = {
@@ -36,7 +39,8 @@ def candidate_symbols(
     v1-v3: every Congress purchase symbol plus every ARK holding.
     v4: the top `max_congress_candidates` Congress purchase symbols, by
     distinct buyers, then buy count, then most recent transaction, then
-    symbol; plus every ARK holding.
+    symbol, counting only purchases with a plausible date; plus every ARK
+    holding.
     """
     ark = {r["symbol"] for r in rows["ark_holdings"]}
     if version != "watchlist-v4":
@@ -56,7 +60,8 @@ def candidate_symbols(
     )
     purchases: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in _cross_provider_purchases(rows["congress_trades"]):
-        purchases[row["symbol"]].append(row)
+        if not dated_after_disclosure(row):
+            purchases[row["symbol"]].append(row)
 
     def strength(symbol: str) -> tuple[Any, ...]:
         trades = purchases[symbol]
@@ -69,6 +74,12 @@ def candidate_symbols(
         )
 
     return sorted(set(sorted(purchases, key=strength)[:limit]) | ark)
+
+
+def dated_after_disclosure(row: Mapping[str, Any]) -> bool:
+    """True when a trade's own date is later than the date it was disclosed."""
+    traded, disclosed = row.get("transaction_date"), row.get("disclosure_date")
+    return traded is not None and disclosed is not None and traded > disclosed
 
 
 def json_ready(value: Any) -> Any:
@@ -127,6 +138,8 @@ def calculate(
     congress_rows = rows["congress_trades"]
     if version != "watchlist-v1":
         congress_rows = _cross_provider_purchases(congress_rows)
+    if version == "watchlist-v4":
+        congress_rows = [r for r in congress_rows if not dated_after_disclosure(r)]
     for row in congress_rows:
         if "purchase" in row["trade_type"].lower():
             congress[row["symbol"]].append(row)

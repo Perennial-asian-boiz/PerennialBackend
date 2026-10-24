@@ -668,6 +668,7 @@ def _collect_house_clerk(
         house_reports_scanned=0,
         house_reports_downloaded=0,
         house_stock_rows_skipped=0,
+        house_trades_dated_after_disclosure=0,
     )
     trades: List[Dict[str, Any]] = []
     outcomes: Dict[str, Dict[str, Any]] = {}
@@ -700,6 +701,10 @@ def _collect_house_clerk(
             tracker.extra_counts["house_reports_scanned"] += 1
         tracker.extra_counts["house_stock_rows_skipped"] += report.get(
             "skipped_rows", 0
+        )
+        # Stored as filed; ranking (watchlist-v4) ignores these purchases.
+        tracker.extra_counts["house_trades_dated_after_disclosure"] += sum(
+            1 for t in report["trades"] if t["transaction_date"] > t["disclosure_date"]
         )
         trades.extend(report["trades"])
         tracker.ok()

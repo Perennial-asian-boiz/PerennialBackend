@@ -241,7 +241,11 @@ Rules worth knowing:
   by distinct buyers, then buy count, then most recent transaction, then symbol.
   ARK candidates are unchanged. Complete House Clerk data has ~650 purchased
   symbols a year, and each candidate costs one FMP market-cap request against
-  the 250-a-day free plan. v1-v3 publications replay with their uncapped rule.
+  the 250-a-day free plan. v4 also ignores purchases dated after their own
+  disclosure (a filer's year typo, such as a trade dated 2026-12-26 that was
+  disclosed 2026-02-09); stored rows keep the date as filed, and the House
+  Clerk collection counts them in `house_trades_dated_after_disclosure`.
+  v1-v3 publications replay with their original rules.
 - **Securities and the supported universe.** This sprint covers US equities
   only. Symbols are upper-cased and limited to `A-Z 0-9 . / -`. Placeholders
   (`N/A`, `--`, `NONE`, `NULL`, `NAN`) and any other form fail validation.

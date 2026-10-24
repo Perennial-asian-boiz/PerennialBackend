@@ -149,6 +149,12 @@ def load_congress_signals(file_path: Optional[Path] = None) -> Dict[str, Dict[st
             disc_date = t.get("disclosure_date") or ""
             amt_range = t.get("amount_range") or ""
 
+            # A trade dated after its own disclosure is a filer's typo (e.g. a
+            # 2025 trade written as 2026); it must not become the "most
+            # recent" buy. Same rule as the database ranking's watchlist-v4.
+            if txn_date and disc_date and txn_date > disc_date:
+                continue
+
             if norm_ticker not in signals:
                 signals[norm_ticker] = {
                     "buy_count": 0,

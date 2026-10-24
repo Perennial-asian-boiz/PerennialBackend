@@ -97,6 +97,7 @@ _COUNT_KEYS = (
     "house_reports_scanned",
     "house_reports_downloaded",
     "house_stock_rows_skipped",
+    "house_trades_dated_after_disclosure",
 )
 
 _OWN_ERROR_TYPES = {"not_an_object", "duplicate_security", "conflicting_exchange"}

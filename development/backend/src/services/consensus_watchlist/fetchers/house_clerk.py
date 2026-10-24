@@ -532,6 +532,16 @@ def collect(
             for o in outcomes.values()
         ),
         "skipped_stock_rows": sum(o.get("skipped_rows", 0) for o in outcomes.values()),
+        # Kept as filed, but ranking ignores them: a trade cannot be disclosed
+        # before it happens, so the date is a filer's typo.
+        "dated_after_disclosure": sum(
+            1 for t in trades if t["transaction_date"] > t["disclosure_date"]
+        ),
+        # Real late filings, kept as is: disclosed beyond the STOCK Act's
+        # 45-day limit.
+        "disclosed_over_45_days": sum(
+            1 for t in trades if (t.get("days_to_disclose") or 0) > 45
+        ),
         "failed_reports": sorted(
             d for d, o in outcomes.items() if o["status"] == STATUS_FAILED
         )[:25],

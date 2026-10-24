@@ -565,3 +565,76 @@ def test_legacy_consensus_keeps_strongest_congress_candidates():
     }
     assert consensus.top_congress_candidates(signals, limit=3) == ["ZZAA", "ZZBB", "ZZCC"]
     assert consensus.top_congress_candidates(signals)[-1] == "ZZDD"
+
+
+# ── Trades dated after their own disclosure ──────────────
+
+
+def dated_row(symbol, member, traded, disclosed, row_number):
+    return {**congress_row(symbol, member, traded, row_number),
+            "disclosure_date": disclosed, "amount_label": "$1,001 - $15,000"}
+
+
+def test_v4_ignores_purchases_dated_after_their_disclosure():
+    """A SONY-style typo (traded 2026-12-26, disclosed 2026-02-09) is not a 'most recent' buy."""
+    from datetime import datetime, timezone
+    from decimal import Decimal
+
+    from src.pipeline import ranking
+
+    good = dated_row("ZZAA", "A", date(2026, 1, 20), date(2026, 2, 9), 1)
+    typo = dated_row("ZZAA", "B", date(2026, 12, 26), date(2026, 2, 9), 2)
+    only_typo = dated_row("ZZBB", "C", date(2026, 12, 26), date(2026, 2, 9), 3)
+    rows = {"congress_trades": [good, typo, only_typo], "ark_holdings": [],
+            "insider_trades": [], "short_interest": []}
+
+    assert ranking.candidate_symbols(rows) == ["ZZAA"]
+    caps = {"ZZAA": Decimal("20000000000"), "ZZBB": Decimal("20000000000")}
+    out = ranking.calculate(rows, caps, datetime(2026, 10, 24, tzinfo=timezone.utc))
+    [record] = out["popular_stable"]
+    signal = record["signals"]["congress"]
+    assert record["ticker"] == "ZZAA"
+    assert (signal["buy_count"], signal["distinct_buyer_count"]) == (1, 1)
+    assert signal["most_recent_transaction_date"] == "2026-01-20"
+
+    # Released v3 keeps its rule, so its publications replay unchanged.
+    v3 = ranking.calculate(rows, caps, datetime(2026, 10, 24, tzinfo=timezone.utc),
+                           version="watchlist-v3")
+    v3_signal = {r["ticker"]: r["signals"]["congress"] for r in v3["popular_stable"]}
+    assert v3_signal["ZZAA"]["most_recent_transaction_date"] == "2026-12-26"
+    assert "ZZBB" in v3_signal
+
+
+def test_legacy_consensus_skips_purchases_dated_after_disclosure(tmp_path):
+    from src.services.consensus_watchlist import consensus
+
+    path = tmp_path / "trades_congress.json"
+    path.write_text(json.dumps({"trades": [
+        {"ticker": "ZZAA", "trade_type": "Purchase", "politician_name": "A",
+         "transaction_date": "2026-01-20", "disclosure_date": "2026-02-09"},
+        {"ticker": "ZZAA", "trade_type": "Purchase", "politician_name": "B",
+         "transaction_date": "2026-12-26", "disclosure_date": "2026-02-09"},
+        {"ticker": "ZZBB", "trade_type": "Purchase", "politician_name": "C",
+         "transaction_date": "2026-12-26", "disclosure_date": "2026-02-09"},
+    ]}))
+    signals = consensus.load_congress_signals(path)
+    assert set(signals) == {"ZZAA"}
+    assert signals["ZZAA"]["buy_count"] == 1
+    assert signals["ZZAA"]["most_recent_transaction_date"] == "2026-01-20"
+
+
+def test_bad_dates_and_late_filings_are_counted(hc, clerk_http, monkeypatch):
+    make_session, _ = clerk_http
+    recent = date.today() - timedelta(days=10)
+    disclosed = recent.strftime("%m/%d/%Y")
+    late = (recent - timedelta(days=60)).strftime("%m/%d/%Y")
+    after = (recent + timedelta(days=5)).strftime("%m/%d/%Y")
+    text = ptr_text(
+        f"Synthetic Late Corp Common Stock (ZZLT) [ST]\nP {late} {disclosed} $1,001 - $15,000",
+        f"Synthetic Typo Corp Common Stock (ZZTY) [ST]\nP {after} {disclosed} $1,001 - $15,000",
+    )
+    monkeypatch.setattr(hc, "extract_text", lambda pdf: text if pdf == b"efiled" else "")
+    outcome = collectors.collect_congress(make_session(), sleep=NO_SLEEP,
+                                          house_source="house_clerk", include_fmp_senate=False)
+    assert outcome.succeeded and len(outcome.records) == 2  # both stored as filed
+    assert outcome.diagnostics["house_trades_dated_after_disclosure"] == 1
