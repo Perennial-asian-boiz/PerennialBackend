@@ -116,6 +116,20 @@ def integrated_app(engine, names, monkeypatch, *, options="", members=("api",),
             accounts.get_engine.cache_clear()
 
 
+def raise_limits(app, **limits):
+    """Raise one app's rate limits, for a test that needs more requests than a default
+    bucket allows (the AH packet's "Limits" adaptation). Fields the build doesn't have
+    yet are skipped, so the same test runs before and after the new buckets."""
+    import dataclasses
+
+    from src.api.rate_limit import RateLimiter
+
+    config = app.state.rate_limiter.config
+    names = {f.name for f in dataclasses.fields(config)}
+    app.state.rate_limiter = RateLimiter(
+        dataclasses.replace(config, **{k: v for k, v in limits.items() if k in names}))
+
+
 class Counting:
     """Counts calls to the enumeration oracle and the auth provider."""
 
