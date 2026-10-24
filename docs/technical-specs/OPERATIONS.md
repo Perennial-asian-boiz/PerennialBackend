@@ -130,6 +130,11 @@ an isolated server. The provisioning tool deliberately creates no passwords.
 - Configure supervisor, monitoring, alert delivery, on-call ownership and the
   recovery objectives below; exercise them before launch.
 
+### API clocks and the email budget (#22 auth hardening)
+
+- **Clocks:** the API host, the database and Supabase must be NTP-synced. Challenge and session times are written and compared on the database clock, and the one comparison with Supabase's clock (a recovery link's timestamp) allows 60 seconds of skew.
+- **Email budget:** `API_EMAIL_BUDGET_PER_HOUR` (default 25) stays below Supabase's project-wide "emails sent" limit (30 an hour today). The margin covers emails Supabase sends outside a challenge, such as a password-changed notice. When the project's limit is raised, raise the four `API_EMAIL_BUDGET_*` settings together.
+
 ## Worker and observability
 
 Run the production worker from `development/backend`:

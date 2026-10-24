@@ -289,12 +289,21 @@ class RateLimiterMissing(StarletteHTTPException):
         super().__init__(503, f"{self.code}: the rate limiter is not installed")
 
 
-def _limit(request: Request, kind: Kind) -> None:
+def limiter_of(request: Request) -> RateLimiter:
+    """The app's limiter; a limited route without ``install`` fails closed."""
     limiter = getattr(request.app.state, "rate_limiter", None)
     if not isinstance(limiter, RateLimiter):
         raise RateLimiterMissing()
+    return limiter
+
+
+def client_key_of(request: Request) -> str:
     client = request.client
-    retry_after = limiter.check(kind, client_key(client.host if client else None))
+    return client_key(client.host if client else None)
+
+
+def _limit(request: Request, kind: Kind) -> None:
+    retry_after = limiter_of(request).check(kind, client_key_of(request))
     if retry_after is not None:
         raise RateLimited(retry_after)
 
@@ -307,6 +316,22 @@ async def rate_limit(request: Request) -> None:
 async def auth_rate_limit(request: Request) -> None:
     """The auth bucket, for #22's signup and forgot-password (email lookups)."""
     _limit(request, "auth")
+
+
+async def credential_rate_limit(request: Request) -> None:
+    """Password and code routes: login, verify-otp, both resends, confirm-email,
+    accept-recovery-link, reset-password and the password change."""
+    _limit(request, "credential")
+
+
+async def session_rate_limit(request: Request) -> None:
+    """Routine signed-in use: logout and every other /v1/me route."""
+    _limit(request, "session")
+
+
+async def refresh_rate_limit(request: Request) -> None:
+    """Refresh: each one is a call to Supabase's shared /token endpoint."""
+    _limit(request, "refresh")
 
 
 def install(app: FastAPI, config: RateLimitConfig) -> None:
@@ -606,6 +631,9 @@ __all__ = [
     "RateLimitConfig",
     "RateLimitConfigError",
     "auth_rate_limit",
+    "credential_rate_limit",
+    "refresh_rate_limit",
+    "session_rate_limit",
     "check_startup",
     "create_app",
     "install",

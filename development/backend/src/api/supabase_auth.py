@@ -1,8 +1,11 @@
 """Small Supabase Auth REST client. No admin/service-role key is required.
 
 JWT signature validation is delegated to the project's authenticated /user
-endpoint on every request. Claims are inspected only after that succeeds.
-This supports Supabase signing-key rotation without custom cryptography.
+endpoint on every request. A token's structure (issuer, audience, role and
+UUID subject and session) is checked before that call, so garbage costs no
+Supabase call; its times and the user's state are checked after it, against
+/user's answer. This supports Supabase signing-key rotation without custom
+cryptography.
 """
 
 import base64
@@ -15,6 +18,9 @@ from urllib.parse import urlencode, urlsplit
 from uuid import UUID
 
 import requests
+
+# The one tolerance for comparing Supabase's clock with ours (J7).
+CLOCK_SKEW_SECONDS = 60
 
 
 class AuthProviderError(Exception):
@@ -53,6 +59,8 @@ class AuthProviderError(Exception):
             self.message = "Please confirm your email using the link in your inbox before signing in."
         elif code == "email_address_not_authorized":
             self.message = "Email verification isn't fully set up yet. Please try again later or contact support."
+        elif code == "reauthentication_needed":
+            self.message = "Sign in again to change your password."
         elif code == "over_email_send_rate_limit":
             self.message = "We can't send another email to this address yet. Please try again later."
         elif code in {"signup_disabled", "email_provider_disabled"}:
@@ -141,6 +149,12 @@ class SupabaseAuth:
                         raise AuthProviderError(422, code)
                     if code == "same_password":
                         raise AuthProviderError(422, code)
+                    # J5: secure password change asks for a fresh sign-in.
+                    if code in {
+                        "reauthentication_needed",
+                        "reauthentication_not_valid",
+                    }:
+                        raise AuthProviderError(403, "reauthentication_needed")
                     if code in {
                         "email_address_not_authorized",
                         "signup_disabled",
@@ -200,7 +214,7 @@ class SupabaseAuth:
         try:
             UUID(body["id"])
             if (
-                body["email"].casefold() != email.casefold()
+                body["email"].strip().lower() != email.strip().lower()
                 or not isinstance(body["identities"], list)
                 or not body["identities"]
             ):
@@ -255,12 +269,16 @@ class SupabaseAuth:
     def change_password(self, token, new_password):
         return self.request("PUT", "user", {"password": new_password}, token=token)
 
-    def identity(self, token):
-        if not isinstance(token, str) or not 1 <= len(token) <= 16384:
-            raise AuthProviderError(401)
-        user = self.request("GET", "user", token=token)
+    def claims(self, token):
+        """A token's structural claims, checked before any provider call (AH-2f).
+
+        Three non-empty parts with a base64url JSON payload, this project's
+        issuer, the authenticated audience and role, and UUID sub and
+        session_id. The signature is still verified at /user.
+        """
         try:
-            # /user above has already validated the signature at the issuer.
+            if not isinstance(token, str) or not 1 <= len(token) <= 16384:
+                raise ValueError()
             parts = token.split(".")
             if len(parts) != 3 or not all(parts):
                 raise ValueError()
@@ -269,9 +287,9 @@ class SupabaseAuth:
                     parts[1] + "=" * (-len(parts[1]) % 4), altchars=b"-_", validate=True
                 )
             )
+            if not isinstance(claims, dict):
+                raise ValueError()
             audience = claims.get("aud")
-            expires = claims["exp"]
-            not_before = claims.get("nbf", 0)
             if (
                 claims["iss"] != f"{self.url}/auth/v1"
                 or not (
@@ -279,7 +297,25 @@ class SupabaseAuth:
                     or isinstance(audience, list)
                     and "authenticated" in audience
                 )
-                or isinstance(expires, bool)
+                or claims.get("role") != "authenticated"
+            ):
+                raise ValueError()
+            UUID(claims["sub"])
+            UUID(claims["session_id"])
+            return claims
+        except (KeyError, ValueError, TypeError, AttributeError):
+            raise AuthProviderError(401) from None
+
+    def identity(self, token):
+        claims = self.claims(token)
+        user = self.request("GET", "user", token=token)
+        try:
+            # /user above has validated the signature at the issuer. Times are
+            # checked after it, so clock skew never refuses before the call.
+            expires = claims["exp"]
+            not_before = claims.get("nbf", 0)
+            if (
+                isinstance(expires, bool)
                 or not isinstance(expires, (int, float))
                 or not math.isfinite(expires)
                 or expires <= time.time()
@@ -287,7 +323,6 @@ class SupabaseAuth:
                 or not isinstance(not_before, (int, float))
                 or not math.isfinite(not_before)
                 or not_before > time.time()
-                or claims.get("role") != "authenticated"
                 or not user.get("email_confirmed_at")
                 or not isinstance(user.get("email"), str)
                 or not user["email"]
@@ -325,7 +360,7 @@ class SupabaseAuth:
                 if isinstance(stamp, (int, float))
                 and not isinstance(stamp, bool)
                 and math.isfinite(stamp)
-                and 0 < stamp <= time.time() + 60
+                and 0 < stamp <= time.time() + CLOCK_SKEW_SECONDS
             ]
             if not valid:
                 raise ValueError()

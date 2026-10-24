@@ -84,6 +84,16 @@ Every route above is limited per client, before any other work: a limited reques
 | `API_RATE_LIMIT_PER_MINUTE` | `60` | read bucket refill rate |
 | `API_AUTH_RATE_LIMIT_BURST` | `5` | auth bucket capacity: #22's signup and forgot-password together |
 | `API_AUTH_RATE_LIMIT_PER_HOUR` | `30` | auth bucket refill rate |
+| `API_CREDENTIAL_RATE_LIMIT_BURST` | `10` | credential bucket capacity (#22's password and code routes, below) |
+| `API_CREDENTIAL_RATE_LIMIT_PER_HOUR` | `60` | credential bucket refill rate |
+| `API_SESSION_RATE_LIMIT_BURST` | `30` | session bucket capacity (logout and the other `/v1/me` routes) |
+| `API_SESSION_RATE_LIMIT_PER_MINUTE` | `60` | session bucket refill rate |
+| `API_REFRESH_RATE_LIMIT_BURST` | `10` | refresh bucket capacity (`POST /v1/auth/refresh`) |
+| `API_REFRESH_RATE_LIMIT_PER_HOUR` | `60` | refresh bucket refill rate |
+| `API_EMAIL_BUDGET_PER_HOUR` | `25` | every email the API asks Supabase to send in a rolling hour, app-wide |
+| `API_EMAIL_BUDGET_RECOVERY_PER_HOUR` | `6` | app-wide ceiling for forgot-password emails |
+| `API_EMAIL_BUDGET_SIGNUP_PER_HOUR` | `6` | app-wide ceiling for signup and resend-confirmation emails |
+| `API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR` | `3` | each client's share of emails, across every flow |
 | `API_RATE_LIMIT_MAX_CLIENTS` | `10000` | buckets kept per kind; the least recently used is evicted, and an evicted client starts again full |
 | `API_TRUSTED_PROXIES` | empty | comma-separated IPs or CIDRs of **every** proxy hop in front of the API |
 | `API_TRUST_ALL_PROXIES` | unset | `1` trusts every peer's `X-Forwarded-For` |
@@ -93,6 +103,26 @@ Every route above is limited per client, before any other work: a limited reques
 - **Run commands:** the app adds its own proxy handling (`read.install`), so turn uvicorn's off: `uvicorn --no-proxy-headers ...` (`proxy_headers=False` when calling `uvicorn.run`).
 - **Workers:** state is in memory per app instance in each worker process. With N workers the effective limit is up to N times higher, and a restart resets it. The edge or host limit, required before any public deployment, is the global one.
 - **Logs:** a client's first rejection writes one `rate_limited` line; its further rejections are counted until its `Retry-After` has passed and carried on its next line. At most 60 such lines a minute in all, then one `rate_limited_suppressed` line with the number held back. No line holds an address, path or header value.
+
+### Account routes (#22)
+
+Each `/v1/auth` and `/v1/me` route has exactly one limit, checked before the bearer token, the body's fields, the database or Supabase. A body that isn't JSON at all is a `422` from FastAPI's parser before any of that runs.
+
+| bucket | routes |
+|---|---|
+| `auth` | `POST /v1/auth/signup`, `POST /v1/auth/forgot-password` (both answer whether an email is registered) |
+| `credential` | `POST /v1/auth/login`, `/verify-otp`, `/resend-otp`, `/resend-confirmation`, `/confirm-email`, `/accept-recovery-link`, `/reset-password`; `PUT /v1/me/password` |
+| `session` | `POST /v1/auth/logout` and every other `/v1/me` route |
+| `refresh` | `POST /v1/auth/refresh` |
+
+`GET /api/watchlist` uses the `read` bucket. Signup and forgot-password share the `auth` bucket; a shared address (NAT) shares every bucket.
+
+- **The email budget.** Supabase's own email limit is project-wide, so the API counts every email it asks Supabase to send in the last hour, in the database (so every worker shares it), under one advisory lock. Login and resend-otp may use whatever the total has left; recovery and signup each have a lower ceiling; and each client has a share across all flows, charged only when an email is about to be sent and given back if that first send fails.
+- **When the budget refuses, or Supabase answers `429`:** login, resend-otp, signup and resend-confirmation answer `429` with `{"detail": "We can't send a code right now. Please try again in a few minutes."}` and `Retry-After: 60`. forgot-password always answers its uniform `200`.
+- **forgot-password** gives the same `200` and body for a registered and an unknown email in every case, including a Supabase outage, an open login for that email (no recovery email is sent over it) and the per-email recovery cap of 5 an hour.
+- **`PUT /v1/me/password`:** when Supabase asks for a fresh sign-in (secure password change), `403` with `{"detail": "Sign in again to change your password.", "code": "reauthentication_needed"}`.
+- **Reset sessions** last 15 minutes from the accepted link: after that, reset-password and refresh answer `401` "This reset session has expired. Request a new reset link."
+- **Challenges** live at most 60 minutes, however often a code is resent; past that a resend answers `400` "Verification expired or invalid. Please start again."
 
 ## Database access
 
