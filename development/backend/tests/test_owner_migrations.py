@@ -73,9 +73,24 @@ def provision(target, names, phase):
                                     phase=phase)
 
 
-def migrate(target, revision="head", *, owner=None):
-    """`alembic upgrade` (or downgrade, for a revision below the current one), as the
-    superuser test login or, with `owner`, as the owner's session role."""
+def provisioned(target, names):
+    """The documented order as the superuser: bootstrap, upgrade head, grants, and,
+    where ops has it (#22), provision_api_role.py, which makes the owner own app."""
+    provision(target, names, "bootstrap")
+    migrate(target)
+    provision(target, names, "grants")
+    if (OPS / "provision_api_role.py").exists():
+        import provision_api_role
+
+        with target.begin() as conn:
+            provision_api_role.provision(conn.connection.driver_connection, names["api"],
+                                         owner=names["owner"], importer=names["importer"],
+                                         reader=names["reader"])
+
+
+def migrate(target, revision="head", *, owner=None, down=False):
+    """`alembic upgrade` (or, with `down`, downgrade) to `revision`, as the superuser
+    test login or, with `owner`, as the owner's session role."""
     from alembic import command
 
     from tests.conftest import alembic_config
@@ -85,7 +100,7 @@ def migrate(target, revision="head", *, owner=None):
             conn.execute(text(f'SET ROLE "{owner}"'))
             conn.commit()  # a session role; Alembic opens its own transaction
         try:
-            step = command.downgrade if revision == "base" else command.upgrade
+            step = command.downgrade if down else command.upgrade
             step(alembic_config(conn), revision)
         finally:
             conn.rollback()
@@ -191,9 +206,7 @@ def test_mo4_rerunning_bootstrap_on_a_provisioned_database_changes_nothing(engin
     """Bootstrap now runs before every upgrade, so on a provisioned database it must
     leave the grants, default privileges and owners exactly as they were."""
     with scratch(engine) as (target, names):
-        provision(target, names, "bootstrap")
-        migrate(target)
-        provision(target, names, "grants")
+        provisioned(target, names)
         with target.connect() as conn:
             before = conn.execute(text(ACL_SNAPSHOT)).all()
         provision(target, names, "bootstrap")
@@ -261,10 +274,8 @@ def test_mo8_after_a_downgrade_bootstrap_lets_the_owner_upgrade_again(engine):
     """As the owner: downgrade to base (0001 drops perennial), bootstrap, then
     upgrade head. Main's form of MO-8, whose #22 form downgrades to 0010."""
     with scratch(engine) as (target, names):
-        provision(target, names, "bootstrap")
-        migrate(target)
-        provision(target, names, "grants")
-        migrate(target, "base", owner=names["owner"])
+        provisioned(target, names)
+        migrate(target, "base", owner=names["owner"], down=True)
         assert "perennial" not in schemas(target)
         provision(target, names, "bootstrap")
         migrate(target, owner=names["owner"])
@@ -275,10 +286,8 @@ def test_mo8_without_bootstrap_the_owners_upgrade_fails_and_changes_nothing(engi
     from sqlalchemy.exc import DBAPIError
 
     with scratch(engine) as (target, names):
-        provision(target, names, "bootstrap")
-        migrate(target)
-        provision(target, names, "grants")
-        migrate(target, "base", owner=names["owner"])
+        provisioned(target, names)
+        migrate(target, "base", owner=names["owner"], down=True)
         with pytest.raises(DBAPIError) as caught:
             migrate(target, owner=names["owner"])
         assert caught.value.orig.sqlstate == "42501"  # permission denied for the database
