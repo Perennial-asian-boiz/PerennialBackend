@@ -74,6 +74,12 @@ migrate as a superuser). A migration that adds a schema must also add it to boot
 without that, the owner's upgrade fails with `permission denied for database` and
 rolls back.
 
+The administrative login may be a superuser or, as on Supabase, a non-superuser
+`CREATEROLE` login that owns the database. Such a login holds only `ADMIN OPTION` on
+the roles it creates, so bootstrap grants it `SET` on the owner (never `INHERIT`): it
+can then create the owner's schema and re-own objects to the owner, and both phases
+make the grants on the owner's objects as the owner. This needs PostgreSQL 16 or later.
+
 Bootstrap also grants owner CREATE in `public` for Alembic's version table. Grant phase transfers the explicitly listed tables
 and their attached identity sequences to the owner, and fails if the migrated
 schema does not match the policy. Custom groups are available through `--owner`,
