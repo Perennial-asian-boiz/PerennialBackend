@@ -199,8 +199,8 @@ def build_report(results, tickers):
         report.append({
             "ticker": ticker,
             "average_sentiment": average,
-            "post_count": len(posts),
-            "posts": posts,
+            "result_count": len(posts),
+            "results": posts,
         })
     return report
 
