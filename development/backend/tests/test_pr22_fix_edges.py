@@ -207,9 +207,37 @@ def _upgrade_as_the_owner_then_provision(scratch, names):
     assert _app_privileges(scratch, names["api"]) == EXPECTED_APP
 
 
-def test_a_provisioned_deployment_at_0010_upgrades_to_head_as_the_owner(engine):
-    """Main's deployment today (provisioned, migrated to 0010, grants applied) takes
-    #22's migrations the documented way: as the owner, never as the superuser."""
+def _deployed_at_0010(engine, scratch, names):
+    """Main's deployment today: bootstrapped and granted by today's code (so no
+    schema app), migrated to 0010."""
+    from alembic import command
+
+    from tests.conftest import alembic_config
+
+    provision_roles(scratch, names, "bootstrap")
+    with scratch.connect() as conn:
+        command.upgrade(alembic_config(conn), "0010")  # however 0001-0010 were applied
+        conn.commit()
+    provision_roles(scratch, names, "grants")
+    with scratch.begin() as conn:  # newer provisioning makes an (empty) app; today's doesn't
+        conn.execute(text("DROP SCHEMA IF EXISTS app"))
+
+
+def test_mo2_a_deployment_at_0010_rebootstraps_then_upgrades_as_the_owner(engine):
+    """MO-2 (decision 37, option 2): re-running bootstrap, then upgrade head as the
+    owner, then the grants, gives MO-1's end state."""
+    names = role_names("rd")
+    try:
+        with _database(engine) as (_, scratch):
+            _deployed_at_0010(engine, scratch, names)
+            provision_roles(scratch, names, "bootstrap")  # before every upgrade
+            _upgrade_as_the_owner_then_provision(scratch, names)
+    finally:
+        drop_roles(engine, names.values())
+
+
+def test_mo2_without_rebootstrap_the_owners_upgrade_fails_and_stays_at_0010(engine):
+    """MO-2: skip the bootstrap and the upgrade fails at 0011, in one transaction."""
     from alembic import command
 
     from tests.conftest import alembic_config
@@ -217,12 +245,17 @@ def test_a_provisioned_deployment_at_0010_upgrades_to_head_as_the_owner(engine):
     names = role_names("rd")
     try:
         with _database(engine) as (_, scratch):
-            provision_roles(scratch, names, "bootstrap")
-            with scratch.connect() as conn:  # however 0001-0010 were first applied
-                command.upgrade(alembic_config(conn), "0010")
-                conn.commit()
-            provision_roles(scratch, names, "grants")
-            _upgrade_as_the_owner_then_provision(scratch, names)
+            _deployed_at_0010(engine, scratch, names)
+            with scratch.connect() as conn:
+                _session_role(conn, names["owner"])
+                try:
+                    with pytest.raises(DBAPIError) as caught:
+                        command.upgrade(alembic_config(conn), "head")
+                finally:
+                    _reset_role(conn)
+                assert caught.value.orig.sqlstate == "42501"  # permission denied
+                assert _version(conn) == "0010"
+                assert conn.execute(text("SELECT to_regnamespace('app')")).scalar() is None
     finally:
         drop_roles(engine, names.values())
 
