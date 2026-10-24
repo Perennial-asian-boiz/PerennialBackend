@@ -355,14 +355,20 @@ _MEMBERSHIP = text(
     "SELECT coalesce(array_agg(r.rolname ORDER BY r.rolname), '{}') FROM pg_roles r"
     " WHERE r.rolname <> session_user AND pg_has_role(session_user, r.oid, 'MEMBER')"
 )
-# has_table_privilege sees only table-level grants; a column-level INSERT or
-# UPDATE is a write too (has_any_column_privilege also covers table level).
+# (tables, writable objects) in perennial. Tables are relkind r/p only. A write
+# is any of: a table-level or column-level write (has_table_privilege sees only
+# table-level grants) or TRIGGER on a table, view, materialized view or foreign
+# table; or USAGE or UPDATE on a sequence (nextval, setval). SELECT on a
+# sequence is a read.
 _WRITES = text(
-    "SELECT count(*), count(*) FILTER (WHERE has_table_privilege("
-    "current_user, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE')"
-    " OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE'))"
+    "SELECT count(*) FILTER (WHERE c.relkind IN ('r', 'p')),"
+    " count(*) FILTER (WHERE CASE WHEN c.relkind = 'S'"
+    "  THEN has_sequence_privilege(current_user, c.oid, 'USAGE,UPDATE')"
+    "  ELSE has_table_privilege("
+    "   current_user, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')"
+    "   OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE') END)"
     " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
-    " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p')"
+    " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
 )
 _OWNERSHIP = text(
     "SELECT (SELECT count(*) FROM pg_class WHERE relowner = r.oid)"
@@ -378,7 +384,8 @@ def check_startup(engine: Engine, api_role: str) -> None:
 
     Clauses (design note RA-15): 1 attributes of the session role itself;
     2 transitive membership is exactly {api_role}; 3 no write privilege on any
-    perennial table or column, and at least one table exists; 4 owns nothing and has no
+    perennial table, column, view, materialized view, foreign table or
+    sequence, and at least one table exists; 4 owns nothing and has no
     CREATE on the schema or database. Every failure, including an error while
     checking, raises the same StartupRefused with no role name, URL or SQL.
     """
