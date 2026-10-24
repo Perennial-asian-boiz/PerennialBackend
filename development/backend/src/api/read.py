@@ -355,10 +355,13 @@ _MEMBERSHIP = text(
     "SELECT coalesce(array_agg(r.rolname ORDER BY r.rolname), '{}') FROM pg_roles r"
     " WHERE r.rolname <> session_user AND pg_has_role(session_user, r.oid, 'MEMBER')"
 )
+# has_table_privilege sees only table-level grants; a column-level INSERT or
+# UPDATE is a write too (has_any_column_privilege also covers table level).
 _WRITES = text(
     "SELECT count(*), count(*) FILTER (WHERE has_table_privilege("
-    "current_user, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE')) FROM pg_class c"
-    " JOIN pg_namespace n ON n.oid = c.relnamespace"
+    "current_user, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE')"
+    " OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE'))"
+    " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
     " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p')"
 )
 _OWNERSHIP = text(
@@ -375,7 +378,7 @@ def check_startup(engine: Engine, api_role: str) -> None:
 
     Clauses (design note RA-15): 1 attributes of the session role itself;
     2 transitive membership is exactly {api_role}; 3 no write privilege on any
-    perennial table, and at least one table exists; 4 owns nothing and has no
+    perennial table or column, and at least one table exists; 4 owns nothing and has no
     CREATE on the schema or database. Every failure, including an error while
     checking, raises the same StartupRefused with no role name, URL or SQL.
     """
