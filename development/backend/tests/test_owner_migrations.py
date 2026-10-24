@@ -161,6 +161,48 @@ def test_mo1_a_fresh_database_migrates_as_the_owner_in_the_documented_order(engi
         assert owners(target) == {names["owner"]}
 
 
+@contextmanager
+def supabase_style_admin(engine, target, names):
+    """An administrative login shaped like Supabase's postgres: LOGIN, NOSUPERUSER,
+    CREATEROLE and BYPASSRLS, owning the database. Added to `names`, so scratch()
+    drops it last, after the database and the group roles."""
+    from tests.conftest import pinned_engine
+
+    names["admin"] = f"rd_admin_{secrets.token_hex(5)}"
+    password = f"synthetic-{secrets.token_hex(8)}"  # hex only, safe to inline in DDL
+    with engine.begin() as conn:  # the superuser test login
+        conn.execute(text(f'CREATE ROLE "{names["admin"]}" LOGIN NOSUPERUSER CREATEROLE'
+                          f" BYPASSRLS PASSWORD '{password}'"))
+        conn.execute(text(f'ALTER DATABASE "{target.url.database}" OWNER TO "{names["admin"]}"'))
+    admin = pinned_engine(target.url.set(username=names["admin"], password=password))
+    try:
+        yield admin
+    finally:
+        admin.dispose()
+
+
+def test_mo1_a_non_superuser_createrole_admin_runs_the_documented_order(engine):
+    """Check S3 (Supabase): on PostgreSQL 16+ a CREATEROLE admin gets only ADMIN
+    OPTION on the roles it creates, not SET, so CREATE SCHEMA ... AUTHORIZATION and
+    ALTER ... OWNER TO the owner need more. The same order, run by such an admin,
+    reaches MO-1's end state, and the admin can SET ROLE to the owner without
+    inheriting its privileges."""
+    with scratch(engine) as (target, names), supabase_style_admin(engine, target, names) as admin:
+        provision(admin, names, "bootstrap")
+        migrate(target, owner=names["owner"])  # the migration login's session role
+        provision(admin, names, "grants")
+        assert version(target) == head()
+        assert owners(target) == {names["owner"]}
+        with target.connect() as conn:
+            can_set, inherits = conn.execute(text(
+                "SELECT pg_has_role(:a, :o, 'SET'), pg_has_role(:a, :o, 'USAGE')"),
+                {"a": names["admin"], "o": names["owner"]}).one()
+            assert (can_set, inherits) == (True, False)
+            assert not conn.execute(text(
+                "SELECT has_table_privilege(:a, 'perennial.securities', 'INSERT')"),
+                {"a": names["admin"]}).scalar()
+
+
 # ── MO-3: the owner's rights don't change ────────────────
 
 
