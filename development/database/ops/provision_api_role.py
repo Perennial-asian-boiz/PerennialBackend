@@ -35,6 +35,10 @@ USER_TABLES = {
 SUPABASE_API_ROLES = ("anon", "authenticated", "service_role")
 LOOKUP = "app.email_is_registered(text)"
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,62}")
+LOOKUP_REFUSED = (
+    "app.email_is_registered must be a STABLE SECURITY DEFINER function with an"
+    " empty search_path, owned by the administrator and callable only by the API"
+)
 
 
 def _refuse_supabase_exposure(conn, supabase_roles):
@@ -58,7 +62,10 @@ def _refuse_supabase_exposure(conn, supabase_roles):
         "   has_table_privilege(r.name, c.oid,"
         "    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')"
         "   OR has_any_column_privilege(r.name, c.oid,"
-        "    'SELECT,INSERT,UPDATE,REFERENCES'))))",
+        "    'SELECT,INSERT,UPDATE,REFERENCES')))"
+        # PostgREST exposes any callable function as RPC.
+        " OR EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+        "  WHERE n.nspname = 'app' AND has_function_privilege(r.name, p.oid, 'EXECUTE')))",
         (present,),
     ).fetchone()[0]
     if exposed:
@@ -67,20 +74,45 @@ def _refuse_supabase_exposure(conn, supabase_roles):
         )
 
 
+def _lookup_shape(conn):
+    """(owner is current_user, SECURITY DEFINER, search_path pinned empty, STABLE)."""
+    return conn.execute(
+        "SELECT proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user),"
+        " prosecdef,"
+        " coalesce(proconfig && ARRAY['search_path=\"\"', 'search_path='], false),"
+        " provolatile = 's'"
+        f" FROM pg_proc WHERE oid = '{LOOKUP}'::regprocedure"
+    ).fetchone()
+
+
 def provision(
     conn,
     role="perennial_api",
     *,
     owner="perennial_owner",
+    importer="perennial_importer",
+    reader="perennial_reader",
     supabase_roles=SUPABASE_API_ROLES,
 ):
-    """Apply inside the caller's transaction; every refusal comes before any change."""
+    """Apply inside the caller's transaction; every refusal comes before any change.
+
+    The administrator running this becomes the definer of
+    app.email_is_registered (security decision, option (a)): re-running as the
+    same administrator changes nothing, and running as another administrator
+    moves the function to that login, which is accepted.
+    """
+    groups = (role, owner, importer, reader)
     if (
-        not all(_NAME.fullmatch(name) for name in (role, owner))
-        or role == owner
-        or any(name.startswith("pg_") for name in (role, owner))
+        not all(_NAME.fullmatch(name) for name in groups)
+        or len(set(groups)) != len(groups)
+        or any(name.startswith("pg_") for name in groups)
     ):
-        raise ValueError("Choose dedicated, lowercase API and owner group names")
+        raise ValueError("Choose dedicated, lowercase group role names")
+    # The definer must never be a group role: none of them may read auth.
+    if conn.execute("SELECT current_user").fetchone()[0] in groups:
+        raise ValueError(
+            "Run provisioning as an administrative login, not a group role"
+        )
     for name in (role, owner):
         if not conn.execute(
             "SELECT 1 FROM pg_roles WHERE rolname=%s", (name,)
@@ -109,6 +141,15 @@ def provision(
     ).fetchone():
         raise ValueError("API group must not inherit other roles")
     _refuse_supabase_exposure(conn, supabase_roles)
+    if conn.execute(
+        "SELECT coalesce((SELECT has_schema_privilege(%s, oid, 'USAGE,CREATE')"
+        " FROM pg_namespace WHERE nspname = 'auth'), false)",
+        (owner,),
+    ).fetchone()[0]:
+        raise ValueError("The owner group must hold nothing on schema auth")
+    _, definer, pinned, stable = _lookup_shape(conn)
+    if not (definer and pinned and stable):
+        raise ValueError(LOOKUP_REFUSED)
 
     api, own = sql.Identifier(role), sql.Identifier(owner)
     # Owned by the NOBYPASSRLS owner, so FORCE RLS binds even where the
@@ -155,12 +196,36 @@ def provision(
             ).format(ident, api, rule, rule)
         )
 
-    # The lookup is SECURITY DEFINER and reads auth.users, so it stays owned by
-    # the administrative role; only the API role may call it.
-    conn.execute(
-        sql.SQL(f"REVOKE ALL ON FUNCTION {LOOKUP} FROM PUBLIC, {{}}").format(own)
-    )
+    # The lookup is SECURITY DEFINER and reads auth.users: whoever migrated it,
+    # its definer is this administrator, and only the API role may call it.
+    conn.execute(f"ALTER FUNCTION {LOOKUP} OWNER TO CURRENT_USER")
+    grantees = conn.execute(
+        "SELECT DISTINCT a.grantee FROM pg_proc p, aclexplode(p.proacl) a"
+        f" WHERE p.oid = '{LOOKUP}'::regprocedure AND a.grantee <> 0"
+        " AND a.grantee <> p.proowner"
+    ).fetchall()
+    conn.execute(f"REVOKE ALL ON FUNCTION {LOOKUP} FROM PUBLIC")
+    for (grantee,) in grantees:
+        conn.execute(
+            sql.SQL(f"REVOKE ALL ON FUNCTION {LOOKUP} FROM {{}}").format(
+                sql.Identifier(
+                    conn.execute(
+                        "SELECT rolname FROM pg_roles WHERE oid = %s", (grantee,)
+                    ).fetchone()[0]
+                )
+            )
+        )
     conn.execute(sql.SQL(f"GRANT EXECUTE ON FUNCTION {LOOKUP} TO {{}}").format(api))
+    owned, definer, pinned, stable = _lookup_shape(conn)
+    others = conn.execute(
+        "SELECT count(*) FROM pg_proc p, aclexplode(p.proacl) a"
+        f" WHERE p.oid = '{LOOKUP}'::regprocedure AND a.privilege_type = 'EXECUTE'"
+        " AND a.grantee NOT IN (p.proowner, (SELECT oid FROM pg_roles"
+        " WHERE rolname = %s))",
+        (role,),
+    ).fetchone()[0]
+    if not (owned and definer and pinned and stable) or others:
+        raise ValueError(LOOKUP_REFUSED)
 
 
 def main():
@@ -171,9 +236,11 @@ def main():
         )
     role = os.environ.get("API_GROUP_ROLE", "perennial_api")
     owner = os.environ.get("OWNER_GROUP_ROLE", "perennial_owner")
+    importer = os.environ.get("IMPORTER_GROUP_ROLE", "perennial_importer")
+    reader = os.environ.get("READER_GROUP_ROLE", "perennial_reader")
     try:
         with psycopg.connect(raw) as connection:
-            provision(connection, role, owner=owner)
+            provision(connection, role, owner=owner, importer=importer, reader=reader)
     except Exception as error:
         # Database exceptions can echo connection details; expose only the class.
         raise SystemExit(f"API grants failed ({type(error).__name__})") from None
