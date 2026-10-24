@@ -45,6 +45,24 @@
               }
             },
             "description": "invalid_request"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Get Security"
@@ -77,6 +95,24 @@
               }
             },
             "description": "No current publication"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
           }
         },
         "summary": "Get Watchlist"
@@ -87,7 +123,7 @@
     "ErrorBody": {
       "properties": {
         "code": {
-          "description": "no_current_publication, unknown_security or invalid_request",
+          "description": "no_current_publication, unknown_security, invalid_request or rate_limited",
           "title": "Code",
           "type": "string"
         },
