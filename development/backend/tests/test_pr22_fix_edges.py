@@ -13,15 +13,17 @@ superuser test login; every role has a unique suffix and is dropped in finally.
 """
 
 import base64
+import inspect
 import json
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
 
 from pr22_support import (
@@ -51,7 +53,8 @@ from test_pr22_fix import (
     accounts_api,  # noqa: F401  (pytest fixture)
     extra_objects,  # noqa: F401  (pytest fixture)
 )
-from test_pr22_restore import _database, _pg_args, _pg_env, _restore
+from test_backup import keypair, loaded  # noqa: F401  (pytest fixtures)
+from test_pr22_restore import _backup_as_admin, _database, _pg_args, _pg_env, _restore
 
 pytestmark = pytest.mark.db
 
@@ -567,3 +570,132 @@ def test_the_dev_lock_pins_every_runtime_package_at_the_runtime_version():
     runtime, dev = _locked("requirements.lock"), _locked("requirements-dev.lock")
     assert "starlette" in runtime and "fastapi" in runtime
     assert {name: (pin, dev.get(name)) for name, pin in runtime.items() if dev.get(name) != pin} == {}
+
+
+# ── Round 2: fixes from the three #22 reviews ────────────
+# PR22-1 (checker): /api/watchlist is public; in publication mode (production's
+# default) it reads publications on the API pool, so it gets R1's protections.
+
+
+@contextmanager
+def _counting_statements(engine):
+    statements = []
+    listener = lambda *a: statements.append(a[2])  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        yield statements
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+
+
+def test_the_dashboard_route_is_charged_to_the_read_bucket(engine, pr22_roles, monkeypatch):  # noqa: F811
+    """PR22-1: read.rate_limit's bucket, shared with /v1; a 429 does no database work."""
+    from fastapi.testclient import TestClient
+
+    env = {"API_RATE_LIMIT_BURST": "2", "API_RATE_LIMIT_PER_MINUTE": "1",
+           "DASHBOARD_DATA_MODE": "publication"}
+    with integrated_app(engine, pr22_roles, monkeypatch, env=env) as (app, _, _), \
+            TestClient(app) as client:
+        assert client.get("/v1/watchlist").status_code == 404  # no publication: one token
+        assert client.get("/api/watchlist").status_code == 200  # the second token
+        with _counting_statements(app.state.engine) as statements:
+            limited = client.get("/api/watchlist")
+        assert limited.status_code == 429, limited.text
+        assert limited.json()["code"] == "rate_limited"
+        assert re.fullmatch(r"[1-9][0-9]*", limited.headers["retry-after"])
+        assert statements == []  # limited before any database work
+        assert client.get("/v1/watchlist").status_code == 429  # the same bucket, still empty
+
+
+def test_the_dashboard_route_reads_inside_one_read_only_transaction(
+    engine, pr22_roles, monkeypatch  # noqa: F811
+):
+    """PR22-1, as RB-5c and RA-16b: through read_transaction exactly once, where a write
+    fails with 25006. The probe writes to a table the API role may write (inside a
+    savepoint, so the route carries on): outside a read-only transaction it would land."""
+    from fastapi.testclient import TestClient
+
+    from src.api import app as app_module
+    from src.api import read
+
+    real, outcomes = read.read_transaction, []
+
+    @contextmanager
+    def probing(*args, **kwargs):
+        with real(*args, **kwargs) as conn:
+            try:
+                with conn.begin_nested():
+                    conn.execute(text(
+                        "INSERT INTO app.auth_challenges (token_hash, email, flow, expires_at)"
+                        " VALUES (:h, 'probe@example.com', 'login', now() + interval '1 hour')"),
+                        {"h": "b" * 64})
+            except DBAPIError as error:
+                outcomes.append(error.orig.sqlstate)
+            else:
+                outcomes.append("wrote")
+            yield conn
+
+    env = {"DASHBOARD_DATA_MODE": "publication"}
+    with integrated_app(engine, pr22_roles, monkeypatch, env=env) as (app, _, _), \
+            TestClient(app) as client:
+        for module in (read, app_module):  # however app.py names the helper
+            if hasattr(module, "read_transaction"):
+                monkeypatch.setattr(module, "read_transaction", probing)
+        assert client.get("/api/watchlist").status_code == 200
+    assert outcomes == ["25006"]
+    with engine.connect() as conn:  # superuser: nothing was written
+        assert conn.execute(text("SELECT count(*) FROM app.auth_challenges")).scalar() == 0
+
+
+@pytest.mark.parametrize("bucket", ["read", "auth"])
+def test_browsers_can_read_retry_after_on_a_429(engine, pr22_roles, monkeypatch, bucket):  # noqa: F811
+    """Auditor note 5: Retry-After is in CORS expose_headers, so a cross-origin
+    client can read the 429's hint."""
+    origin = "https://app.example.test"
+    env = {"CORS_ORIGINS": origin, "API_RATE_LIMIT_BURST": "1", "API_RATE_LIMIT_PER_MINUTE": "1",
+           "API_AUTH_RATE_LIMIT_BURST": "1", "API_AUTH_RATE_LIMIT_PER_HOUR": "1"}
+    with integrated_app(engine, pr22_roles, monkeypatch, env=env) as (app, _, _), \
+            account_client(app, monkeypatch) as (client, _, _):
+        if bucket == "read":
+            send = lambda: client.get("/v1/watchlist", headers={"Origin": origin})  # noqa: E731
+        else:
+            send = lambda: client.post("/v1/auth/forgot-password", headers={"Origin": origin},  # noqa: E731
+                                       json={"email": "one@example.com"})
+        send()
+        limited = send()
+        assert limited.status_code == 429
+        assert limited.headers.get("access-control-allow-origin") == origin
+        exposed = limited.headers.get("access-control-expose-headers", "")
+        assert "retry-after" in [h.strip().lower() for h in exposed.split(",")], exposed
+
+
+def test_the_drill_passes_every_group_name_to_provision_api_role(
+    engine, pr22_roles, loaded, keypair, tmp_path, monkeypatch  # noqa: F811
+):
+    """Auditor note 4, checker nit: with --roles, provision_api_role's group-role and
+    duplicate-name checks see the drill's importer and reader, not the defaults."""
+    from restore_drill import run_backup_drill
+
+    store = _backup_as_admin(engine, loaded, keypair, tmp_path)
+    names = role_names("rd")
+    ops = ops_module("provision_api_role")
+    real, seen = ops.provision, []
+
+    def recording(*args, **kwargs):
+        bound = inspect.signature(real).bind(*args, **kwargs)
+        bound.apply_defaults()
+        seen.append({k: v for k, v in bound.arguments.items() if k != "conn"})
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ops, "provision", recording)
+    try:
+        drill = run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "drill",
+                                 roles=(names["owner"], names["importer"], names["reader"],
+                                        names["api"]))
+        assert drill["verified"] is True
+        assert len(seen) == 1
+        assert {k: seen[0][k] for k in ("role", "owner", "importer", "reader")} == {
+            "role": names["api"], "owner": names["owner"],
+            "importer": names["importer"], "reader": names["reader"]}
+    finally:
+        drop_roles(engine, names.values())
