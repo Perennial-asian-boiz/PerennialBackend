@@ -253,7 +253,16 @@ the administrative login, against the new target database:
    then fails with `schema "perennial" already exists`.
 2. **Restore:** `pg_restore --exit-on-error --single-transaction --no-owner
    --no-acl` of the archive. Every restored object is now owned by the restorer.
-3. **Provision again:** `provision_roles.py --phase grants`, then
+3. **Migrate:** `alembic upgrade head`, also as the administrative login
+   (`DATABASE_URL` set to it for this one command). A backup can be older than
+   the code: its `schema_revision` is in the manifest. At the current revision
+   this does nothing, so always run it. It runs as the administrative login, not
+   the migration login as in a deployment, because the restorer owns every
+   restored object until step 4. Skipping it fails closed: a backup at `0009`
+   makes `--phase grants` refuse ("table policy differs"), and one at `0010`
+   (any backup from before the account tables) passes grants, then
+   `provision_api_role.py` fails on the missing `app.email_is_registered`.
+4. **Provision again:** `provision_roles.py --phase grants`, then
    `provision_api_role.py`. They re-own schemas `perennial` and `app` with their
    tables and sequences to the owner role, re-grant both schemas, and re-create
    the `app` policies for the API role. `app.email_is_registered` stays owned by
@@ -263,6 +272,8 @@ the administrative login, against the new target database:
 ```bash
 .venv/bin/python development/database/ops/provision_roles.py --phase roles
 # pg_restore into the new target as the administrative login (step 2)
+# DATABASE_URL: the administrative login on the target, for this command only (step 3)
+.venv/bin/alembic -c development/database/alembic.ini upgrade head
 .venv/bin/python development/database/ops/provision_roles.py --phase grants
 .venv/bin/python development/database/ops/provision_api_role.py
 ```
@@ -284,7 +295,8 @@ PostgREST.
    target; if none exists, the drill is blocked, not permission to create one.
 2. Retrieve/decrypt the archive and restore schema/data to the isolated target
    as the administrative login, in the restore order above: `--phase roles`,
-   `pg_restore`, then `--phase grants` and `provision_api_role.py`. Recreate
+   `pg_restore`, `alembic upgrade head`, then `--phase grants` and
+   `provision_api_role.py`. Recreate
    reviewed login memberships separately with fresh credentials. Do not use a
    production endpoint or destructive `--clean` option.
 3. Verify migration revision, constraints, table counts (the `app` tables too, as
@@ -380,8 +392,10 @@ table in `perennial` and `app` (reported as `app.<table>`) and checks that
 constraints are validated. It reads them with `row_security` off, so a login
 that RLS would filter fails instead of verifying fewer rows. Run it as the
 administrative login. With `--roles OWNER IMPORTER READER API` it follows the
-restore order above around its restore; without it, those roles must already
-exist on the server, as they do when the drill server also hosts the source. Only the newly
+restore order above around its restore, except that it does not migrate (step
+3): it drills a backup at the code's revision, and an older one fails closed at
+step 4. Without `--roles`, those roles must already exist on the server, as they
+do when the drill server also hosts the source. Only the newly
 created target is dropped, including after a restore failure; the source and
 existing databases are preserved. The dump and `report.json` remain in the private
 output directory for review. A passing report contains `verified: true` and
