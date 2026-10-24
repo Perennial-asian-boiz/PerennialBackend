@@ -48,6 +48,8 @@ tickers.json
 mastodon_posts.json
 mastodon_servers.json
 mastodon_ticker_posts.json
+mastodon_item_scores.jsonl
+mastodon_ticker_sentiment.json
 
 /output
 
