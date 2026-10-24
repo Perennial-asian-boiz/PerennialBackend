@@ -463,7 +463,10 @@ _WRITES = text(
     " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
 )
 # #22's schema app (fix packet, change 5): reads and writes only on its six
-# tables, at table or column level; never TRUNCATE or REFERENCES; no CREATE on
+# tables, at table or column level; never TRUNCATE, REFERENCES or TRIGGER; no
+# write through any other app object (table, view, materialized view, foreign
+# table) and no USAGE or UPDATE on an app sequence (none exists; if one of the
+# six gains an identity column, allow its sequence like the six); no CREATE on
 # app; and no USAGE on Supabase's auth schema (the login reaches auth.users
 # only through app.email_is_registered).
 APP_TABLES = (
@@ -477,12 +480,14 @@ APP_TABLES = (
 _APP = text(
     "SELECT (SELECT count(*) FROM pg_class c"
     "  JOIN pg_namespace n ON n.oid = c.relnamespace"
-    "  WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p') AND ("
-    "   has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER')"
-    "   OR has_any_column_privilege(current_user, c.oid, 'REFERENCES')"
-    "   OR (c.relname <> ALL(CAST(:tables AS text[])) AND ("
-    "    has_table_privilege(current_user, c.oid, 'INSERT,UPDATE,DELETE')"
-    "    OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE'))))),"
+    "  WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
+    "  AND CASE WHEN c.relkind = 'S'"
+    "   THEN has_sequence_privilege(current_user, c.oid, 'USAGE,UPDATE')"
+    "   ELSE has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER')"
+    "    OR has_any_column_privilege(current_user, c.oid, 'REFERENCES')"
+    "    OR (c.relname <> ALL(CAST(:tables AS text[])) AND ("
+    "     has_table_privilege(current_user, c.oid, 'INSERT,UPDATE,DELETE')"
+    "     OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE'))) END),"
     " coalesce((SELECT has_schema_privilege(current_user, oid, 'CREATE')"
     "  FROM pg_namespace WHERE nspname = 'app'), false),"
     " coalesce((SELECT has_schema_privilege(current_user, oid, 'USAGE')"
