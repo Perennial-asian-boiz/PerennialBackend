@@ -25,6 +25,19 @@ USER_TABLES = APP_TABLES[:4]
 PRE_LOGIN_TABLES = APP_TABLES[4:]
 
 
+# Adapted (AH-9, email budget): every integrated app gets an email budget far above
+# what any test sends, unless the test sets its own, because AH-9's defaults (a
+# per-client share of 3 an hour) would trip tests that send several emails from
+# TestClient's one address. The AH-9 tests set their budgets, or None for defaults.
+ROOMY_EMAIL_BUDGET = {
+    "API_EMAIL_BUDGET_PER_HOUR": "10000",
+    "API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "1000",
+    "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "1000",
+    "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "100",
+}
+DEFAULT_EMAIL_BUDGET = dict.fromkeys(ROOMY_EMAIL_BUDGET)  # all unset
+
+
 def ops_module(name):
     if str(OPS) not in sys.path:
         sys.path.insert(0, str(OPS))
@@ -101,8 +114,11 @@ def integrated_app(engine, names, monkeypatch, *, options="", members=("api",),
         if database is not None:
             url = url.replace(f"/{engine.url.database}", f"/{database}")
         monkeypatch.setenv("API_DATABASE_URL", url)
-        for key, value in (env or {}).items():
-            monkeypatch.setenv(key, value)
+        for key, value in {**ROOMY_EMAIL_BUDGET, **(env or {})}.items():
+            if value is None:  # None: the setting unset, so the build's default applies
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, value)
         accounts.get_engine.cache_clear()
         from src.api.app import create_app
 

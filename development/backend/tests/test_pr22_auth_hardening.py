@@ -1,18 +1,22 @@
 """#22 auth hardening (decision 36): Part 1 of the planner's packet, AH-1a to AH-8b.
 
 Spec: docs/work-items/m5-pr22-auth-hardening-packet.md (docs/m5-pr22-fix-packet @
-3df8817), written spec-first on fix/pr22-main-merge @ 0c2f78a. Everything runs
+3fd4e3c, with the S1 amendment), written spec-first on fix/pr22-main-merge @ 0c2f78a. Everything runs
 against the integrated app with a fake provider (Jaden's FakeProvider, recorded),
 or with the real SupabaseAuth over a faked `requests`; synthetic data only.
 
 Cases that depend on a decision Bryan hasn't made yet carry its H number in the
-test name: H1 (AH-1a), H2 (AH-1b), H4 (AH-7b, AH-7c), H5 (AH-5b), H6 (AH-3).
+test name: H1 (AH-1a), H2 (AH-1b), H4 (AH-7b, AH-7c), H5 (AH-5b), H6 (AH-3), L4 (AH-9) and
+L6 (the refresh bucket).
 
 Interfaces this file assumes, from the packet or proposed for the build:
 - accounts.normalize_email(email): strip() then lower() (J6)
-- rate-limit kinds "credential" and "session" in RateLimiter, with
-  API_CREDENTIAL_RATE_LIMIT_BURST / _PER_HOUR and API_SESSION_RATE_LIMIT_BURST /
-  _PER_MINUTE; their dependencies live in src.api.read and are named *_rate_limit
+- rate-limit kinds "credential", "session", "refresh" and "email" in RateLimiter, with
+  API_CREDENTIAL_RATE_LIMIT_BURST / _PER_HOUR, API_SESSION_RATE_LIMIT_BURST /
+  _PER_MINUTE and API_REFRESH_RATE_LIMIT_BURST / _PER_HOUR; the route limits live in
+  src.api.read and are named *_rate_limit
+- AH-9's API_EMAIL_BUDGET_PER_HOUR, _RECOVERY_PER_HOUR, _SIGNUP_PER_HOUR and
+  _PER_CLIENT_PER_HOUR, and an EMAIL_BUDGET_LOCK = 170101 constant in src/api
 - accounts.lock_email(connection, email) stays the one email-lock helper (J3)
 """
 
@@ -32,7 +36,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import event, text
 
-from pr22_support import account_client, integrated_app
+from pr22_support import DEFAULT_EMAIL_BUDGET, account_client, integrated_app
 from pr22_support import pr22_roles  # noqa: F401  (pytest fixture)
 from test_supabase_accounts import FakeProvider
 
@@ -66,7 +70,7 @@ ROUTES = [
     ("POST", "/v1/auth/accept-recovery-link", "credential"),
     ("POST", "/v1/auth/reset-password", "credential"),
     ("PUT", "/v1/me/password", "credential"),
-    ("POST", "/v1/auth/refresh", "session"),
+    ("POST", "/v1/auth/refresh", "refresh"),
     ("POST", "/v1/auth/logout", "session"),
     ("GET", "/v1/me", "session"),
     ("GET", "/v1/me/preferences", "session"),
@@ -77,16 +81,17 @@ ROUTES = [
     ("POST", "/v1/me/watchlist", "session"),
     ("DELETE", "/v1/me/watchlist/ZZAA", "session"),
 ]
-KINDS = ("read", "auth", "credential", "session")
+KINDS = ("read", "auth", "credential", "session", "refresh")
 TIGHT = {  # every bucket one token deep, refilling far slower than a test runs
     "API_RATE_LIMIT_BURST": "1", "API_RATE_LIMIT_PER_MINUTE": "1",
     "API_AUTH_RATE_LIMIT_BURST": "1", "API_AUTH_RATE_LIMIT_PER_HOUR": "1",
     "API_CREDENTIAL_RATE_LIMIT_BURST": "1", "API_CREDENTIAL_RATE_LIMIT_PER_HOUR": "1",
     "API_SESSION_RATE_LIMIT_BURST": "1", "API_SESSION_RATE_LIMIT_PER_MINUTE": "1",
+    "API_REFRESH_RATE_LIMIT_BURST": "1", "API_REFRESH_RATE_LIMIT_PER_HOUR": "1",
 }
 ROOMY = {  # for concurrency tests: the limiter must never turn a race into a 429
     "API_CREDENTIAL_RATE_LIMIT_BURST": "500", "API_SESSION_RATE_LIMIT_BURST": "500",
-    "API_AUTH_RATE_LIMIT_BURST": "500",
+    "API_AUTH_RATE_LIMIT_BURST": "500", "API_REFRESH_RATE_LIMIT_BURST": "500",
 }
 
 
@@ -276,6 +281,8 @@ def test_ah1a_h1_forgot_password_over_an_open_login_sends_nothing(api, engine):
 
 
 def test_ah1b_h2_five_recovery_requests_use_up_the_hour_but_login_still_works(api, engine):
+    """The per-email recovery cap. AH-9's share and ceilings would bind first at their
+    defaults, so integrated_app's raised email budget (pr22_support) keeps them out."""
     client, provider, app = api
     from fastapi.testclient import TestClient
 
@@ -852,6 +859,7 @@ def _limiter_sequence(app, kind, n):
 @pytest.mark.parametrize("kind, burst_env, rate_env, interval", [
     ("credential", "API_CREDENTIAL_RATE_LIMIT_BURST", "API_CREDENTIAL_RATE_LIMIT_PER_HOUR", 600),
     ("session", "API_SESSION_RATE_LIMIT_BURST", "API_SESSION_RATE_LIMIT_PER_MINUTE", 10),
+    ("refresh", "API_REFRESH_RATE_LIMIT_BURST", "API_REFRESH_RATE_LIMIT_PER_HOUR", 600),
 ])
 def test_ah3d_h6_the_new_settings_take_effect(engine, pr22_roles, monkeypatch,  # noqa: F811
                                                kind, burst_env, rate_env, interval):
@@ -865,7 +873,9 @@ def test_ah3d_h6_the_new_settings_take_effect(engine, pr22_roles, monkeypatch,  
 @pytest.mark.parametrize("setting", ["API_CREDENTIAL_RATE_LIMIT_BURST",
                                      "API_CREDENTIAL_RATE_LIMIT_PER_HOUR",
                                      "API_SESSION_RATE_LIMIT_BURST",
-                                     "API_SESSION_RATE_LIMIT_PER_MINUTE"])
+                                     "API_SESSION_RATE_LIMIT_PER_MINUTE",
+                                     "API_REFRESH_RATE_LIMIT_BURST",
+                                     "API_REFRESH_RATE_LIMIT_PER_HOUR"])
 @pytest.mark.parametrize("value", ["0", "-3", "2.5", "ten"])
 def test_ah3d_invalid_new_settings_refuse_at_startup(engine, pr22_roles, monkeypatch,  # noqa: F811
                                                       setting, value):
@@ -877,9 +887,11 @@ def test_ah3d_invalid_new_settings_refuse_at_startup(engine, pr22_roles, monkeyp
         assert value not in str(caught.value)
 
 
-@pytest.mark.parametrize("kind, burst, interval", [("credential", 10, 60), ("session", 30, 1)])
+@pytest.mark.parametrize("kind, burst, interval", [
+    ("credential", 10, 60), ("session", 30, 1), ("refresh", 10, 60)])
 def test_ah3d_h6_the_new_defaults_match_the_table(api, kind, burst, interval):
-    """credential: burst 10, then 60 an hour; session: burst 30, then 60 a minute."""
+    """credential: burst 10, then 60 an hour; session: burst 30, then 60 a minute;
+    refresh (L6): burst 10, then 60 an hour."""
     _, _, app = api
     results = _limiter_sequence(app, kind, burst + 1)
     assert results[:burst] == [None] * burst
@@ -898,7 +910,8 @@ def test_ah3e_the_429_is_exactly_rl2s(tight, method, path):
 
 
 @pytest.mark.parametrize("kind, method, path", [
-    ("credential", "POST", "/v1/auth/login"), ("session", "GET", "/v1/me")])
+    ("credential", "POST", "/v1/auth/login"), ("session", "GET", "/v1/me"),
+    ("refresh", "POST", "/v1/auth/refresh")])
 def test_ah3e_new_kinds_log_once_per_key_without_the_client(tight, caplog, kind, method, path):
     client, _, app = tight
     caplog.set_level(logging.DEBUG)
@@ -911,7 +924,7 @@ def test_ah3e_new_kinds_log_once_per_key_without_the_client(tight, caplog, kind,
     assert all("testclient" not in line and EMAIL not in line for line in lines)
 
 
-@pytest.mark.parametrize("kind", ["credential", "session"])
+@pytest.mark.parametrize("kind", ["credential", "session", "refresh", "email"])
 def test_ah3e_memory_stays_bounded_per_kind(engine, pr22_roles, monkeypatch, kind):  # noqa: F811
     with hardened(engine, pr22_roles, monkeypatch, env={"API_RATE_LIMIT_MAX_CLIENTS": "3"}) as (_, _, app):
         limiter = _fresh_limiter(app)
@@ -1234,3 +1247,389 @@ def test_ah8b_api_md_documents_the_buckets_and_the_new_errors():
 def test_ah8b_operations_md_has_the_ntp_note():
     doc = (REPO / "docs" / "technical-specs" / "OPERATIONS.md").read_text()
     assert "NTP" in doc
+
+
+# ── AH-9: the app-wide email budget (L4), from the S1 amendment ─
+# Small explicit budgets keep each case to one limit. Every client is its own
+# TestClient address. Login's check_password runs before its reserve step (J2), so
+# "no provider call" is pinned as "no sending call" there, and as no call at all on
+# resend-otp and forgot-password, which make none before it.
+
+SEND_REFUSED = "We can't send a code right now. Please try again in a few minutes."
+
+
+def budget(total=25, recovery=6, signup=6, share=3):
+    return {"API_EMAIL_BUDGET_PER_HOUR": str(total),
+            "API_EMAIL_BUDGET_RECOVERY_PER_HOUR": str(recovery),
+            "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": str(signup),
+            "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": str(share)}
+
+
+def peer(app, n):
+    """A client from its own address (no lifespan: the app has already started)."""
+    from fastapi.testclient import TestClient
+
+    return TestClient(app, client=(f"198.51.100.{n}", 4000 + n))
+
+
+def users(provider, n):
+    emails = [f"user{i}@example.com" for i in range(n)]
+    for email in emails:
+        confirmed_user(provider, email)
+    return emails
+
+
+def sent(provider):
+    """The email-sending provider calls so far."""
+    return [c for c in provider.calls if c.name in ("send_code", "signup")]
+
+
+def post_login(client, email):
+    return client.post("/v1/auth/login", json={"email": email, "password": PASSWORD})
+
+
+def post_forgot(client, email):
+    return client.post("/v1/auth/forgot-password", json={"email": email})
+
+
+def post_signup(client, email):
+    return client.post("/v1/auth/signup",
+                       json={"email": email, "full_name": "Test Person", "password": PASSWORD})
+
+
+def assert_send_refused(response):
+    assert response.status_code == 429, response.text
+    assert response.json()["detail"] == SEND_REFUSED
+    assert response.headers.get("retry-after") == "60"
+
+
+def assert_uniform(response):
+    assert response.status_code == 200 and response.json() == UNIFORM, response.text
+
+
+@contextmanager
+def budgeted(engine, roles, monkeypatch, **limits):
+    env = {**ROOMY, **(budget(**limits) if limits else DEFAULT_EMAIL_BUDGET)}
+    with hardened(engine, roles, monkeypatch, env=env) as parts:
+        yield parts
+
+
+def test_ah9a_l4_the_app_wide_total_refuses_the_next_send_in_any_flow(
+    engine, pr22_roles, monkeypatch  # noqa: F811
+):
+    with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
+        _, provider, app
+    ):
+        emails = users(provider, 5)
+        first = login(peer(app, 1), emails[0])
+        login(peer(app, 2), emails[1])
+        assert_uniform(post_forgot(peer(app, 3), emails[2]))
+        assert post_signup(peer(app, 4), "fresh@example.com").status_code == 201
+        login(peer(app, 5), emails[3])
+        assert len(sent(provider)) == 5  # the whole budget, from five clients
+        age_challenge(engine, first, sent_seconds=61)
+        calls = len(provider.calls)
+        assert_send_refused(peer(app, 6).post("/v1/auth/resend-otp",
+                                              json={"email": emails[0], "challenge_id": first}))
+        assert len(provider.calls) == calls  # no provider call at all
+        assert_send_refused(post_login(peer(app, 7), emails[4]))
+        assert_uniform(post_forgot(peer(app, 8), emails[1]))
+        assert len(sent(provider)) == 5
+
+
+def test_ah9b_l4_at_their_ceilings_recovery_and_signup_stop_but_login_sends(
+    engine, pr22_roles, monkeypatch  # noqa: F811
+):
+    with budgeted(engine, pr22_roles, monkeypatch, total=10, recovery=2, signup=2, share=1) as (
+        _, provider, app
+    ):
+        emails = users(provider, 4)
+        assert_uniform(post_forgot(peer(app, 1), emails[0]))
+        assert_uniform(post_forgot(peer(app, 2), emails[1]))
+        assert post_signup(peer(app, 3), "new0@example.com").status_code == 201
+        assert post_signup(peer(app, 4), "new1@example.com").status_code == 201
+        assert len(sent(provider)) == 4
+        assert_uniform(post_forgot(peer(app, 5), emails[2]))  # recovery's ceiling
+        assert_send_refused(post_signup(peer(app, 6), "new2@example.com"))  # signup's
+        assert len(sent(provider)) == 4
+        login(peer(app, 7), emails[3])  # login still has the total's room
+        assert sent(provider)[-1].args == (emails[3], "login")
+
+
+def test_ah9b_l4_two_clients_block_recovery_for_everyone_while_login_works(
+    engine, pr22_roles, monkeypatch  # noqa: F811
+):
+    """The trade-off, pinned at the defaults (25, 6, 6, 3): two clients spending
+    their shares on forgot-password use up recovery's hour for every address."""
+    with budgeted(engine, pr22_roles, monkeypatch) as (_, provider, app):
+        emails = users(provider, 7)
+        for n, batch in ((1, emails[0:3]), (2, emails[3:6])):
+            for email in batch:
+                assert_uniform(post_forgot(peer(app, n), email))
+        assert len(sent(provider)) == 6
+        third = peer(app, 3)
+        assert_uniform(post_forgot(third, emails[6]))  # nothing sent, whoever asks
+        assert len(sent(provider)) == 6
+        login(third, emails[6])
+        assert sent(provider)[-1].args == (emails[6], "login")
+
+
+def test_ah9c_two_app_instances_on_one_database_share_one_budget(
+    engine, pr22_roles, monkeypatch  # noqa: F811
+):
+    from fastapi.testclient import TestClient
+
+    from src.api import accounts
+    from src.api.app import create_app
+
+    with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
+        _, provider, app
+    ):
+        second = create_app(api_role=pr22_roles["api"])  # its own limiter, the same database
+        second.dependency_overrides[accounts.get_provider] = lambda: provider
+        emails = users(provider, 7)
+        for n in range(3):
+            login(peer(app, n + 1), emails[n])
+        for n in (3, 4):
+            login(TestClient(second, client=(f"198.51.100.{n + 1}", 5000)), emails[n])
+        assert len(sent(provider)) == 5
+        assert_send_refused(post_login(TestClient(second, client=("198.51.100.20", 5000)), emails[5]))
+        assert_send_refused(post_login(peer(app, 21), emails[6]))
+        assert len(sent(provider)) == 5
+
+
+def test_ah9c_one_short_concurrent_requests_send_exactly_one_email(
+    engine, pr22_roles, monkeypatch  # noqa: F811
+):
+    with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
+        _, provider, app
+    ):
+        seed_challenge(engine, "login", email="earlier@example.com", send_count=4, consumed=True)
+        emails = users(provider, 5)
+        provider.hooks["send_code"] = lambda *a, **k: time.sleep(0.2)  # widen the race
+        threads = [run(post_login, peer(app, n + 1), email) for n, email in enumerate(emails)]
+        for thread, _ in threads:
+            thread.join(WAIT * 2)
+        statuses = sorted(result[0].status_code for _, result in threads)
+        assert statuses == [200, 429, 429, 429, 429], statuses
+        assert len(sent(provider)) == 1
+
+
+def test_ah9c_a_failed_and_released_first_send_doesnt_count(
+    engine, pr22_roles, monkeypatch  # noqa: F811
+):
+    from src.api.supabase_auth import AuthProviderError
+
+    with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
+        _, provider, app
+    ):
+        emails = users(provider, 7)
+        failures = []
+
+        def fail_once(*args, **kwargs):
+            if not failures:
+                failures.append(1)
+                raise AuthProviderError()
+
+        provider.hooks["send_code"] = fail_once
+        assert post_login(peer(app, 1), emails[0]).status_code == 503
+        assert open_hashes(engine, emails[0]) == set()  # released
+        for n in range(1, 6):  # the whole budget is still there
+            login(peer(app, n + 1), emails[n])
+        assert_send_refused(post_login(peer(app, 7), emails[6]))
+
+
+AH9D_INVALID = {
+    "total_zero": {"API_EMAIL_BUDGET_PER_HOUR": "0"},
+    "recovery_negative": {"API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "-1"},
+    "signup_zero": {"API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "0"},
+    "share_not_an_integer": {"API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "1.5"},
+    "recovery_above_the_total": {"API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "26"},
+    "signup_above_the_total": {"API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "30"},
+    "ceilings_together_reach_the_total": {"API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "13",
+                                          "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "12"},
+    "share_equal_to_a_ceiling": {"API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "6"},
+    "share_above_one_ceiling": {"API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "4",
+                                "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "5"},
+}
+
+
+@pytest.mark.parametrize("case", sorted(AH9D_INVALID))
+def test_ah9d_invalid_email_budgets_refuse_at_startup(engine, pr22_roles, monkeypatch, case):  # noqa: F811
+    env = {**budget(), **AH9D_INVALID[case]}  # otherwise valid: 25, 6, 6, 3
+    with pytest.raises(Exception) as caught:
+        with integrated_app(engine, pr22_roles, monkeypatch, env=env):
+            pass
+    assert "rate_limit_config_invalid" in str(caught.value)
+
+
+def test_ah9d_the_default_budget_is_valid_and_starts(engine, pr22_roles, monkeypatch):  # noqa: F811
+    with budgeted(engine, pr22_roles, monkeypatch) as (client, _, _):
+        assert client.get("/health").status_code == 200
+
+
+@pytest.mark.parametrize("code", ["over_email_send_rate_limit", "rate_limited"])
+@pytest.mark.parametrize("route", ["login", "resend_otp", "signup", "forgot_password"])
+def test_ah9e_supabases_own_429_is_the_fixed_answer(api, engine, route, code):
+    """The cause may be the whole project, so never "to this address"."""
+    from src.api.supabase_auth import AuthProviderError
+
+    client, provider, _ = api
+
+    def too_many(*args, **kwargs):
+        raise AuthProviderError(429, code)
+
+    if route == "signup":
+        provider.hooks["signup"] = too_many
+        response = post_signup(client, EMAIL)
+    elif route == "forgot_password":
+        confirmed_user(provider)
+        provider.hooks["send_code"] = too_many
+        assert_uniform(post_forgot(client, EMAIL))
+        return
+    else:
+        confirmed_user(provider)
+        if route == "login":
+            provider.hooks["send_code"] = too_many
+            response = post_login(client, EMAIL)
+        else:
+            challenge_id = login(client)
+            age_challenge(engine, challenge_id, sent_seconds=61)
+            provider.hooks["send_code"] = too_many
+            response = client.post("/v1/auth/resend-otp",
+                                   json={"email": EMAIL, "challenge_id": challenge_id})
+    assert response.status_code == 429, response.text
+    assert response.json()["detail"] == SEND_REFUSED
+    assert "address" not in response.text
+
+
+def test_ah9f_a_clients_share_of_three_covers_every_flow(engine, pr22_roles, monkeypatch):  # noqa: F811
+    with budgeted(engine, pr22_roles, monkeypatch, share=3) as (_, provider, app):
+        emails = users(provider, 4)
+        mine, other = peer(app, 1), peer(app, 2)
+        login(mine, emails[0])
+        assert_uniform(post_forgot(mine, emails[1]))
+        assert post_signup(mine, "new0@example.com").status_code == 201
+        assert len(sent(provider)) == 3
+        assert_send_refused(post_login(mine, emails[2]))
+        calls = len(provider.calls)
+        assert_uniform(post_forgot(mine, emails[3]))
+        assert len(provider.calls) == calls  # no provider call at all
+        login(other, emails[2])  # another client's login still sends
+        assert len(sent(provider)) == 4
+
+
+def test_ah9f_a_request_that_sends_nothing_spends_no_share(engine, pr22_roles, monkeypatch):  # noqa: F811
+    with budgeted(engine, pr22_roles, monkeypatch, share=3) as (_, provider, app):
+        emails = users(provider, 4)
+        mine = peer(app, 1)
+        for _ in range(4):
+            assert_uniform(post_forgot(mine, "nobody-here@example.com"))
+        for _ in range(2):
+            assert mine.post("/v1/auth/login", json={"email": emails[0], "password": "Wrong1234"}).status_code == 401
+        for email in emails[:3]:
+            login(mine, email)
+        assert_send_refused(post_login(mine, emails[3]))
+
+
+def test_ah9f_failed_first_sends_refund_the_share_but_never_above_full(
+    engine, pr22_roles, monkeypatch  # noqa: F811
+):
+    """Three failed logins from one address, then the provider is back: three send,
+    and the fourth is refused (the refunds didn't lift the share above 3)."""
+    from src.api.supabase_auth import AuthProviderError
+
+    with budgeted(engine, pr22_roles, monkeypatch, share=3) as (_, provider, app):
+        emails = users(provider, 4)
+        mine, down = peer(app, 1), [True]
+
+        def outage(*args, **kwargs):
+            if down[0]:
+                raise AuthProviderError()
+
+        provider.hooks["send_code"] = outage
+        for email in emails[:3]:
+            assert post_login(mine, email).status_code == 503
+        down[0] = False
+        for email in emails[:3]:
+            login(mine, email)
+        assert_send_refused(post_login(mine, emails[3]))
+
+
+def test_ah9f_a_failed_resend_still_spends_the_share(engine, pr22_roles, monkeypatch):  # noqa: F811
+    from src.api.supabase_auth import AuthProviderError
+
+    with budgeted(engine, pr22_roles, monkeypatch, share=3) as (_, provider, app):
+        emails = users(provider, 2)
+        mine = peer(app, 1)
+        challenge_id = login(mine, emails[0])
+
+        def fail(*args, **kwargs):
+            raise AuthProviderError()
+
+        provider.hooks["send_code"] = fail
+        for _ in range(2):
+            age_challenge(engine, challenge_id, sent_seconds=61)
+            assert mine.post("/v1/auth/resend-otp", json={
+                "email": emails[0], "challenge_id": challenge_id}).status_code == 503
+        provider.hooks.pop("send_code")
+        assert_send_refused(post_login(mine, emails[1]))
+
+
+def test_ah9g_the_budget_lock_is_named_unique_and_taken_after_the_email_lock(api):
+    client, provider, app = api
+    sources = {path: path.read_text() for root in ("development/backend/src", "development/database/ops")
+               for path in (REPO / root).rglob("*.py")}
+    definitions = [p for p, text_ in sources.items() if re.search(r"^EMAIL_BUDGET_LOCK = 170101\b", text_, re.M)]
+    assert len(definitions) == 1 and "/src/api/" in str(definitions[0]), definitions
+    others = set()
+    for path, text_ in sources.items():
+        for line in text_.splitlines():
+            if not line.lstrip().startswith("#") and not line.startswith("EMAIL_BUDGET_LOCK ="):
+                others |= {int(v) for v in re.findall(r"\b(17\d{4})\b", line.split("#")[0])}
+    assert 170101 not in others, "another fixed advisory-lock key is 170101"
+    confirmed_user(provider)
+    with _engine_use(app.state.engine) as used:
+        login(client)
+    statements = [u for u in used if u != "checkout"]
+    locks = [i for i, s in enumerate(statements) if "pg_advisory_xact_lock" in s]
+    email_lock = next(i for i in locks if "hashtextextended" in statements[i])
+    budget_lock = next((i for i in locks if "hashtextextended" not in statements[i]), None)
+    assert budget_lock is not None and email_lock < budget_lock, [statements[i] for i in locks]
+
+
+def test_ah9h_share_refusals_are_counted_not_logged_one_by_one(
+    engine, pr22_roles, monkeypatch, caplog  # noqa: F811
+):
+    with budgeted(engine, pr22_roles, monkeypatch, share=1) as (_, provider, app):
+        emails = users(provider, 11)
+        mine = peer(app, 1)
+        login(mine, emails[0])
+        caplog.set_level(logging.DEBUG)
+        caplog.clear()
+        for email in emails[1:]:
+            assert_send_refused(post_login(mine, email))
+        lines = _app_lines(caplog)
+        assert len(lines) <= 1, lines  # one line a minute for this kind, with the count
+        for line in lines:
+            for leak in ("example.com", "198.51.100", "testclient"):
+                assert leak not in line, line
+
+
+def test_ah9h_supabase_429_refusals_are_counted_not_logged_one_by_one(api, caplog):
+    from src.api.supabase_auth import AuthProviderError
+
+    client, provider, _ = api
+    emails = users(provider, 10)
+
+    def too_many(*args, **kwargs):
+        raise AuthProviderError(429, "over_email_send_rate_limit")
+
+    provider.hooks["send_code"] = too_many
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()
+    for email in emails:
+        assert post_login(client, email).status_code == 429
+    lines = _app_lines(caplog)
+    assert len(lines) <= 1, lines
+    assert all("example.com" not in line for line in lines)
