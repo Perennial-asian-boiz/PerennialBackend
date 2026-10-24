@@ -276,31 +276,62 @@ Bryan's open RLS/JWT questions for Jaden (`auth.uid()` vs `request.jwt.claim.sub
 
 **Why:** decision 14 makes `/v1/watchlist` public, with no login and basic rate limiting. R1 (`feat/m5-read-api` at `25f38f0`) has none. The API runs only locally and on staging until D8 is settled (decision 16), and the API host isn't chosen yet (decision 21 covers only the database).
 
-**Scope:** R1's read routes, `GET /v1/watchlist` and `GET /v1/securities/{symbol}`. #22's `/v1/auth/*` routes are out of scope here. Supabase Auth limits its own endpoints, and issue #3's limits for auth entry points belong to #22, though they could reuse this limiter later.
+**Scope:**
+- R1's read routes, `GET /v1/watchlist` and `GET /v1/securities/{symbol}`.
+- The two #22 routes that call `app.email_is_registered`, `POST /v1/auth/signup` and `POST /v1/auth/forgot-password`. That function is an account-enumeration oracle (auditor). They're installed in the #22 fix branch (its change 5 and RB-5d).
+- Other `/v1/auth/*` routes rely on Supabase Auth's own limits and Jaden's per-email send limit (`check_email_limit`).
 
 ### Where it lives: both layers, and "basic" means the in-app one
 
-- **In the app (this addendum).** A per-client token bucket in front of the read routes. It is always on, host-independent and testable now. Its job is to stop one client from monopolizing the `api` pool (5 + 5 connections, 5 s statement timeout, `src/db/session.py:14-18`).
+- **In the app (this addendum).** A per-client token bucket, charged before any other work. It is always on, host-independent and testable now. Its job is to stop one client from monopolizing the `api` pool (5 + 5 connections, 5 s statement timeout, `src/db/session.py:12-18`) and from scraping the enumeration oracle.
 - **At the edge or host (a deployment checklist item, not code).** Request-rate and connection limits, configured when the API host is chosen. Only this layer can absorb a flood, and it's required before any public deployment.
-- **Delivery (decision 26).** Recommended: a small follow-up PR on top of R1 before any public deployment, rather than reopening the reviewed R1 before its push. That's safe because the API isn't public until D8 (decision 16).
+- **Delivery (decision 26).** Recommended: a small follow-up PR on top of R1 (`feat/m5-rate-limit`) before any public deployment, rather than reopening the reviewed R1 before its push. That's safe because the API isn't public until D8 (decision 16). The #22 fix branch then calls the same installer.
+
+### One installer, used by both apps
+
+`read.install(app, config)` installs everything, and both `create_app()` and #22's integrated app call it (checker RL-B):
+- uvicorn's `ProxyHeadersMiddleware`, with `trusted_hosts` from the validated trusted-proxy setting
+- the limiter state on `app.state`, so state is **per app instance**, never module-level. Each `create_app()` starts empty, and tests can't leak buckets into each other.
+- the configuration and its startup validation (RL-11)
+
+The limits are attached as dependencies:
+- `read.rate_limit` on `read.router`
+- `read.auth_rate_limit` on the two #22 routes, in the #22 branch
+
+Each limit runs **before any other dependency or validation that touches the engine**. Routes added later must keep that order. A request reaching a limit dependency on an app where `install` never ran gets `503` with code `rate_limiter_missing`. It fails closed, never unlimited.
 
 ### How a client is keyed
 
-- **The key is the client address the app sees** (`request.client.host`). App code never parses `X-Forwarded-For` or `Forwarded` itself.
-- **Trusted proxies live in the app.**
-  - `create_app()` wraps itself in uvicorn's `ProxyHeadersMiddleware` with `trusted_hosts` set from `API_TRUSTED_PROXIES`: IPs or CIDRs, empty by default, which means trust no one.
-  - Forwarded headers are honoured only when the immediate peer is in that set.
-  - The documented run command passes `--no-proxy-headers`, so uvicorn's own default (trusting `127.0.0.1`) never applies twice or behind the operator's back. With #22, the same command also carries `--no-access-log` (decision 23).
-  - In deployment, `API_TRUSTED_PROXIES` names exactly the host's proxy ranges, never `*`, unless the host guarantees that every request passes through its proxy and that the proxy overwrites client-supplied forwarded headers.
-- **Spoofing.** A client that sends `X-Forwarded-For` from an untrusted address is keyed by its real peer address.
-- **IPv6** is keyed by its /64, because one host commonly controls a whole /64. IPv4 is keyed by its full address.
-- **Shared addresses** (NAT, carrier-grade NAT) share one bucket. That's acceptable for "basic", and the limits are generous for that reason.
+- **The key comes from `request.client`**, as uvicorn's middleware leaves it. App code never parses `X-Forwarded-For` or `Forwarded` itself.
+- **Normalization, in this order:**
+  1. **No peer** (`request.client` is `None`, as with a unix-socket listener or a transport with no peer information): one shared `unknown` bucket. It is never exempt, and never a 500.
+  2. **The host string.** Strip one pair of surrounding brackets and a trailing `:port`, so `[2001:db8::1]:443` becomes `2001:db8::1` and `198.51.100.1:5678` becomes `198.51.100.1`. Uvicorn passes a forwarded value through unvalidated, and a proxy that writes `ip:port` would otherwise give every source port its own bucket.
+  3. **IPv4** is keyed by its full address.
+  4. **IPv4-mapped IPv6** (`::ffff:a.b.c.d`, which is how a dual-stack `::` listener presents every IPv4 client) is keyed by its embedded IPv4 address, exactly as IPv4 is. Without this step, every IPv4 client would share one /64 bucket.
+  5. **Other IPv6** is keyed by its /64, because one host commonly controls a whole /64. A client with a /48 still controls 65,536 /64 buckets, which is acceptable for "basic", since the edge limit is the global answer.
+  6. **Anything still not an IP address** (TestClient's `testclient`, a misbehaving proxy) is keyed by the literal string, truncated to 64 characters. It is never exempt.
+- **Trusted proxies: list every hop.**
+  - `API_TRUSTED_PROXIES` lists **every** proxy hop the host guarantees in front of the API, by IP or CIDR, and is empty by default (trust no one).
+  - Uvicorn keys by the rightmost address in `X-Forwarded-For` that isn't trusted, so a missing hop collapses every client onto that hop's address. For example, if the chain is a CDN then the host's proxy and only the host's proxy is listed, everyone is keyed by the CDN's egress address and throttled together.
+  - The literal `*` is refused. Trusting every peer needs the separately named `API_TRUST_ALL_PROXIES=1`, which is for a host that guarantees all traffic passes through a proxy that overwrites client-supplied forwarded headers. A permissive value is then never a typo away.
+- **The run commands** turn uvicorn's own proxy handling off, so only the installer's middleware runs and uvicorn's default trust of `127.0.0.1` never applies behind the operator's back:
+  - `--no-proxy-headers` on the command line
+  - `proxy_headers=False` in the #22 branch's `python -m src.api` entry
+- **Spoofing.** A client that sends `X-Forwarded-For` from an untrusted address is keyed by its real peer address. Fake entries that a client prepends are skipped, because the key is the rightmost untrusted address.
+- **Deployment checklist:**
+  - The host's proxy must append the real peer to `X-Forwarded-For`. Uvicorn's middleware reads only `X-Forwarded-For`, not RFC 7239 `Forwarded`.
+  - Every hop is listed in `API_TRUSTED_PROXIES`.
+- **Shared addresses** (NAT, carrier-grade NAT) share one bucket. That's acceptable for "basic", and the read limits are generous for that reason.
 
 ### Limits and the response
 
-- **The bucket.** Capacity 30, refilling at 1 token per second (60 a minute sustained). The configuration is `API_RATE_LIMIT_BURST=30` and `API_RATE_LIMIT_PER_MINUTE=60`, passed through `create_app()` parameters with those environment defaults. Both must be positive integers.
-  - Why those numbers: the watchlist changes at most once a day, and a normal client revalidates with its ETag every few minutes. So 60 a minute is far above legitimate use and far below what 10 connections can serve.
-- **Every request to a read route costs one token, before any database work.** That includes `304` responses and `404` and `422` errors. A 304 still opens a read transaction to look up the pointer (`read.py`, `get_watchlist`), so not counting 304s would leave the database unprotected.
+- **Read bucket** (`read.rate_limit`): capacity 30, refilling at 60 a minute.
+  - Configuration: `API_RATE_LIMIT_BURST=30`, `API_RATE_LIMIT_PER_MINUTE=60`.
+  - The watchlist changes at most once a day, and a normal client revalidates with its ETag every few minutes. So 60 a minute is far above legitimate use and far below what 10 connections can serve.
+- **Auth bucket** (`read.auth_rate_limit`, signup and forgot-password together): capacity 5, refilling at 30 an hour.
+  - Configuration: `API_AUTH_RATE_LIMIT_BURST=5`, `API_AUTH_RATE_LIMIT_PER_HOUR=30`.
+  - A person signs up or asks for recovery a few times at most. Each call answers "is this email registered?", so the bucket is deliberately small. It's a separate bucket per client key, so reads don't spend auth tokens.
+- **Every request to a limited route costs one token, before any database work.** That includes `304` responses and `404` and `422` errors. A 304 still opens a read transaction to look up the pointer (`read.py`, `get_watchlist`), so not counting 304s would leave the database unprotected. A limited auth request calls neither `email_is_registered` nor Supabase.
 - **Over the limit:**
   - `429`
   - `Retry-After: <whole seconds until the next token, rounded up, at least 1>`
@@ -309,52 +340,68 @@ Bryan's open RLS/JWT questions for Jaden (`auth.uid()` vs `request.jwt.claim.sub
   - no `ETag` and no publication data
 
   A limited request opens no transaction.
+- **Browsers.** If the frontend should read `Retry-After`, #22's CORS configuration adds it to `expose_headers`. That's optional and not a security item.
 - **No `RateLimit-*` headers in v1.**
 
 ### State with several workers
 
-- **In memory, per process.** That's acceptable for "basic". With N workers the effective limit is up to N times higher. This is documented, and the edge limit is the global one. A restart resets the buckets.
+- **In memory, per app instance in each process.** That's acceptable for "basic". With N workers the effective limit is up to N times higher. This is documented, and the edge limit is the global one. A restart resets the buckets.
 - **Thread-safe.** R1's routes are plain `def` functions, so FastAPI runs them in its threadpool. Bucket updates take a lock.
-- **Bounded memory.** The limiter tracks at most `API_RATE_LIMIT_MAX_CLIENTS` buckets (10,000 by default). When the table is full, it evicts the least recently used bucket, so rotating addresses can't exhaust memory. A full bucket carries no state, so it can be dropped at any time.
+- **Bounded memory.** The limiter tracks at most `API_RATE_LIMIT_MAX_CLIENTS` buckets per bucket kind (10,000 by default). When the table is full, it evicts the least recently used bucket. That is by definition a quiet client, so a client that is hammering keeps its drained bucket, and rotating addresses can't grow memory. An evicted client starts again with a full bucket, which is the only safe reset.
 - **A monotonic clock, injectable for tests.**
 - **Shared state** (Redis and the like) is out of scope. Revisit it only if the API runs several instances and the edge can't limit.
 
 ### Effect on accepted criteria
 
 - **RA-15 (startup check):** unchanged.
-- **RA-16b (every route through the helper):**
-  - It still holds for every *served* request. Its test keeps each route under the limit by using a fresh client key.
-  - A limited request makes no helper call (RL-7).
-  - The limiter is a dependency on `read.router`, so it travels with the router into #22's app (#22 packet RB-5c), and #22's routes are unaffected.
+- **RA-16b (every route through the helper):** it still holds for every *served* request. Its test keeps each route under the limit by using a fresh client key, and a limited request makes no helper call (RL-7).
 - **RA-3 and RA-6 (ETag, byte stability):** unchanged under the limit.
-- **RA-17 (logs):** a 429 writes one JSON log line, `rate_limited`, with no client address, path parameters or header values.
-- **RA-18 (OpenAPI snapshot):** the snapshot gains the `429` response on both routes. That is a deliberate snapshot update, and `docs/technical-specs/API.md` documents it.
+- **RA-17 (logs):** RL-13 below.
+- **RA-18 (OpenAPI snapshot):** the snapshot gains the `429` response on both read routes. That is a deliberate snapshot update, and `docs/technical-specs/API.md` documents it.
+- **The #22 packet:** RB-5d covers the integrated app.
 
 ### Acceptance criteria (RL)
 
 **Limiting**
-- **RL-1** **Under the limit.** Responses don't change. R1's test suite passes with the limiter on at its defaults.
+- **RL-1** **Under the limit.** Responses don't change. R1's test suite passes with the limiter on at its defaults, and each `create_app()` starts with empty state.
 - **RL-2** **Over the limit.** In one instant, the request after `burst` gets a `429` with an integer `Retry-After` of at least 1, the body exactly `{"code", "detail"}` in canonical JSON, `Cache-Control: no-store`, and no `ETag`.
 - **RL-3** **Refill.** With a fake clock, the next request succeeds after `Retry-After` seconds, and requests at the refill rate succeed indefinitely.
-- **RL-4** **Independent clients.** Two client keys have independent buckets.
+- **RL-4** **Independent clients and buckets.** Two client keys have independent buckets, and the read and auth buckets of one key are independent.
 
 **Keying**
-- **RL-5** **Proxies and spoofing.**
+- **RL-5** **Proxies, spoofing and hops.**
   - With `API_TRUSTED_PROXIES` empty, a client's own `X-Forwarded-For` doesn't change its key.
-  - With it set to the test proxy's address, requests from that proxy are keyed by the forwarded client.
-  - A forwarded header from any other peer is ignored.
-- **RL-6** **IPv6.** Two addresses in one /64 share a bucket, and addresses in different /64s don't.
+  - With every hop of a two-hop test chain listed, requests are keyed by the original client.
+  - With only the inner hop listed, every client is keyed by the outer hop's address. This test documents the collapse the setting must avoid.
+  - Entries a client prepends are ignored, and a forwarded header from any other peer is ignored.
+- **RL-6** **Address normalization.**
+  - **IPv6 /64:** two addresses in one /64 share a bucket, and addresses in different /64s don't.
+  - **IPv4-mapped:** `::ffff:198.51.100.1` and `198.51.100.1` share a bucket. `::ffff:198.51.100.1` and `::ffff:198.51.100.2` don't.
+  - **Ports and brackets:** `198.51.100.1:5678` and `198.51.100.1:5679` share `198.51.100.1`'s bucket, and `[2001:db8::1]:443` shares `2001:db8::1`'s /64.
+- **RL-6b** **Non-IP and missing peers.** A request with no `request.client` uses the shared `unknown` bucket. A non-IP host string uses its own literal-string bucket, truncated to 64 characters. Neither is exempt, and neither causes a 500.
 
 **Cost and safety**
-- **RL-7** **No database work when limited.** A `429` makes no `read_transaction` call and doesn't use the engine. The test patches the helper, as RA-16b does.
+- **RL-7** **No database work when limited.** A `429` makes no `read_transaction` call and doesn't use the engine. The test patches the helper, as RA-16b does. A limited auth request calls neither `email_is_registered` nor the auth provider.
 - **RL-8** **304s count.** Conditional requests consume tokens. Once the bucket is empty, a matching `If-None-Match` gets `429`, not `304`.
 - **RL-9** **Thread safety.** With the clock frozen, concurrent requests from one client through the threadpool give exactly `burst` successes.
-- **RL-10** **Bounded memory.** With `max_clients = K`, K + M distinct clients never leave more than K buckets, and an evicted client starts again with a full bucket.
+- **RL-10** **Bounded memory.** With `max_clients = K`, K + M distinct clients never leave more than K buckets of a kind, and an evicted client starts again with a full bucket.
+- **RL-14** **Fails closed without the installer.** On an app where `read.install` didn't run, a request to a limited route returns `503 rate_limiter_missing` and does no database work.
+- **RL-15** **Same behaviour in both apps.** The integrated #22 app limits and keys exactly as `create_app()` does, through `read.install`. This is the RL side of the #22 packet's RB-5d.
 
 **Configuration, docs and logs**
-- **RL-11** **Configuration.** The limits come from configuration. Zero, negative or non-integer values, or an invalid trusted-proxy entry, refuse at startup with a fixed error.
-- **RL-12** **Docs and snapshot.** `API.md` documents the `429`, `Retry-After`, the defaults, the per-worker caveat, `API_TRUSTED_PROXIES` and the run flags. The OpenAPI snapshot includes `429` on both routes.
-- **RL-13** **Logs.** A `429` writes exactly one JSON log line, with event `rate_limited` and no client address, path or header values.
+- **RL-11** **The app's own validation.** Uvicorn silently accepts invalid trusted-proxy entries, so the app validates them itself. The limits come from configuration. These refuse at startup with a fixed error:
+  - zero, negative or non-integer limits
+  - a trusted-proxy entry that isn't an IP or CIDR
+  - a literal `*`
+
+  `API_TRUST_ALL_PROXIES=1` is the only way to trust every peer.
+- **RL-12** **Docs and snapshot.** `API.md` documents:
+  - the `429` and `Retry-After`
+  - both buckets' defaults and the per-worker caveat
+  - `API_TRUSTED_PROXIES` (every hop), `API_TRUST_ALL_PROXIES`, the run flags, and the `X-Forwarded-For` requirement
+
+  The OpenAPI snapshot includes `429` on both read routes.
+- **RL-13** **Logs.** At most one JSON `rate_limited` log line per key per `Retry-After` window, carrying a count of the rejections it covers. Never one line per 429, which would turn a flood into a log flood. The line has no client address, path or header values.
 
 ### For Bryan
 
@@ -363,4 +410,4 @@ Bryan's open RLS/JWT questions for Jaden (`auth.uid()` vs `request.jwt.claim.sub
 
 There are no new decisions. The limits are configurable defaults, not product choices.
 
-**Owner after review:** the implementer, on `feat/m5-rate-limit` from R1, test-maker first. **Review:** the checker; the auditor for keying, the trusted-proxy configuration and memory bounds (RL-5, RL-6, RL-10).
+**Owner after review:** the implementer, on `feat/m5-rate-limit` from R1, test-maker first. The #22 branch installs it (its RB-5d). **Review:** the checker; the auditor for keying, trusted proxies, memory bounds and the auth bucket (RL-5, RL-6, RL-6b, RL-10, RL-11).
