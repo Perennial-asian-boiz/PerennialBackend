@@ -54,8 +54,9 @@ parent role membership) are rejected. Deployments must also audit login group
 membership and privileges from other roles: this tool does not rewrite external
 login accounts or repair arbitrary legacy authorization.
 
-Run bootstrap using the administrative secret, migrate using the owner identity,
-then reapply grants using the administrative secret:
+Run bootstrap using the administrative secret before every upgrade, not only the
+first, then migrate using the owner identity, then reapply grants using the
+administrative secret:
 
 ```bash
 .venv/bin/python development/database/ops/provision_roles.py --phase bootstrap
@@ -68,8 +69,22 @@ A third phase, `--phase roles`, is only for restores: it runs bootstrap's role
 checks and creates the group roles, and nothing else (see "Backup and restore
 logins with row-level security" below).
 
-Bootstrap reserves `perennial` for the owner and grants owner CREATE in `public`
-for Alembic's version table. Grant phase transfers the explicitly listed tables
+Bootstrap is idempotent. It creates schema `perennial` owned by the owner, and the
+owner deliberately holds no `CREATE` on the database, so it cannot create schemas,
+publications or extensions. PostgreSQL checks that right before `IF NOT EXISTS`, so
+a migration creates a schema only when `to_regnamespace()` finds none: that happens
+only where nothing ran bootstrap (the tests, dev Compose and the quality gate, which
+migrate as a superuser). A migration that adds a schema must also add it to bootstrap;
+without that, the owner's upgrade fails with `permission denied for database` and
+rolls back.
+
+The administrative login may be a superuser or, as on Supabase, a non-superuser
+`CREATEROLE` login that owns the database. Such a login holds only `ADMIN OPTION` on
+the roles it creates, so bootstrap grants it `SET` on the owner (never `INHERIT`): it
+can then create the owner's schema and re-own objects to the owner, and both phases
+make the grants on the owner's objects as the owner. This needs PostgreSQL 16 or later.
+
+Bootstrap also grants owner CREATE in `public` for Alembic's version table. Grant phase transfers the explicitly listed tables
 and their attached identity sequences to the owner, and fails if the migrated
 schema does not match the policy. Custom groups are available through `--owner`,
 `--importer`, and `--reader`. An administrator separately creates authenticated

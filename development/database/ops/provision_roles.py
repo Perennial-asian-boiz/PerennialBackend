@@ -1,9 +1,14 @@
 """Provision dedicated NOLOGIN owner/importer/reader/api groups using an explicit table policy.
 
-Run bootstrap before migrations and grants after every migration. Before a
-pg_restore of a whole-database dump, run roles: it only creates the group roles
-that the dump's policies name, because the dump creates its own schemas. Administrative
-credentials come only from OPS_DATABASE_URL; login membership/secrets are deployment-owned.
+Run bootstrap before every upgrade, and grants after every migration. Bootstrap is
+idempotent and creates the schemas the owner migrates into: the owner holds no CREATE
+on the database. Before a pg_restore of a whole-database dump,
+run roles: it only creates the group roles that the dump's policies name, because the
+dump creates its own schemas. Administrative credentials come only from
+OPS_DATABASE_URL; login membership/secrets are deployment-owned. The administrative
+login may be a superuser or, as on Supabase, a non-superuser CREATEROLE role that owns
+the database: it grants itself SET (not INHERIT) on the owner and acts as the owner for
+the owner's objects. Needs PostgreSQL 16 or later.
 """
 import argparse
 import os
@@ -102,34 +107,55 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
                          .format(sql.Identifier(role)))
     if phase == "roles":
         return
+    # A non-superuser CREATEROLE admin holds only ADMIN OPTION on roles it created.
+    # CREATE SCHEMA ... AUTHORIZATION and ALTER ... OWNER TO need SET on the owner;
+    # INHERIT is never granted, so the admin doesn't silently hold the owner's rights.
+    if not conn.execute("SELECT pg_has_role(current_user, %s, 'SET')", (owner,)).fetchone()[0]:
+        conn.execute(sql.SQL("GRANT {} TO CURRENT_USER WITH INHERIT FALSE, SET TRUE")
+                     .format(sql.Identifier(owner)))
     # Dedicated database: deployment uses authenticated member logins, not PUBLIC access.
     conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database)))
     for role in roles:
         conn.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}")
                      .format(sql.Identifier(database), sql.Identifier(role)))
     conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS perennial AUTHORIZATION {}").format(sql.Identifier(owner)))
-    conn.execute(sql.SQL("ALTER SCHEMA perennial OWNER TO {}").format(sql.Identifier(owner)))
+    _give_to_owner(conn, owner, "SCHEMA", sql.Identifier("perennial"),
+                   "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname=%s", ("perennial",))
+    # Alembic's version table is in public; only the migration owner needs CREATE there.
+    conn.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
+    conn.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(sql.Identifier(owner)))
+    # Grants on the owner's objects are made as the owner: an admin that is not a
+    # superuser and doesn't inherit the owner's rights couldn't make them itself.
+    conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(owner)))
     conn.execute(sql.SQL("REVOKE ALL ON SCHEMA perennial FROM PUBLIC, {}, {}, {}")
                  .format(sql.Identifier(importer), sql.Identifier(reader), sql.Identifier(api)))
     conn.execute(sql.SQL("GRANT USAGE ON SCHEMA perennial TO {}, {}, {}")
                  .format(sql.Identifier(importer), sql.Identifier(reader), sql.Identifier(api)))
-    # Alembic's version table is in public; only the migration owner needs CREATE there.
-    conn.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
-    conn.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(sql.Identifier(owner)))
     for schema in (None, "perennial"):
         scope = sql.SQL("") if schema is None else sql.SQL(" IN SCHEMA perennial")
         for kind in ("TABLES", "SEQUENCES", "FUNCTIONS"):
             conn.execute(sql.SQL("ALTER DEFAULT PRIVILEGES FOR ROLE {}{} REVOKE ALL ON {} FROM PUBLIC, {}, {}, {}")
                          .format(sql.Identifier(owner), scope, sql.SQL(kind),
                                  sql.Identifier(importer), sql.Identifier(reader), sql.Identifier(api)))
+    conn.execute("RESET ROLE")
     if phase == "bootstrap":
         return
     actual = {r[0] for r in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname='perennial'")}
     if actual != set(TABLES):
         raise ValueError("Application table policy differs from migrated schema; update explicit grants")
+    # Objects the owner doesn't own yet (after a restore, the admin's) move to the owner first.
+    # Read from the catalog: a regclass lookup would need USAGE on the owner's schema.
+    relation_owner = ("SELECT pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n"
+                      " ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s")
+    for table in TABLES:
+        _give_to_owner(conn, owner, "TABLE", sql.Identifier("perennial", table),
+                       relation_owner, ("perennial", table))
+    if conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()[0]:
+        _give_to_owner(conn, owner, "TABLE", sql.Identifier("public", "alembic_version"),
+                       relation_owner, ("public", "alembic_version"))
+    conn.execute(sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(owner)))
     for table in TABLES:
         ident = sql.Identifier("perennial", table)
-        conn.execute(sql.SQL("ALTER TABLE {} OWNER TO {}").format(ident, sql.Identifier(owner)))
         groups = sql.SQL(", ").join(sql.Identifier(r) for r in (importer, reader, api))
         conn.execute(sql.SQL("REVOKE ALL ON TABLE {} FROM PUBLIC, {}").format(ident, groups))
         columns = [sql.Identifier(r[0]) for r in conn.execute(
@@ -166,9 +192,15 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
             conn.execute(sql.SQL("GRANT USAGE, SELECT ON SEQUENCE {} TO {}")
                          .format(seq_ident, sql.Identifier(importer)))
     if conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()[0]:
-        conn.execute(sql.SQL("ALTER TABLE public.alembic_version OWNER TO {}").format(sql.Identifier(owner)))
         conn.execute(sql.SQL("REVOKE ALL ON TABLE public.alembic_version FROM PUBLIC, {}, {}, {}")
                      .format(sql.Identifier(importer), sql.Identifier(reader), sql.Identifier(api)))
+    conn.execute("RESET ROLE")
+
+
+def _give_to_owner(conn, owner, kind, name, owner_query, params):
+    """ALTER ... OWNER TO the owner, as the admin, only if someone else owns it."""
+    if conn.execute(owner_query, params).fetchone()[0] != owner:
+        conn.execute(sql.SQL("ALTER {} {} OWNER TO {}").format(sql.SQL(kind), name, sql.Identifier(owner)))
 
 
 def main():
