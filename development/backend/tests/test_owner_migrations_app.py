@@ -15,6 +15,7 @@ from sqlalchemy.exc import DBAPIError
 from pr22_support import provision_api
 from test_owner_migrations import (
     ACL_SNAPSHOT,
+    admin_creates_roles,
     head,
     migrate,
     owners,
@@ -70,6 +71,29 @@ def test_mo1_s3_a_non_superuser_createrole_admin_provisions_app(engine):
                 "SELECT pg_has_role(:a, :o, 'SET'), pg_has_role(:a, :o, 'USAGE')"),
                 {"a": names["admin"], "o": names["owner"]}).one()
             assert (can_set, inherits) == (True, False)
+
+
+def test_ro1_app_the_admin_re_owns_app_after_a_no_owner_restore(engine):
+    """Checker RO-1, #22's form: the admin owns perennial and app (the schema, tables
+    and the lookup), as a --no-owner restore by it leaves them. Grants and then
+    provision_api_role.py as that admin end where MO-1 ends: app owned by the owner,
+    the API's app privileges exact, the lookup the admin's, the admin SET-only."""
+    with scratch(engine) as (target, names), supabase_style_admin(engine, target, names) as admin:
+        admin_creates_roles(admin, names)
+        migrate(admin)
+        assert owners(target, "app") == {names["admin"]}  # the restored state
+        provision(admin, names, "grants")
+        provision_api(admin, names)
+        assert owners(target, "perennial") == {names["owner"]}
+        assert owners(target, "app") == {names["owner"]}
+        assert _app_privileges(target, names["api"]) == EXPECTED_APP
+        with target.connect() as conn:
+            assert conn.execute(text(
+                "SELECT pg_get_userbyid(proowner) FROM pg_proc"
+                " WHERE oid = 'app.email_is_registered(text)'::regprocedure")).scalar() == names["admin"]
+            assert conn.execute(text(
+                "SELECT pg_has_role(:a, :o, 'SET'), pg_has_role(:a, :o, 'USAGE')"),
+                {"a": names["admin"], "o": names["owner"]}).one() == (True, False)
 
 
 # ── MO-4: bootstrap and app ──────────────────────────────
