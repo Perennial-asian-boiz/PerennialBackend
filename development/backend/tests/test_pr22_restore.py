@@ -78,7 +78,7 @@ def test_the_early_check_also_covers_rls_enabled_but_not_forced(engine, pr22_rol
             conn.execute(text(f'CREATE ROLE "{reader_grant}" NOLOGIN'))
             conn.execute(text(f'GRANT pg_read_all_data TO "{reader_grant}"'))
         names = {**pr22_roles, "readall": reader_grant}
-        with _login_url(engine, names, members=("readall",)) as (url, _):
+        with _login_url(engine, names, members=("readall",), connect=True) as (url, _):
             report = run_backup(url, keypair / "cert.pem", tmp_path / "spool",
                                 LocalStore(tmp_path / "store"))
         assert report["error_code"] == "rls_bypass_required"
@@ -104,7 +104,7 @@ def test_the_backup_login_dumps_every_app_row_and_the_drill_verifies_them(
     try:
         names = {**pr22_roles, "readall": reader_grant}
         store = LocalStore(tmp_path / "store")
-        with _login_url(engine, names, options="BYPASSRLS", members=("readall",)) as (url, _):
+        with _login_url(engine, names, options="BYPASSRLS", members=("readall",), connect=True) as (url, _):
             report = run_backup(url, keypair / "cert.pem", tmp_path / "spool", store)
         assert report["status"] == "ok", report
         # The drill restores and row-verifies as the administrative (superuser) login.
@@ -129,7 +129,7 @@ def test_the_backup_login_cannot_restore(engine, pr22_roles, loaded, keypair, tm
     try:
         names = {**pr22_roles, "readall": reader_grant}
         store = LocalStore(tmp_path / "store")
-        with _login_url(engine, names, options="BYPASSRLS", members=("readall",)) as (url, _):
+        with _login_url(engine, names, options="BYPASSRLS", members=("readall",), connect=True) as (url, _):
             assert run_backup(url, keypair / "cert.pem", tmp_path / "spool", store)["status"] == "ok"
             try:
                 drill = run_backup_drill(url, store, keypair / "key.pem", tmp_path / "drill")
@@ -330,3 +330,103 @@ def test_the_runbook_documents_the_three_logins_and_the_restore_order():
                  "Backup login", "Restore"):
         assert term in doc, term
     assert doc.index("--phase roles") < doc.rindex("pg_restore")  # roles before the restore
+
+
+# ── The drill's own checks (ops' suggestions on change 8) ─
+
+
+def _backup_as_admin(engine, loaded, keypair, tmp_path):  # noqa: F811
+    """A verified backup with an app row, taken by the superuser (administrative) login."""
+    from backup import LocalStore, run_backup
+
+    _seed_profile(engine)
+    store = LocalStore(tmp_path / "store")
+    assert run_backup(loaded, keypair / "cert.pem", tmp_path / "spool", store)["status"] == "ok"
+    return store
+
+
+def _restore_databases(engine):
+    with engine.connect() as conn:
+        return conn.execute(text("SELECT count(*) FROM pg_database"
+                                 " WHERE datname LIKE 'perennial_test_restore_%'")).scalar()
+
+
+def test_the_drill_refuses_a_nobypassrls_login_before_restoring(
+    engine, pr22_roles, loaded, keypair, tmp_path  # noqa: F811
+):
+    """The drill's early check: refused before any dump or restore, nothing created."""
+    from restore_drill import ROW_SECURITY_REFUSAL, run_backup_drill
+
+    store = _backup_as_admin(engine, loaded, keypair, tmp_path)
+    before = _restore_databases(engine)
+    with _login_url(engine, pr22_roles, members=("owner",)) as (url, user):
+        with pytest.raises(RuntimeError) as caught:
+            run_backup_drill(url, store, keypair / "key.pem", tmp_path / "drill")
+    assert str(caught.value) == ROW_SECURITY_REFUSAL and user not in str(caught.value)
+    assert _restore_databases(engine) == before
+    assert sorted(p.name for p in (tmp_path / "drill").iterdir()) == ["report.json"]
+    assert '"verified": false' in (tmp_path / "drill" / "report.json").read_text()
+
+
+def test_the_drill_with_roles_follows_the_restore_order(
+    engine, pr22_roles, loaded, keypair, tmp_path, monkeypatch  # noqa: F811
+):
+    """roles=: no schemas after the roles phase; after grants, owner-owned app and API-only policies."""
+    import psycopg
+
+    import restore_drill
+    from restore_drill import run_backup_drill
+
+    store = _backup_as_admin(engine, loaded, keypair, tmp_path)
+    names = role_names("rd")
+    roles = (names["owner"], names["importer"], names["reader"], names["api"])
+    seen = {}
+    real = restore_drill.provision_target
+
+    def inspecting(target, roles_, phase):
+        real(target, roles_, phase)
+        with psycopg.connect(**target) as conn:
+            schemas = {r[0] for r in conn.execute(
+                "SELECT nspname FROM pg_namespace WHERE nspname IN ('perennial', 'app')")}
+            app_owner = conn.execute(
+                "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'app'").fetchone()
+            table_owners = {r[0] for r in conn.execute(
+                "SELECT DISTINCT pg_get_userbyid(relowner) FROM pg_class"
+                " WHERE relnamespace = 'app'::regnamespace AND relkind IN ('r', 'S')")} if app_owner else set()
+            policy_roles = {r[0] for r in conn.execute(
+                "SELECT DISTINCT unnest(roles) FROM pg_policies WHERE schemaname = 'app'")}
+        seen[phase] = (schemas, app_owner and app_owner[0], table_owners, policy_roles)
+
+    monkeypatch.setattr(restore_drill, "provision_target", inspecting)
+    try:
+        drill = run_backup_drill(loaded, store, keypair / "key.pem", tmp_path / "drill", roles=roles)
+        assert drill["verified"] is True
+        assert drill["tables"]["app.profiles"]["rows"] == 1
+        assert seen["roles"][0] == set()  # roles only: no perennial or app schema yet
+        schemas, app_owner, table_owners, policy_roles = seen["grants"]
+        assert schemas == {"perennial", "app"}
+        assert app_owner == names["owner"] and table_owners == {names["owner"]}
+        assert policy_roles == {names["api"]}
+    finally:
+        drop_roles(engine, names.values())
+
+
+def test_the_drill_cli_with_roles_exits_0(engine, pr22_roles, loaded, keypair, tmp_path):  # noqa: F811
+    import json
+    import sys
+
+    store = _backup_as_admin(engine, loaded, keypair, tmp_path)
+    names = role_names("rc")
+    ops = Path(__file__).resolve().parents[2] / "database" / "ops"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(ops / "restore_drill.py"), "--synthetic-only",
+             "--from-store", str(store.root), "--key", str(keypair / "key.pem"),
+             "--output", str(tmp_path / "cli-drill"),
+             "--roles", names["owner"], names["importer"], names["reader"], names["api"]],
+            env=dict(os.environ, TEST_DATABASE_URL=loaded), capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr[-1500:]
+        report = json.loads((tmp_path / "cli-drill" / "report.json").read_text())
+        assert report["verified"] is True and "app.profiles" in report["tables"]
+    finally:
+        drop_roles(engine, names.values())
