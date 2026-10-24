@@ -35,7 +35,11 @@ REQUIRE_DATABASE_TESTS=1 .venv/bin/python -m pytest -q development/backend/tests
 `development/database/ops/provision_roles.py` uses only `OPS_DATABASE_URL` from
 the process environment, never `.env`. It runs each phase in one transaction and
 quotes role/table identifiers through psycopg. Use a dedicated database and
-dedicated group names; the script changes PUBLIC privileges in that database.
+dedicated group names; the script revokes PUBLIC's privileges on that database.
+The exception is a database with schema `auth` (Supabase): there PUBLIC keeps
+`CONNECT` and `TEMPORARY`, because the platform's own logins (Auth, the Data API,
+Storage, the pooler) connect through them, and bootstrap logs a notice that it
+left them.
 It creates three NOLOGIN groups by default:
 
 | Group | Access |
@@ -78,7 +82,10 @@ The administrative login may be a superuser or, as on Supabase, a non-superuser
 `CREATEROLE` login that owns the database. Such a login holds only `ADMIN OPTION` on
 the roles it creates, so bootstrap grants it `SET` on the owner (never `INHERIT`): it
 can then create the owner's schema and re-own objects to the owner, and both phases
-make the grants on the owner's objects as the owner. This needs PostgreSQL 16 or later.
+make the grants on the owner's objects as the owner. After a restore the admin owns
+`perennial` and its tables; the grants phase then gives the owner `CREATE` in the
+schema, re-owns the tables, and re-owns the schema last, the only order such an admin
+can do it in. This needs PostgreSQL 16 or later.
 
 Bootstrap also grants owner CREATE in `public` for Alembic's version table. Grant phase transfers the explicitly listed tables
 and their attached identity sequences to the owner, and fails if the migrated
