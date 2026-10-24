@@ -472,18 +472,30 @@ _MEMBERSHIP = text(
     "SELECT coalesce(array_agg(r.rolname ORDER BY r.rolname), '{}') FROM pg_roles r"
     " WHERE r.rolname <> session_user AND pg_has_role(session_user, r.oid, 'MEMBER')"
 )
-# (tables, writable objects) in perennial. Tables are relkind r/p only. A write
-# is any of: a table-level or column-level write (has_table_privilege sees only
-# table-level grants) or TRIGGER on a table, view, materialized view or foreign
-# table; or USAGE or UPDATE on a sequence (nextval, setval). SELECT on a
-# sequence is a read.
+# (tables, objects held beyond provisioning, callable functions) in perennial.
+# The login holds exactly what provisioning grants, on the objects it grants:
+# reads on tables (relkind r/p, which also counts the tables). Anything else is
+# a path to data or effects through another owner, and refuses:
+# - on a table: any write, TRIGGER or REFERENCES, at table or column level
+#   (has_table_privilege sees only table-level grants);
+# - on a view, materialized view or foreign table: any privilege, SELECT too;
+# - on a sequence: USAGE or UPDATE (nextval, setval); SELECT is a read;
+# - EXECUTE on any perennial function, granted or through PUBLIC.
 _WRITES = text(
     "SELECT count(*) FILTER (WHERE c.relkind IN ('r', 'p')),"
-    " count(*) FILTER (WHERE CASE WHEN c.relkind = 'S'"
-    "  THEN has_sequence_privilege(current_user, c.oid, 'USAGE,UPDATE')"
-    "  ELSE has_table_privilege("
-    "   current_user, c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')"
-    "   OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE') END)"
+    " count(*) FILTER (WHERE CASE"
+    "  WHEN c.relkind = 'S'"
+    "   THEN has_sequence_privilege(current_user, c.oid, 'USAGE,UPDATE')"
+    "  WHEN c.relkind IN ('r', 'p') THEN has_table_privilege(current_user, c.oid,"
+    "    'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')"
+    "   OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE,REFERENCES')"
+    "  ELSE has_table_privilege(current_user, c.oid,"
+    "    'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')"
+    "   OR has_any_column_privilege("
+    "    current_user, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') END),"
+    " (SELECT count(*) FROM pg_proc p"
+    "  JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE pn.nspname = 'perennial'"
+    "  AND has_function_privilege(current_user, p.oid, 'EXECUTE'))"
     " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
     " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
 )
@@ -531,20 +543,22 @@ def check_startup(engine: Engine, api_role: str) -> None:
     """Fail closed unless the login inherits only ``api_role`` and can't write.
 
     Clauses (design note RA-15): 1 attributes of the session role itself;
-    2 transitive membership is exactly {api_role}; 3 no write privilege on any
-    perennial table, column, view, materialized view, foreign table or
-    sequence, and at least one table exists; 4 owns nothing and has no CREATE
-    on the schema or database. Where #22's schema app exists, clause 3 also
-    allows writes only on its six tables (table or column level) and clause 4
-    refuses CREATE on app; USAGE on schema auth (Supabase) is refused. Every
-    failure, including an error while checking, raises the same StartupRefused
-    with no role name, URL or SQL.
+    2 transitive membership is exactly {api_role}; 3 on perennial, nothing
+    beyond provisioning's reads on tables: no write, TRIGGER or REFERENCES on a
+    table or column, no privilege on a view, materialized view or foreign table,
+    no USAGE or UPDATE on a sequence and no EXECUTE on a function; and at least
+    one table exists; 4 owns nothing and has no CREATE on the schema or
+    database. Where #22's schema app exists, clause 3 also allows writes only
+    on its six tables (table or column level) and clause 4 refuses CREATE on
+    app; USAGE on schema auth (Supabase) is refused. Every failure, including
+    an error while checking, raises the same StartupRefused with no role name,
+    URL or SQL.
     """
     try:
         with engine.connect() as conn:
             same, unsafe = conn.execute(_ATTRIBUTES).one()
             members = list(conn.execute(_MEMBERSHIP).scalar_one())
-            tables, writable = conn.execute(_WRITES).one()
+            tables, writable, callable_ = conn.execute(_WRITES).one()
             owned, schema_create, database_create = conn.execute(_OWNERSHIP).one()
             app_writes, app_create, auth_usage = conn.execute(
                 _APP, {"tables": list(APP_TABLES)}
@@ -556,6 +570,7 @@ def check_startup(engine: Engine, api_role: str) -> None:
             and members == [api_role]
             and tables > 0
             and writable == 0
+            and callable_ == 0
             and owned == 0
             and not schema_create
             and not database_create
