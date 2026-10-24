@@ -68,7 +68,7 @@ The API connects with a login role that inherits only `perennial_api`. It does n
   - the `ALTER DEFAULT PRIVILEGES … REVOKE` (`:72`), so a table a future migration adds is never readable by the API until a reviewed change grants it
 
   Column grants are re-applied after every migration, like the rest of the grants.
-- **Provisioning also refuses** if `perennial_api` owns any relation or schema (as #22's `provision_api_role.py:23-27` already checks). It also refuses if any of Supabase's API roles holds a privilege on a table in `perennial` (or `app`, once R2 lands). Their names are a provisioning parameter, defaulting to `("anon", "authenticated", "service_role")`, so tests can pass their own. `REVOKE … FROM PUBLIC` doesn't cover named roles, so this is asserted, not assumed.
+- **Provisioning also refuses** if `perennial_api` owns any relation or schema (as #22's `provision_api_role.py:23-27` already checks). It also refuses if any of Supabase's API roles holds a privilege on a table in `perennial`, a privilege on any of its columns, or `USAGE` on the schema (and the same for `app`, once R2 lands). Their names are a provisioning parameter, defaulting to `("anon", "authenticated", "service_role")`, so tests can pass their own. `REVOKE … FROM PUBLIC` doesn't cover named roles, so this is asserted, not assumed.
 - Provisioning is idempotent. It runs as Supabase's dashboard `postgres` role, which isn't a superuser but already provisions the other three groups. The script creates `perennial_api`, so that role holds ADMIN on it for the login member's `IN ROLE` grant.
 
 **The login role is Bryan's to create** (D3: agents never hold credentials). It must be:
@@ -225,7 +225,7 @@ These three hold under either answer to Bryan's open questions for Jaden (`auth.
   - Every role these tests create has a unique suffix and is dropped in `finally`, as in RA-14c.
   - The clause 1 cases (SUPERUSER, BYPASSRLS) need a test connection that is itself a superuser, because only superusers can create those roles. That holds today: `perennial_test` on the local test server is `rolsuper`, and CI's `POSTGRES_USER` is the image's superuser. The test can rely on it rather than skip.
 - **RA-16** **Read-only transactions.** Each request's transaction is read-only per transaction (`BEGIN READ ONLY`, through `postgresql_readonly=True`), never a session `SET`. The test drives the request-transaction helper directly, with a test engine whose role *could* write, because such a role would fail RA-15 at startup. A write attempted inside it fails with 25006, and the next transaction on the same pooled connection is still read-only.
-- **RA-16b** **Every route goes through the helper.** With the request-transaction helper patched to record its calls, a test hits every `/v1` route once under `create_app()`. It asserts exactly one helper call per route and no other use of the engine. Read-only is then a property of the API, not just of the helper.
+- **RA-16b** **Every route goes through the helper.** With the request-transaction helper patched to record its calls, a test hits every `/v1` route once under `create_app()`. It asserts exactly one helper call per route and no other use of the engine while serving requests. Read-only is then a property of the API, not just of the helper.
 - **RA-17** **Logs and errors.** Logs are JSON (`configure_logging`) and contain no query strings or database URLs. Error bodies have only `detail` and `code`.
 
 **Schema document**
