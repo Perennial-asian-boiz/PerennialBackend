@@ -1,6 +1,8 @@
 """Provision dedicated NOLOGIN owner/importer/reader/api groups using an explicit table policy.
 
-Run bootstrap before migrations and grants after every migration. Administrative
+Run bootstrap before migrations and grants after every migration. Before a
+pg_restore of a whole-database dump, run roles: it only creates the group roles
+that the dump's policies name, because the dump creates its own schemas. Administrative
 credentials come only from OPS_DATABASE_URL; login membership/secrets are deployment-owned.
 """
 import argparse
@@ -66,9 +68,11 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
     """Apply inside the caller's transaction. Existing dedicated roles must be safe.
 
     roles = (owner, importer, reader, api). Every refusal happens before the
-    first change, so a refused run leaves the database as it was.
+    first change, so a refused run leaves the database as it was. Phase roles
+    stops after the role checks and CREATE ROLE, before any database, schema or
+    default-privilege statement (PK-10).
     """
-    if phase not in {"bootstrap", "grants"}:
+    if phase not in {"roles", "bootstrap", "grants"}:
         raise ValueError("Unknown provisioning phase")
     if (len(roles) != 4 or len(set(roles)) != 4
             or any(not r or len(r.encode()) > 63 or r.startswith("pg_") or "\0" in r for r in roles)):
@@ -96,6 +100,8 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
         if not existing:
             conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS")
                          .format(sql.Identifier(role)))
+    if phase == "roles":
+        return
     # Dedicated database: deployment uses authenticated member logins, not PUBLIC access.
     conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database)))
     for role in roles:
@@ -167,7 +173,7 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--phase", choices=("bootstrap", "grants"), required=True)
+    parser.add_argument("--phase", choices=("roles", "bootstrap", "grants"), required=True)
     parser.add_argument("--owner", default="perennial_owner")
     parser.add_argument("--importer", default="perennial_importer")
     parser.add_argument("--reader", default="perennial_reader")

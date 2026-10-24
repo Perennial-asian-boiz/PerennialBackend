@@ -12,7 +12,10 @@ calling it success. Exit codes: 0 ok, 1 failed, 3 skipped_overlap.
 
 The upload target is a stub until the Supabase project exists: --store names a
 local directory standing in for off-site storage. Connection guards are the
-restore drill's: loopback test URLs only, with --synthetic-only attested.
+restore drill's: loopback test URLs only, with --synthetic-only attested. When
+any table has row security, the login must be a superuser or BYPASSRLS (the
+backup login in OPERATIONS.md); otherwise the run fails as rls_bypass_required
+before pg_dump starts.
 """
 
 import argparse
@@ -33,7 +36,7 @@ import psycopg
 from psycopg import sql
 from psycopg.conninfo import make_conninfo
 
-from restore_drill import clean_environment, table_manifest, test_connection
+from restore_drill import bypasses_row_security, clean_environment, table_manifest, test_connection
 
 BACKUP_LOCK = 170097  # beside source (170010+), pipeline (170098), publication (170099)
 SNAPSHOT_RETENTION = timedelta(hours=24)  # every snapshot (OPERATIONS.md, proposed)
@@ -298,6 +301,9 @@ def run_backup(raw, recipient, spool, store, now=datetime.now):
         require_openssl3(env)
         fingerprint = recipient_fingerprint(recipient, env)
         with psycopg.connect(**source, autocommit=True) as admin:
+            if not bypasses_row_security(admin):
+                # The backup login needs BYPASSRLS (decision 34); refuse before pg_dump.
+                raise BackupError("rls_bypass_required")
             if not admin.execute("SELECT pg_try_advisory_lock(%s)", (BACKUP_LOCK,)).fetchone()[0]:
                 report.update(status="skipped_overlap", error_code="backup_in_progress")
                 return report
