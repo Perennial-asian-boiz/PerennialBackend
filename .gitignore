@@ -62,3 +62,4 @@ reddit_cookies.txt
 #youtube stuff
 /credentials
 youtube_cookies.txt
+youtube_sentiments.json

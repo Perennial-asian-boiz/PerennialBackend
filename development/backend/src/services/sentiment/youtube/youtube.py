@@ -1,9 +1,41 @@
+"""
+YouTube sentiment: finds recent videos that match each ticker (YouTube Data API), gets a
+transcript for each video (captions via yt_dlp, or audio via yt_dlp + Whisper), splits the
+transcript into chunks, and scores the chunks with the shared sentiment scorer.
+
+Items are videos. A video's id is its native YouTube video id. Its score is the average of
+its chunk scores, weighted by chunk length in words. Videos that were transcribed are scored
+in batches of SCORE_BATCH_VIDEOS videos (all their chunks go to ONE score_texts call).
+
+Transcripts, metadata and scores are kept in memory only. Besides the results file and the
+log file, the only thing kept on disk is status.json, which maps a video id to "done" (it was
+scored) or "skipped" (it can never be transcribed: private, removed, not English, no speech),
+so a later run does not process the same video again. The results file only covers the videos
+processed in the current run. The scorer needs a file for its output, so a temporary one is
+used and deleted right after. yt_dlp needs scratch files for subtitles/audio and its cookie
+jar; they live in a temporary directory that is deleted at the end of the run (also after a
+crash or Ctrl+C).
+
+At the end of the run (or if it is interrupted or fails part-way) the scores are written
+to a JSON file (default: youtube_sentiment_results.json next to this script, override with
+--output; it is overwritten each run). Format: a list with one object per ticker:
+    [{"ticker": "NVDA", "average_sentiment": 6.12, "post_count": 2,
+      "posts": {"<video id>": 7.4, "<video id>": 4.84}}, ...]
+("posts"/"post_count" hold videos here, so every source script has the same schema.)
+A video that matches several tickers appears under each of them.
+
+Logging: API errors, retries and a brief line per successful request are written to a
+rotating log file (default: youtube.log next to this script, override with --log-file).
+Timestamps are UTC. Item text, credentials and cookies are never logged.
+"""
+
 import os
 import sys
 import json
 import html
 import googleapiclient.discovery
 from googleapiclient.errors import HttpError
+import httplib2
 import yt_dlp
 from faster_whisper import WhisperModel
 import glob
@@ -15,40 +47,33 @@ from dateutil.relativedelta import relativedelta
 from collections import deque
 from pathlib import Path
 import logging
+import logging.handlers
 import asyncio
 import threading
 from dataclasses import dataclass, field
 import shutil
+import tempfile
 import argparse
 import time
 
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
-DATA_DIR = BACKEND_DIR/"data"
-DATA_DIR.mkdir(exist_ok=True)
 UTILS_DIR = BACKEND_DIR/"src"/"utils"
-LOG_DIR = BACKEND_DIR/"logs"
-LOG_DIR.mkdir(exist_ok=True)
 COOKIES_FILE = "youtube_cookies.txt"
-# scratch space for downloaded subtitle/audio files, one sub-folder per ticker.
-TMP_DIR = DATA_DIR/"tmp"
+DATA_DIR = BACKEND_DIR/"data"
 
-# ---- storage -------------------------------------------------------------------------
-# Everything that changes once per VIDEO is stored in append-only JSON Lines files: one
-# complete line per record, flushed + fsynced, so saving one video costs O(1) no matter how
-# much has been collected, and a crash can only ever damage the last (partial) line, which
-# is repaired on the next start. (Same approach the sentiment scorer uses.)
-STATUS_LOG = DATA_DIR/"status.jsonl"            # {"id": ..., "status": "<attempts>" | "skipped"}
-TRANSCRIPT_LOG = DATA_DIR/"transcripts.jsonl"   # {"id", "title", "source", "transcript"}
-LEGACY_STATUS_FILE = DATA_DIR/"status.json"     # old format, imported once (see migrate_legacy)
-# where the sentiment scores (JSON Lines, written by score_texts) are stored.
-SCORES_FILE = DATA_DIR/"youtube_sentiment_scores.jsonl"
-# per-ticker / per-video averaged scores (JSON). The chunk-level scores live in SCORES_FILE.
-VIDEO_SCORES_FILE = DATA_DIR/"youtube_video_sentiment.json"
+# the files this script leaves behind
+STATUS_FILE = DATA_DIR/"status.json"   # {video id: "done" | "skipped"}, kept across runs
+OUTPUT_FILE = Path(__file__).with_name("youtube_sentiments.json")
+LOG_FILE = Path(__file__).with_name("youtube.log")
+LOG_MAX_BYTES = 5_000_000              # rotate at ~5 MB, keep 3 old files
+LOG_BACKUPS = 3
+BODY_SNIPPET = 200                     # max chars of an error response body to log
 
 API_WORKERS = 3          # tickers hitting the YouTube Data API at once
 TRANSCRIPT_WORKERS = 1   # videos being downloaded/transcribed at once; keep low to avoid 429s
 MAX_TRIES = 5            # genuine failed attempts before a video is given up on
+API_RETRIES = 5          # attempts per YouTube Data API request (rate limits / 5xx / network errors)
 SCORE_BATCH_VIDEOS = 10  # transcribed videos collected before one score_texts() call
 
 # The scorer truncates every text to 256 tokens, so long transcripts are split into chunks,
@@ -63,33 +88,69 @@ MIN_TAIL_WORDS = 25      # a final chunk shorter than this is merged into the pr
 if str(UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_DIR))
 from ..sentiment_scorer import score_texts, load_scores
-from ....utils.fetch_tickers import fetch_ticker_list
+from ....utils.fetch_tickers import fetch_ticker_map
+
+log = logging.getLogger("youtube")
+
+
+# ---- logging -------------------------------------------------------------------------
+def setup_logging(path):
+    """Log to a rotating file with UTC timestamps. Safe to call more than once."""
+    if log.handlers:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8"
+    )
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)-7s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ"
+    )
+    formatter.converter = time.gmtime
+    handler.setFormatter(formatter)
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+
+
+def describe_error(error):
+    """ 'ExceptionType: message' cut to BODY_SNIPPET chars, for a single log line """
+    return f"{type(error).__name__}: {' '.join(str(error).split())[:BODY_SNIPPET]}"
+
+
+def http_error_info(error):
+    """
+    (status, first BODY_SNIPPET chars of the response body) of a googleapiclient HttpError.
+    str(HttpError) contains the request URL, and that URL contains the API key, so it is
+    never logged: only the status and the response body are.
+    """
+    status = getattr(getattr(error, "resp", None), "status", None)
+    content = getattr(error, "content", b"")
+    body = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(content)
+    return status, " ".join(body.split())[:BODY_SNIPPET]
+
+
+def api_error_reason(error):
+    """
+    Short, console-safe reason for a failed API call: 'HTTP <status>: <message>' for an
+    HttpError, never its URL (the URL contains the API key).
+    """
+    if isinstance(error, HttpError):
+        status, body = http_error_info(error)
+        try:
+            content = error.content
+            raw = content.decode("utf-8", "replace") if isinstance(content, bytes) else str(content)
+            body = json.loads(raw)["error"]["message"]
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+        return f"HTTP {status}: {' '.join(str(body).split())[:100]}"
+    return describe_error(error)
+
 
 def safe_name(text):
     """ make a ticker safe to use inside a filename (e.g. 'BRK/B' -> 'BRK_B') """
     return re.sub(r"[^\w.\-]", "_", text)
 
-
-def create_logger(ticker):
-    """ creates a logger for a single ticker """
-    logger = logging.getLogger(f"youtube.{safe_name(ticker)}")
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-
-    # Prevent duplicate handlers if called multiple times
-    if logger.handlers:
-        return logger
-
-    formatter = logging.Formatter(
-        "%(asctime)s [%(levelname)s] %(message)s"
-    )
-
-    handler = logging.FileHandler(LOG_DIR/f"{safe_name(ticker)}.log", encoding="utf-8")
-    handler.setFormatter(formatter)
-
-    logger.addHandler(handler)
-
-    return logger
 
 # takes the number of days to look back
 # The default of 7 keeps the original behaviour when --days is not given.
@@ -162,6 +223,17 @@ def is_quota_exceeded(error):
     return "quotaExceeded" in text or "dailyLimitExceeded" in text or "exceeded your quota" in text
 
 
+# YouTube Data API: a short-lived rate limit (HTTP 429, or a 403 "rateLimitExceeded" /
+# "userRateLimitExceeded"). These are worth waiting out and retrying.
+def is_api_rate_limited(error):
+    if not isinstance(error, HttpError):
+        return False
+    status = getattr(getattr(error, "resp", None), "status", None)
+    if status == 429:
+        return True
+    return status == 403 and "ratelimitexceeded" in str(error).lower()
+
+
 # rate-limit state that is SHARED by every ticker (it used to be local variables inside
 # get_transcripts, one set per ticker).
 class RateLimitState:
@@ -174,15 +246,16 @@ class RateLimitState:
     def seconds_remaining(self):
         return max(0.0, self.pause_until - time.monotonic())
 
-    def record_rate_limit(self, logger):
+    def record_rate_limit(self):
         self.consecutive_429s += 1
         # only pause once we have been rate limited several times IN A ROW
         if self.consecutive_429s >= self.config.threshold:
             wait = self.config.sleep_seconds(self.backoff_level)
             self.pause_until = time.monotonic() + wait
-            logger.info(
-                f"pausing ALL workers for {wait/60:.1f} minutes after {self.consecutive_429s} "
-                f"consecutive rate limits (backoff level {self.backoff_level})"
+            log.warning(
+                "rate limited by YouTube: pausing ALL workers for %.1f minutes after %d "
+                "consecutive rate limits (backoff level %d)",
+                wait / 60, self.consecutive_429s, self.backoff_level
             )
             self.consecutive_429s = 0
             self.backoff_level += 1
@@ -227,25 +300,6 @@ def load_json(path, default):
         return json.loads(content)
 
 
-def load_json_safe(path, default):
-    """ like load_json, but a corrupt file gives a warning and the default instead of a crash """
-    try:
-        return load_json(path, default)
-    except (ValueError, OSError) as e:
-        print(f"warning: could not read {path} ({e}); using defaults")
-        return default
-
-
-def save_json_atomic(path, obj):
-    """ write to a temp file, then swap it in, so a crash can't leave a half-written file """
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=4, ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
-
-
 def load_tickers(path):
     """
     Reads tickers from a JSON file. Accepted shapes:
@@ -275,135 +329,97 @@ def load_tickers(path):
     return tickers
 
 
-# ---- append-only JSON Lines helpers ----------------------------------------------------
-
-def repair_tail(path):
-    """ drop a trailing partial line left behind by a crash (every record ends in '\\n') """
-    if not os.path.exists(path):
-        return
-    with open(path, "rb+") as f:
-        data = f.read()
-        keep = data.rfind(b"\n") + 1      # 0 if there is no newline at all
-        if keep != len(data):
-            f.truncate(keep)
-
-
-def append_jsonl(path, record):
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-
-
-def read_jsonl(path):
-    """ all well-formed records of a JSON Lines file, in file order (malformed lines skipped) """
-    records = []
-    if not os.path.exists(path):
-        return records
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(record, dict):
-                records.append(record)
-    return records
-
-
 class Store:
     """
     The ONE shared record of what has been done, keyed by video ID (not by ticker).
 
-    * status:      id -> "<failed attempts so far>" or "skipped" (permanently given up on)
+    In memory only (nothing about a video's content is ever written to disk):
+    * tries:       id -> failed/started attempts during THIS run (retried in-run, up to MAX_TRIES)
     * transcripts: id -> {"id", "title", "source", "transcript"}
     * in_progress: ids a worker is handling right now (so two tickers that matched the same
                    video can't both download it)
     * titles:      id -> title (from the search results)
+    * retries:     id -> how many times the video had to be retried (for the log)
 
-    Every change is appended to its own log and only for the video that changed, so one
-    ticker can never overwrite another ticker's newer values with a stale copy.
+    Persisted in status.json, across runs, so a video is never processed twice:
+    * persisted:   id -> "done" (transcribed AND scored) or "skipped" (permanently unusable).
+                   Partial attempts are never saved: a video that failed all its tries this
+                   run is simply tried again by the next run.
     """
 
-    def __init__(self):
-        repair_tail(STATUS_LOG)
-        repair_tail(TRANSCRIPT_LOG)
-        self.status = {}
+    def __init__(self, status_file):
+        self.status_file = Path(status_file)
+        self.tries = {}
         self.transcripts = {}
         self.in_progress = set()
         self.titles = {}
+        self.retries = {}
+        self.persisted = {}
+        self._load()
 
-        fresh_install = not (STATUS_LOG.exists() or TRANSCRIPT_LOG.exists())
-
-        status_records = read_jsonl(STATUS_LOG)
-        for rec in status_records:
-            if "id" in rec and "status" in rec:
-                self.status[str(rec["id"])] = str(rec["status"])
-        for rec in read_jsonl(TRANSCRIPT_LOG):
-            if rec.get("id"):
-                self.transcripts[rec["id"]] = rec     # later record wins
-
-        if fresh_install:
-            self.migrate_legacy()
-        else:
-            self._compact_status_log(len(status_records))
-
-    def migrate_legacy(self):
-        """ one-time import of the old <ticker>_transcripts.json files and status.json """
-        for path in sorted(DATA_DIR.glob("*_transcripts.json")):
-            for id, entry in load_json_safe(path, {}).items():
-                if id not in self.transcripts and isinstance(entry, dict) and entry.get("transcript"):
-                    self.save_transcript(id, {
-                        "title": entry.get("title", ""),
-                        "source": entry.get("source", ""),
-                        "transcript": entry["transcript"],
-                    })
-        for id, value in load_json_safe(LEGACY_STATUS_FILE, {}).items():
-            # old "done" entries without a transcript are not trusted: that video is redone.
-            # Old attempt counters are kept.
-            if value != "done" and id not in self.status and id not in self.transcripts:
-                self.set_status(id, value)
-
-    def _compact_status_log(self, lines_read):
-        """ the status log gets one line per change; rewrite it once it is mostly stale lines """
-        live = {id: s for id, s in self.status.items() if id not in self.transcripts}
-        if lines_read <= 2 * len(live) + 100:
+    def _load(self):
+        try:
+            raw = load_json(self.status_file, {})
+        except (ValueError, OSError):
+            log.exception("could not read status file %s, starting with an empty one", self.status_file)
             return
-        tmp_path = f"{STATUS_LOG}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            for id, s in live.items():
-                f.write(json.dumps({"id": id, "status": s}) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, STATUS_LOG)
-        self.status = live
+        if not isinstance(raw, dict):
+            log.error("status file %s is not a JSON object, starting with an empty one", self.status_file)
+            return
+        ignored = 0
+        for id, value in raw.items():
+            if value in ("done", "skipped"):
+                self.persisted[str(id)] = value
+            else:
+                ignored += 1      # e.g. attempt counters from the old format
+        log.info("status file loaded path=%s done=%d skipped=%d ignored=%d",
+                 self.status_file, sum(v == "done" for v in self.persisted.values()),
+                 sum(v == "skipped" for v in self.persisted.values()), ignored)
+
+    def _save(self):
+        """ atomic write (temp file in the same folder, then os.replace); never raises """
+        path = self.status_file
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.persisted, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        except Exception:
+            log.exception("failed to write status file %s", path)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
     def attempts(self, id):
-        s = self.status.get(id, "0")
-        return int(s) if s.isdigit() else 0
+        return self.tries.get(id, 0)
+
+    def set_attempts(self, id, n):
+        self.tries[id] = n
 
     def is_finished(self, id):
-        """ done (has a transcript), permanently skipped, or out of tries """
-        if id in self.transcripts:
-            return True
-        s = self.status.get(id, "0")
-        return s == "skipped" or (s.isdigit() and int(s) >= MAX_TRIES)
+        """ done / skipped (now or in an earlier run), has a transcript, or out of tries """
+        return (id in self.transcripts or id in self.persisted
+                or self.tries.get(id, 0) >= MAX_TRIES)
 
-    def set_status(self, id, value):
-        value = str(value)
-        if self.status.get(id) == value:
-            return
-        self.status[id] = value
-        append_jsonl(STATUS_LOG, {"id": id, "status": value})
+    def mark_done(self, id):
+        if self.persisted.get(id) != "done":
+            self.persisted[id] = "done"
+            self._save()
+
+    def mark_skipped(self, id):
+        if self.persisted.get(id) != "skipped":
+            self.persisted[id] = "skipped"
+            self._save()
+
+    def note_retry(self, id):
+        self.retries[id] = self.retries.get(id, 0) + 1
 
     def save_transcript(self, id, entry):
-        # The transcript line is the proof that a video is done (see is_finished), so there
-        # is no separate "done" status that could get out of step after a crash.
-        record = {"id": id, **entry}
-        append_jsonl(TRANSCRIPT_LOG, record)
-        self.transcripts[id] = record
+        self.transcripts[id] = {"id": id, **entry}
 
 
 # googleapiclient clients (httplib2 underneath) are NOT thread-safe, so every API worker
@@ -418,7 +434,7 @@ def build_youtube_client():
 
 # ---- YouTube Data API: one page at a time ---------------------------------------------
 # These two functions are synchronous/blocking; the discovery worker runs them in a thread
-# with asyncio.to_thread() so several tickers can query the API at the same time.
+# (through api_call) so several tickers can query the API at the same time.
 
 def search_page(youtube, query, published_after, page_token):
     """ ONE search page (50 results, 100 quota units). Returns (ids, {id: title}, next_page_token) """
@@ -454,6 +470,54 @@ def fetch_details(youtube, ids):
         for item in response.get("items", []):
             details[item["id"]] = item
     return details
+
+
+class ApiRetriesExhausted(RuntimeError):
+    """ a YouTube Data API request still failed after API_RETRIES attempts (already logged) """
+
+
+async def api_call(label, fn, *args, retries=API_RETRIES):
+    """
+    Runs a blocking YouTube Data API function in a worker thread, with logging and retries:
+    short-lived rate limits, 5xx errors and network errors/timeouts are logged and retried
+    with backoff. Rejected requests (other 4xx, and the daily quota) are logged and re-raised
+    at once. Returns (result, seconds the successful attempt took).
+    """
+    for attempt in range(1, retries + 1):
+        start = time.monotonic()
+        try:
+            result = await asyncio.to_thread(fn, *args)
+        except HttpError as e:
+            status, body = http_error_info(e)
+            if is_quota_exceeded(e):
+                log.error("%s request rejected status=%s body=%s", label, status, body)
+                raise
+            if is_api_rate_limited(e):
+                wait = min(2 ** (attempt - 1), 300)
+                log.warning("%s rate limited status=%s sleeping=%ss attempt=%d/%d body=%s",
+                            label, status, wait, attempt, retries, body)
+                await asyncio.sleep(wait)
+                continue
+            if status is not None and status >= 500:
+                log.warning("%s server error status=%s attempt=%d/%d body=%s",
+                            label, status, attempt, retries, body)
+                await asyncio.sleep(2 ** (attempt - 1))
+                continue
+            log.error("%s request rejected status=%s body=%s", label, status, body)
+            raise
+        except (OSError, httplib2.HttpLib2Error) as e:
+            # OSError covers timeouts, connection errors and TLS errors
+            log.warning("%s network error attempt=%d/%d: %s",
+                        label, attempt, retries, describe_error(e))
+            await asyncio.sleep(2 ** (attempt - 1))
+            continue
+
+        if attempt > 1:
+            log.warning("%s succeeded after %d attempts", label, attempt)
+        return result, time.monotonic() - start
+
+    log.error("%s failed after %d attempts", label, retries)
+    raise ApiRetriesExhausted(f"{label} failed after {retries} attempts")
 
 
 def metadata_entry(item):
@@ -546,10 +610,7 @@ def _download(opts, url):
 @dataclass
 class TickerState:
     ticker: str
-    logger: logging.Logger
-    metadata_file: str
-    transcripts_file: str       # per-ticker export, rewritten once at the end of a run
-    metadata: dict              # video metadata from the YouTube API (saved after every page)
+    metadata: dict              # video metadata from the YouTube API (in memory only)
     tmp_dir: Path
     tmp: str                    # glob-escaped tmp_dir
     ydl_common: dict
@@ -575,25 +636,23 @@ class Context:
     discovery_queue: asyncio.Queue       # round-robin line of tickers waiting for their next search page
     ready_queue: asyncio.Queue           # round-robin line of tickers with videos to transcribe
     score_queue: asyncio.Queue           # ids of transcribed videos waiting to be scored
-    scored_chunks: set = field(default_factory=set)     # chunk texts already in the scores file
+    results: dict                        # {ticker: {video_id: score}}, written to the JSON file at the end
+    video_scores: dict = field(default_factory=dict)    # video id -> score, for every scored video
+    video_tickers: dict = field(default_factory=dict)   # video id -> tickers it was found under
     score_enqueued: set = field(default_factory=set)    # video ids already sent to score_queue
 
 
-def build_ticker_state(ticker):
-    tmp_dir = TMP_DIR/safe_name(ticker)
+def build_ticker_state(ticker, tmp_root):
+    tmp_dir = tmp_root/safe_name(ticker)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     # per-ticker copy of the cookies file (yt_dlp writes cookies back to the file it is given)
     ticker_cookies = tmp_dir/"_cookies.txt"
     shutil.copyfile(COOKIES_FILE, ticker_cookies)
 
-    metadata_file = f"{DATA_DIR}/{safe_name(ticker)}_metadata.json"
     return TickerState(
         ticker=ticker,
-        logger=create_logger(ticker),
-        metadata_file=metadata_file,
-        transcripts_file=f"{DATA_DIR}/{safe_name(ticker)}_transcripts.json",
-        metadata=load_json_safe(metadata_file, {}),
+        metadata={},
         tmp_dir=tmp_dir,
         tmp=glob.escape(str(tmp_dir)),   # escaped so glob() treats the path literally
         ydl_common={**COMMON_YDL_OPTS, "cookiefile": str(ticker_cookies)},
@@ -642,22 +701,30 @@ def schedule_ticker(ctx, state):
 
 
 def register_videos(ctx, state, ids):
-    """ add newly discovered video ids to the ticker, skipping work that is already finished """
+    """
+    Add newly discovered video ids to the ticker, skipping work that is already finished.
+    Returns how many of the ids were new for this ticker.
+    """
     store = ctx.store
+    new = 0
     for id in ids:
         if id in state.seen:
             continue
         state.seen.add(id)
         state.video_ids.append(id)
+        ctx.video_tickers.setdefault(id, set()).add(state.ticker)
+        new += 1
         if store.is_finished(id):
-            state.logger.info(f"{id}: skipping, done or given up on")
-            # transcribed in an earlier run: make sure it was actually scored (a crash may have
-            # stopped that), but only if some of its chunks are missing from the scores file
-            if any(c not in ctx.scored_chunks for c in transcript_chunks(store, id)):
+            log.info("%s: skipping, already done/skipped or out of tries (ticker=%s)", id, state.ticker)
+            if id in ctx.video_scores:
+                # already scored under another ticker this run: it counts under this one too
+                ctx.results.setdefault(state.ticker, {})[id] = ctx.video_scores[id]
+            elif id in store.transcripts:
                 schedule_scoring(ctx, id)
             continue
         state.pending.append(id)
     schedule_ticker(ctx, state)
+    return new
 
 
 # ---- stage 1: video discovery (round robin, one search page per turn) -------------------
@@ -667,23 +734,26 @@ def register_videos(ctx, state, ids):
 # transcript workers carry on with everything that was already discovered.
 
 async def discover_one_page(name, state, youtube, ctx):
-    logger = state.logger
+    ticker = state.ticker
 
     def stop_discovery(reason):
         state.discovery_done = True
-        logger.info(f"{state.ticker}: discovery finished ({reason})")
+        log.info("discovery finished ticker=%s reason=%s pages=%d videos=%d",
+                 ticker, reason, state.pages, len(state.video_ids))
 
     def quota_hit():
         if not ctx.quota_event.is_set():
             ctx.quota_event.set()
             print(f"[{name}] YouTube API quota exhausted: stopping discovery, "
                   f"continuing with the videos already found")
-        logger.warning(f"{state.ticker}: API quota exhausted")
+        log.warning("%s: API quota exhausted", ticker)
 
+    # quoted so YouTube searches for the exact phrase (same as the original script)
+    query = f'"{ticker}"'
     try:
-        # quoted so YouTube searches for the exact phrase (same as the original script)
-        ids, titles, next_token = await asyncio.to_thread(
-            search_page, youtube, f'"{state.ticker}"', ctx.published_after, state.page_token
+        (ids, titles, next_token), elapsed = await api_call(
+            f"search.list ticker={ticker} page={state.pages + 1}",
+            search_page, youtube, query, ctx.published_after, state.page_token
         )
     except Exception as e:
         if is_quota_exceeded(e):
@@ -692,34 +762,43 @@ async def discover_one_page(name, state, youtube, ctx):
         else:
             # one failing ticker (bad query, network error...) is logged and skipped instead of
             # crashing the whole run; videos it already found are still processed.
-            logger.error(f"{state.ticker}: API search failed: {e}")
-            print(f"[{name}] {state.ticker}: API search failed ({e})")
+            if not isinstance(e, (HttpError, ApiRetriesExhausted)):
+                log.exception("%s: unexpected error during API search", ticker)   # others were logged by api_call
+            print(f"[{name}] {ticker}: API search failed ({api_error_reason(e)})")
             stop_discovery("error")
         return
 
     state.page_token = next_token
     state.pages += 1
+    log.info("search ok q=%s page=%d videos=%d more=%s elapsed=%.2fs",
+             query, state.pages, len(ids), "yes" if next_token else "no", elapsed)
     ctx.store.titles.update(titles)
     # the videos go to the transcript workers BEFORE the details call, so a quota error there
     # can't cost us the videos we just found
-    register_videos(ctx, state, ids)
-    print(f"[{name}] {state.ticker}: page {state.pages}, {len(ids)} videos "
+    new = register_videos(ctx, state, ids)
+    log.info("page done ticker=%s page=%d fetched=%d new=%d total=%d",
+             ticker, state.pages, len(ids), new, len(ctx.video_tickers))
+    print(f"[{name}] {ticker}: page {state.pages}, {len(ids)} videos "
           f"({len(state.video_ids)} total)")
 
     new_ids = [id for id in ids if id not in state.metadata]
     if new_ids:
         try:
-            details = await asyncio.to_thread(fetch_details, youtube, new_ids)
+            details, elapsed = await api_call(
+                f"videos.list ticker={ticker} ids={len(new_ids)}",
+                fetch_details, youtube, new_ids
+            )
             for id in new_ids:
                 item = details.get(id)
                 if item is not None:           # None = video removed in between
                     state.metadata[id] = metadata_entry(item)
-            save_json_atomic(state.metadata_file, state.metadata)
+            log.info("details ok ticker=%s ids=%d returned=%d elapsed=%.2fs",
+                     ticker, len(new_ids), len(details), elapsed)
         except Exception as e:
             if is_quota_exceeded(e):
                 quota_hit()
-            else:
-                logger.error(f"{state.ticker}: video details failed: {e}")
+            elif not isinstance(e, (HttpError, ApiRetriesExhausted)):
+                log.exception("%s: unexpected error fetching video details", ticker)
 
     if next_token and not ctx.quota_event.is_set() and not ctx.stop_event.is_set():
         ctx.discovery_queue.put_nowait(state)      # back of the line
@@ -746,7 +825,23 @@ async def api_worker(name, ctx):
 # ---- stage 2: transcripts ---------------------------------------------------------------
 
 def refund_attempt(store, id):
-    store.set_status(id, max(0, store.attempts(id) - 1))
+    store.set_attempts(id, max(0, store.attempts(id) - 1))
+
+
+def retry_later(state, id, ctx, reason):
+    """
+    A genuine failed attempt for this video (it was already counted when processing started).
+    While tries are left the video goes to the back of the ticker's line; after MAX_TRIES
+    it is given up on (is_finished() then returns True).
+    """
+    store = ctx.store
+    attempt = store.attempts(id)
+    if attempt < MAX_TRIES:
+        store.note_retry(id)
+        state.pending.append(id)
+        log.warning("%s: %s attempt=%d/%d, will retry", id, reason, attempt, MAX_TRIES)
+    else:
+        log.error("%s: %s; failed after all %d attempts, giving up", id, reason, MAX_TRIES)
 
 
 def handle_ytdlp_error(state, id, error, ctx, stage):
@@ -755,20 +850,24 @@ def handle_ytdlp_error(state, id, error, ctx, stage):
     processing started, so:
       * rate limited -> YouTube's fault: give the attempt back and retry later
       * permanent    -> the video is gone/private/...: never try it again
-      * anything else-> the counted attempt stands (after MAX_TRIES it is given up on)
+      * anything else-> the counted attempt stands (retried while tries are left)
     """
-    logger = state.logger
     store = ctx.store
+    attempt = store.attempts(id)
+    detail = describe_error(error)
     if is_rate_limited(error):
-        ctx.rate.record_rate_limit(logger)
+        kind = "bot check (cookies may be expired)" if "not a bot" in str(error) else "rate limited (429)"
+        ctx.rate.record_rate_limit()
         refund_attempt(store, id)
+        store.note_retry(id)
         state.pending.append(id)
-        logger.warning(f"{id}: {stage} rate limited by YouTube, retrying later")
+        log.warning("%s: ytdlp %s %s attempt=%d/%d, retrying later: %s",
+                    id, stage, kind, attempt, MAX_TRIES, detail)
     elif is_permanent_failure(error):
-        store.set_status(id, "skipped")
-        logger.warning(f"{id}: {stage} failed permanently, skipping video: {error}")
+        store.mark_skipped(id)
+        log.warning("%s: ytdlp %s failed permanently, skipping video: %s", id, stage, detail)
     else:
-        logger.error(f"{id}: {stage} failed (attempt {store.attempts(id)}/{MAX_TRIES}): {error}")
+        retry_later(state, id, ctx, f"ytdlp {stage} failed: {detail}")
 
 
 # processes exactly ONE video and returns; transcript_worker() puts the ticker at the back
@@ -780,10 +879,10 @@ async def process_next_video(state, ctx):
 
     # the check uses the shared store, so a video that matched several tickers is only done once
     if store.is_finished(id):
-        state.logger.info(f"{id}: skipping, already done or given up on")
+        log.info("%s: skipping, already done or given up on (ticker=%s)", id, state.ticker)
         return
     if id in store.in_progress:
-        state.logger.info(f"{id}: skipping, another worker is already processing it")
+        log.info("%s: skipping, another worker is already processing it (ticker=%s)", id, state.ticker)
         return
 
     store.in_progress.add(id)
@@ -800,22 +899,23 @@ async def process_next_video(state, ctx):
 
 
 async def process_video(state, id, ctx):
-    logger = state.logger
     store = ctx.store
     url = f"https://www.youtube.com/watch?v={id}"
 
     # Count this attempt NOW, so a video that crashes the whole process is still given up on
     # eventually. It is handed back if the attempt turns out to be YouTube's fault.
-    store.set_status(id, store.attempts(id) + 1)
+    store.set_attempts(id, store.attempts(id) + 1)
 
     # retrieve transcript metadata (cached in state so a retry after a 429 doesn't repeat it)
     if id not in state.transcript_metadata:
-        logger.info(f"{id}: processing metadata")
+        start = time.monotonic()
         try:
             info = await asyncio.to_thread(_extract_info, url, state.ydl_common)
-            logger.info(f"{id}: yt_dlp metadata success")
         except Exception as e:
             handle_ytdlp_error(state, id, e, ctx, "metadata")
+            return
+        if not info:
+            retry_later(state, id, ctx, f"metadata lookup returned no info (unexpected structure) url={url}")
             return
 
         manual = info.get("subtitles", {})
@@ -834,6 +934,8 @@ async def process_video(state, id, ctx):
             state.transcript_metadata[id] = ("automatic", english_automatic)
         else:
             state.transcript_metadata[id] = ("audio", None)
+        log.info("ytdlp metadata ok video=%s ticker=%s captions=%s elapsed=%.1fs",
+                 id, state.ticker, state.transcript_metadata[id][0], time.monotonic() - start)
 
     await interruptible_sleep(ctx.stop_event, random.uniform(4,7))
     if ctx.stop_event.is_set():
@@ -888,21 +990,23 @@ async def process_video(state, id, ctx):
         try:
             os.remove(old_path)
         except OSError:
-            logger.warning(f"{id}: could not remove stale file {old_path}")
+            log.warning("%s: could not remove stale file %s", id, old_path)
 
+    start = time.monotonic()
     try:
         await asyncio.to_thread(_download, opts, url)
     except Exception as e:
         handle_ytdlp_error(state, id, e, ctx, "download")
         return
+    log.info("ytdlp download ok video=%s ticker=%s source=%s elapsed=%.1fs",
+             id, state.ticker, src_type, time.monotonic() - start)
 
     if src_type == "text":
         matches = sorted(glob.glob(f"{tmp}/{id}*.vtt"))
         if not matches:
-            logger.error(f"{id}: No text matches found")
+            retry_later(state, id, ctx, f"download ok but no subtitle (.vtt) file was written url={url}")
             return
         result = parse_vtt(matches[0])
-        logger.info(f"{id}: Success, yt_dlp downloaded text transcript")
     else:
         matches = sorted(glob.glob(f"{tmp}/{id}.*"))
         matches = [
@@ -910,31 +1014,35 @@ async def process_video(state, id, ctx):
             if path.endswith((".mp3", ".m4a", ".webm", ".opus", ".wav"))
         ]
         if not matches:
-            logger.error(f"{id}: No audio matches found")
+            retry_later(state, id, ctx, f"download ok but no audio file was written url={url}")
             return
+        start = time.monotonic()
         try:
             result, language, probability = await asyncio.to_thread(transcribe, matches[0])
         except Exception as e:
-            logger.error(f"{id}: whisper transcription failed: {e}")
+            retry_later(state, id, ctx, f"whisper transcription failed: {describe_error(e)}")
             return
         if result is None:
             # not English: drop the video for good (no transcript saved, never retried)
-            store.set_status(id, "skipped")
-            logger.info(f"{id}: dropped, whisper detected language '{language}' "
-                        f"(p={probability:.2f}), not English")
+            store.mark_skipped(id)
+            log.info("%s: dropped, whisper detected language '%s' (p=%.2f), not English",
+                     id, language, probability)
             return
-        logger.info(f"{id}: Success, yt_dlp downloaded video audio and was transcibed "
-                    f"(language {language}, p={probability:.2f})")
+        log.info("whisper ok video=%s language=%s p=%.2f elapsed=%.1fs",
+                 id, language, probability, time.monotonic() - start)
 
     if not result or not result.strip():
         # deterministic (no speech / empty captions), so retrying would not help
-        store.set_status(id, "skipped")
-        logger.warning(f"{id}: empty transcript, skipping video")
+        store.mark_skipped(id)
+        log.warning("%s: transcript is empty after parsing (source=%s), skipping video url=%s",
+                    id, src_type, url)
         return
 
-    # ONE appended line: the finished transcript is safe on disk from here on
     store.save_transcript(id, {"title": title, "source": src_type, "transcript": result})
-    logger.info(f"{id}: Done")
+    if store.retries.get(id):
+        log.warning("%s: succeeded after %d attempts", id, store.retries[id] + 1)
+    log.info("video done video=%s ticker=%s source=%s words=%d",
+             id, state.ticker, src_type, len(result.split()))
     ctx.rate.record_success()
     state.completed += 1
     schedule_scoring(ctx, id)
@@ -950,7 +1058,7 @@ async def transcript_worker(name, ctx):
         state = await ctx.ready_queue.get()
         try:
             if state is None or ctx.stop_event.is_set():
-                break   # sentinel, or shutdown requested: leave remaining videos for the next run
+                break   # sentinel, or shutdown requested: leave remaining videos unprocessed
 
             await wait_if_paused(ctx.rate, ctx.stop_event)
             if ctx.stop_event.is_set():
@@ -959,7 +1067,8 @@ async def transcript_worker(name, ctx):
             try:
                 await process_next_video(state, ctx)
             except Exception as e:
-                state.logger.error(f"{state.ticker}: transcript gathering failed: {e}")
+                log.exception("%s: transcript gathering failed (%d videos scored so far)",
+                              state.ticker, len(ctx.video_scores))
                 print(f"[{name}] {state.ticker}: transcript gathering failed ({e})")
 
             if state.pending and not ctx.stop_event.is_set():
@@ -969,6 +1078,8 @@ async def transcript_worker(name, ctx):
                 # ticker back in the line itself (schedule_ticker)
                 state.scheduled = False
                 if state.discovery_done:
+                    log.info("transcripts finished ticker=%s new_this_run=%d",
+                             state.ticker, state.completed)
                     print(f"[{name}] {state.ticker}: transcripts finished "
                           f"({state.completed} new this run)")
         finally:
@@ -976,32 +1087,75 @@ async def transcript_worker(name, ctx):
 
 
 # ---- stage 3: scoring, one batch of finished videos at a time ---------------------------
+
+def _score_texts_temp(texts):
+    """Run score_texts on `texts` and return {text: score}.
+
+    score_texts only reports results by writing a file, so the output goes to a
+    temporary directory that is deleted as soon as the scores are read back
+    (also on error).
+    """
+    with tempfile.TemporaryDirectory(prefix="yt_scores_") as tmp:
+        path = os.path.join(tmp, "scores.jsonl")
+        score_texts(texts, path, resume=False)
+        return load_scores(path)
+
+
+def video_score(chunks, scores):
+    """
+    A video's score: the average of its chunk scores weighted by chunk length in words.
+    `scores` is {chunk_text: score}. Returns (score, chunks_scored), or (None, 0) if none of
+    the chunks has a score.
+    """
+    total, weight, n = 0.0, 0, 0
+    for chunk in chunks:
+        score = scores.get(chunk)
+        if score is None:        # e.g. a malformed line was skipped when reading the file
+            continue
+        w = len(chunk.split())
+        total += score * w
+        weight += w
+        n += 1
+    if n == 0:
+        return None, 0
+    return round(total / weight, 2), n
+
+
 # Runs next to the transcript workers. Finished videos are collected, and every
 # SCORE_BATCH_VIDEOS videos (and once more at the very end) their chunks go to ONE
-# score_texts() call. Only one call ever runs at a time: score_texts appends to a single file
-# and repairs its tail on entry, so two concurrent calls could damage each other's lines.
-# Returns whatever score_texts() returned last (the scores file path).
-async def scoring_worker(ctx, scores_file):
+# score_texts() call. Only one call ever runs at a time. The scores are recorded in
+# ctx.results under every ticker the video was found under.
+async def scoring_worker(ctx):
     batch = []
-    last_result = None
 
     async def flush():
-        nonlocal batch, last_result
+        nonlocal batch
         ids, batch = batch, []
-        chunks = []
-        for id in ids:
-            chunks.extend(transcript_chunks(ctx.store, id))
-        chunks = [c for c in dict.fromkeys(chunks) if c not in ctx.scored_chunks]
+        by_video = {id: transcript_chunks(ctx.store, id) for id in ids}
+        chunks = list(dict.fromkeys(c for cs in by_video.values() for c in cs))
         if not chunks:
             return
         print(f"[scoring] {len(chunks)} chunk(s) from {len(ids)} video(s)...")
+        start = time.monotonic()
         try:
-            last_result = await asyncio.to_thread(score_texts, chunks, str(scores_file))
-            ctx.scored_chunks.update(chunks)
+            scores = await asyncio.to_thread(_score_texts_temp, chunks)
         except Exception as e:
-            # nothing is lost: the transcripts are saved, and the next run scores whatever
-            # is missing from the scores file
-            print(f"[scoring] batch failed ({e}); it will be retried on the next run")
+            # nothing is kept on disk, so these videos simply get no score in this run
+            log.exception("scoring failed for a batch of %d videos (%d chunks); they get no score",
+                          len(ids), len(chunks))
+            print(f"[scoring] batch failed ({e}); these videos will not be scored")
+            return
+        for id, vid_chunks in by_video.items():
+            score, _n = video_score(vid_chunks, scores)
+            if score is None:
+                log.warning("%s: no chunk scores came back (%d chunks)", id, len(vid_chunks))
+                continue
+            ctx.video_scores[id] = score
+            for ticker in ctx.video_tickers.get(id, ()):
+                ctx.results.setdefault(ticker, {})[id] = score
+            ctx.store.mark_done(id)     # only now: transcribed AND scored
+        log.info("scored batch videos=%d chunks=%d elapsed=%.1fs",
+                 len(ids), len(chunks), time.monotonic() - start)
 
     while True:
         id = await ctx.score_queue.get()
@@ -1012,85 +1166,54 @@ async def scoring_worker(ctx, scores_file):
         if len(batch) >= SCORE_BATCH_VIDEOS:
             await flush()
 
-    return last_result
+
+# ---- results file -----------------------------------------------------------------------
+def build_report(results, tickers):
+    """List of {ticker, average_sentiment, post_count, posts} for every queried ticker.
+
+    Tickers with no videos are included with average_sentiment null. The keys are called
+    "posts"/"post_count" (they hold videos here) so every source script has the same schema.
+    """
+    report = []
+    for ticker in sorted(set(tickers)):
+        posts = results.get(ticker, {})
+        average = round(sum(posts.values()) / len(posts), 2) if posts else None
+        report.append({
+            "ticker": ticker,
+            "average_sentiment": average,
+            "result_count": len(posts),
+            "results": posts,
+        })
+    return report
 
 
-def collect_video_chunks(states, store):
-    """
-    Returns {ticker: {video_id: {"title": ..., "chunks": [str, ...]}}} for every video found
-    in this run's time window that has a finished, non-empty transcript (including ones
-    transcribed in earlier runs, or under another ticker).
-    """
-    by_ticker = {}
-    for s in states:
-        videos = {}
-        for id in s.video_ids:
-            chunks = transcript_chunks(store, id)
-            if chunks:
-                videos[id] = {"title": store.transcripts[id].get("title", ""), "chunks": chunks}
-        if videos:
-            by_ticker[s.ticker] = videos
-    return by_ticker
-
-
-def aggregate_scores(by_ticker, scores):
-    """
-    Turns chunk scores ({chunk_text: score}, from load_scores) into per-video and per-ticker
-    scores. A video's score is the average of its chunk scores weighted by chunk length in
-    words; a ticker's score is the plain average of its video scores.
-    """
-    out = {}
-    for ticker, videos in by_ticker.items():
-        scored = {}
-        for id, v in videos.items():
-            total, weight, n = 0.0, 0, 0
-            for chunk in v["chunks"]:
-                score = scores.get(chunk)
-                if score is None:        # e.g. a malformed line was skipped when reading the file
-                    continue
-                w = len(chunk.split())
-                total += score * w
-                weight += w
-                n += 1
-            if n == 0:
-                continue
-            scored[id] = {
-                "title": v["title"],
-                "score": round(total / weight, 2),
-                "chunks_scored": n,
-                "chunks_total": len(v["chunks"]),
-            }
-        if scored:
-            out[ticker] = {
-                "score": round(sum(x["score"] for x in scored.values()) / len(scored), 2),
-                "videos": scored,
-            }
-    return out
-
-
-def export_ticker_transcripts(state, store):
-    """
-    Keeps the per-ticker <ticker>_transcripts.json files (same format as before) up to date for
-    anything else that reads them. Written ONCE per ticker at the end of a run, atomically; the
-    append-only transcripts.jsonl is the real record, so a crash before this loses nothing.
-    """
-    existing = load_json_safe(state.transcripts_file, {})
-    changed = False
-    for id in state.video_ids:
-        record = store.transcripts.get(id)
-        if record is None:
-            continue
-        entry = {k: v for k, v in record.items() if k != "id"}
-        if existing.get(id) != entry:
-            existing[id] = entry
-            changed = True
-    if changed:
-        save_json_atomic(state.transcripts_file, existing)
+def write_results(path, results, tickers):
+    """Write the report as JSON. The file is replaced atomically, so a crash
+    mid-write never leaves a half-written file. Never raises."""
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        report = build_report(results, tickers)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, path)
+        log.info("results written path=%s tickers=%d videos=%d",
+                 path, len(report), sum(r["post_count"] for r in report))
+        print(f"Results saved to {path}")
+    except Exception:
+        log.exception("failed to write results to %s", path)
+        print(f"Failed to write results to {path} (see log).")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 # sets stop_event after the time limit. Everything else reacts to the event.
 async def stop_after(minutes, stop_event):
     await asyncio.sleep(minutes * 60)
+    log.info("time limit of %g minute(s) reached, finishing videos in progress", minutes)
     print(f"\nTime limit of {minutes:g} minute(s) reached. Finishing the videos currently "
           f"in progress, saving, then shutting down...")
     stop_event.set()
@@ -1109,66 +1232,85 @@ def print_summary(states, stopped_early, quota_hit):
               f"{s.completed} transcribed this run, {len(s.pending)} video(s) left for next run")
 
 
-async def async_main(time_limit_minutes=None, days=7, scores_file=SCORES_FILE):
+async def async_main(time_limit_minutes=None, days=7, output_path=OUTPUT_FILE, status_file=STATUS_FILE):
     """
     Discovers videos (round robin over the tickers), transcribes them, and scores the
-    transcripts in batches while the run is still going. Returns whatever score_texts()
-    returns (the path of the chunk-level scores file), or None if no scores exist. Per-video and
-    per-ticker averages are additionally written to VIDEO_SCORES_FILE.
+    transcripts in batches while the run is still going. At the end (also after an error or
+    Ctrl+C) the per-ticker results are written to `output_path`. Returns that path, or None if
+    no video could be scored.
     """
-    tickers = await fetch_ticker_list()
+    if not os.getenv("YOUTUBE_API_KEY"):
+        log.error("missing YOUTUBE_API_KEY, cannot start")
+        raise SystemExit("Set YOUTUBE_API_KEY in your .env file.")
+
+    ticker_map = await fetch_ticker_map()      # {company name: SYMBOL}; only the symbols are used
+    tickers = list(dict.fromkeys(ticker_map.values())) if ticker_map else []
     if not tickers:
+        log.error("no tickers loaded: the ticker file is missing, unreadable, not a "
+                  "{company name: ticker} object, or empty")
         raise SystemExit("Could not find, read, or parse any tickers from the ticker source")
+    log.info("tickers loaded source=file count=%d", len(tickers))
+    log.info("auth: YouTube API key and cookies file are present (values not logged)")
     print(f"Searching for {len(tickers)} tickers: {', '.join(tickers)} "
           f"(videos from the last {days:g} day(s))")
 
-    states = []
-    for ticker in tickers:
-        try:
-            states.append(build_ticker_state(ticker))
-        except Exception as e:
-            print(f"{ticker}: setup failed ({e}); skipping this ticker")
-    if not states:
-        return None
+    results = {}        # {ticker: {video_id: score}}, written to the JSON file at the end
+    video_scores = {}   # video id -> score, one entry per unique scored video
+    run_start = time.monotonic()
+    published_after = get_published_after(days)
+    log.info("run start tickers=%s days=%g published_after=%s time_limit_min=%s",
+             tickers, days, published_after, time_limit_minutes)
 
-    store = Store()
+    store = Store(status_file)
     ctx = Context(
         store=store,
         rate=RateLimitState(BackoffConfig()),
-        published_after=get_published_after(days),
+        published_after=published_after,
         stop_event=asyncio.Event(),
         quota_event=asyncio.Event(),
         discovery_queue=asyncio.Queue(),
         ready_queue=asyncio.Queue(),
         score_queue=asyncio.Queue(),
+        results=results,
+        video_scores=video_scores,
     )
-    # chunks that already have a score, so earlier runs' videos aren't scored again
-    if os.path.exists(scores_file):
-        ctx.scored_chunks = set(load_scores(scores_file))
 
-    for state in states:
-        ctx.discovery_queue.put_nowait(state)
-
-    # never start more API workers than there are tickers
-    n_api = max(1, min(API_WORKERS, len(states)))
-    n_transcript = max(1, TRANSCRIPT_WORKERS)
-
+    # scratch space for yt_dlp (subtitle/audio files, cookie copies); always deleted at the end
+    tmp_root = Path(tempfile.mkdtemp(prefix="yt_tmp_"))
+    states = []
     timer_task = None
-    if time_limit_minutes is not None:
-        timer_task = asyncio.create_task(stop_after(time_limit_minutes, ctx.stop_event))
 
-    api_tasks = [
-        asyncio.create_task(api_worker(f"api-{i+1}", ctx))
-        for i in range(n_api)
-    ]
-    transcript_tasks = [
-        asyncio.create_task(transcript_worker(f"transcript-{i+1}", ctx))
-        for i in range(n_transcript)
-    ]
-    scoring_task = asyncio.create_task(scoring_worker(ctx, scores_file))
-
-    result = None
     try:
+        for ticker in tickers:
+            try:
+                states.append(build_ticker_state(ticker, tmp_root))
+            except Exception as e:
+                log.exception("%s: setup failed, skipping this ticker", ticker)
+                print(f"{ticker}: setup failed ({e}); skipping this ticker")
+        if not states:
+            log.error("no ticker could be set up, nothing to do")
+            return None
+
+        for state in states:
+            ctx.discovery_queue.put_nowait(state)
+
+        # never start more API workers than there are tickers
+        n_api = max(1, min(API_WORKERS, len(states)))
+        n_transcript = max(1, TRANSCRIPT_WORKERS)
+
+        if time_limit_minutes is not None:
+            timer_task = asyncio.create_task(stop_after(time_limit_minutes, ctx.stop_event))
+
+        api_tasks = [
+            asyncio.create_task(api_worker(f"api-{i+1}", ctx))
+            for i in range(n_api)
+        ]
+        transcript_tasks = [
+            asyncio.create_task(transcript_worker(f"transcript-{i+1}", ctx))
+            for i in range(n_transcript)
+        ]
+        scoring_task = asyncio.create_task(scoring_worker(ctx))
+
         # discovery: every ticker has had all its pages, or the quota / time limit ended it
         await ctx.discovery_queue.join()
         for _ in range(n_api):
@@ -1192,44 +1334,49 @@ async def async_main(time_limit_minutes=None, days=7, scores_file=SCORES_FILE):
 
         # everything is transcribed: score the last (partial) batch
         ctx.score_queue.put_nowait(None)
-        result = await scoring_task
+        await scoring_task
+    except asyncio.CancelledError:
+        # Ctrl+C: asyncio cancels the main task; the finally block below still saves the results
+        log.warning("run interrupted after %d videos scored", len(video_scores))
+        raise
+    except Exception:
+        log.exception("run aborted after %d videos scored", len(video_scores))
+        raise
     finally:
+        # results first, so a problem in the cleanup below can never cost us the scores
+        write_results(output_path, results, tickers)
         if timer_task is not None:
             timer_task.cancel()
         for s in states:
             cleanup_ticker(s)
-            try:
-                export_ticker_transcripts(s, store)
-            except Exception as e:
-                print(f"{s.ticker}: could not export transcripts file ({e})")
-        print_summary(states, ctx.stop_event.is_set(), ctx.quota_event.is_set())
+        if states:
+            print_summary(states, ctx.stop_event.is_set(), ctx.quota_event.is_set())
+        shutil.rmtree(tmp_root, ignore_errors=True)
 
-    # score_texts() was not needed this run if everything had been scored before; the scores file
-    # still exists then, and is what the averages are built from.
-    scores_path = result or (str(scores_file) if os.path.exists(scores_file) else None)
-    if scores_path is None:
+    log.info("run finished unique_videos=%d elapsed=%.1fs",
+             len(video_scores), time.monotonic() - run_start)
+    if not video_scores:
         print("\nNo transcripts available to score.")
         return None
 
-    by_ticker = collect_video_chunks(states, store)
-    chunk_scores = await asyncio.to_thread(load_scores, scores_path)
-    aggregate = aggregate_scores(by_ticker, chunk_scores)
-    save_json_atomic(VIDEO_SCORES_FILE, aggregate)
-    print(f"\nChunk-level sentiment scores: {scores_path}")
-    print(f"Per-video/per-ticker averages written to: {VIDEO_SCORES_FILE}")
-    for ticker, info in aggregate.items():
-        print(f"  {ticker}: {info['score']} (avg of {len(info['videos'])} video(s))")
+    print()
+    for ticker in sorted(results):
+        scores = results[ticker]
+        print(f"  {ticker}: {round(sum(scores.values()) / len(scores), 2)} "
+              f"(avg of {len(scores)} video(s))")
 
-    return scores_path
+    return str(output_path)
 
 
-def run(time_limit_minutes=None, days=7, scores_file=SCORES_FILE):
+def run(time_limit_minutes=None, days=7, output_path=OUTPUT_FILE, log_file=LOG_FILE,
+        status_file=STATUS_FILE):
     """
     Synchronous entry point for other scripts: fetch YouTube transcripts for every ticker
-    in tickers.json, score them, and return what score_texts() returns (the scores file path).
-    Read the results back with sentiment_scorer.load_scores(<returned path>).
+    in tickers.json, score them, write the results JSON to `output_path` and return that
+    path (None if no video could be scored).
     """
-    return asyncio.run(async_main(time_limit_minutes, days, scores_file))
+    setup_logging(log_file)
+    return asyncio.run(async_main(time_limit_minutes, days, output_path, status_file))
 
 
 def main():
@@ -1251,10 +1398,23 @@ def main():
         help="Only consider videos published within this many days (default: 7)"
     )
     parser.add_argument(
-        "--scores-file",
+        "--output",
         type=str,
-        default=str(SCORES_FILE),
-        help=f"Where to write the sentiment scores (default: {SCORES_FILE})"
+        default=str(OUTPUT_FILE),
+        help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} next to this script; "
+             f"overwritten each run)"
+    )
+    parser.add_argument(
+        "--status-file",
+        type=str,
+        default=str(STATUS_FILE),
+        help=f"JSON file that remembers which videos are done/skipped across runs (default: {STATUS_FILE})"
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default=str(LOG_FILE),
+        help=f"Where to write the log (default: {LOG_FILE.name} next to this script)"
     )
     args = parser.parse_args()
     if args.time is not None and args.time <= 0:
@@ -1262,12 +1422,19 @@ def main():
     if args.days <= 0:
         parser.error("--days must be greater than 0")
 
+    setup_logging(args.log_file)
+
     # Fail early with a clear message instead of
     # starting a long run and crashing on the first ticker.
     if not Path(COOKIES_FILE).is_file():
+        log.error("cookies file not found: %s", COOKIES_FILE)
         raise SystemExit(f"Cookies file not found: {COOKIES_FILE}")
 
-    return run(args.time, args.days, args.scores_file)
+    try:
+        return run(args.time, args.days, args.output, args.log_file, args.status_file)
+    except KeyboardInterrupt:
+        log.info("run stopped by user")
+        print("Stopped.")
 
 if __name__ == "__main__":
     main()
