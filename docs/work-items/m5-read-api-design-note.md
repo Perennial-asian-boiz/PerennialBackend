@@ -290,7 +290,7 @@ Bryan's open RLS/JWT questions for Jaden (`auth.uid()` vs `request.jwt.claim.sub
 ### One installer, used by both apps
 
 `read.install(app, config)` installs everything, and both `create_app()` and #22's integrated app call it (checker RL-B):
-- uvicorn's `ProxyHeadersMiddleware`, with `trusted_hosts` from the validated trusted-proxy setting
+- uvicorn's `ProxyHeadersMiddleware`, with `trusted_hosts` from the validated trusted-proxy setting. **`read.install` is the only place it is added.** Neither `create_app()` nor #22's `app.py` adds it any other way, and uvicorn's own proxy handling is off (see the run commands below). One middleware means one trust decision.
 - the limiter state on `app.state`, so state is **per app instance**, never module-level. Each `create_app()` starts empty, and tests can't leak buckets into each other.
 - the configuration and its startup validation (RL-11)
 
@@ -387,6 +387,7 @@ Each limit runs **before any other dependency or validation that touches the eng
 - **RL-10** **Bounded memory.** With `max_clients = K`, K + M distinct clients never leave more than K buckets of a kind, and an evicted client starts again with a full bucket.
 - **RL-14** **Fails closed without the installer.** On an app where `read.install` didn't run, a request to a limited route returns `503 rate_limiter_missing` and does no database work.
 - **RL-15** **Same behaviour in both apps.** The integrated #22 app limits and keys exactly as `create_app()` does, through `read.install`. This is the RL side of the #22 packet's RB-5d.
+- **RL-15b** **One proxy middleware.** The middleware stacks of both `create_app()` and the integrated app contain exactly one `ProxyHeadersMiddleware`, the one `read.install` added. `python -m src.api` passes `proxy_headers=False` (patched `uvicorn.run`).
 
 **Configuration, docs and logs**
 - **RL-11** **The app's own validation.** Uvicorn silently accepts invalid trusted-proxy entries, so the app validates them itself. The limits come from configuration. These refuse at startup with a fixed error:
