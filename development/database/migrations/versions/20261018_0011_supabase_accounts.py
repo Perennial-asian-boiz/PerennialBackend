@@ -1,4 +1,9 @@
-"""Supabase-owned identities with isolated application data and RLS."""
+"""Supabase-owned identities with isolated application data and RLS.
+
+Every app table has ENABLE and FORCE ROW LEVEL SECURITY and no policy here, so
+a migrated but unprovisioned database denies everything. provision_api_role.py
+creates the policies, naming the API role (#22 fix packet, change 6).
+"""
 
 import sqlalchemy as sa
 from alembic import op
@@ -8,6 +13,16 @@ revision = "0011"
 down_revision = "0010"
 branch_labels = None
 depends_on = None
+
+
+TABLES = (
+    "profiles",
+    "preferences",
+    "notifications",
+    "watchlist",
+    "auth_challenges",
+    "verified_sessions",
+)
 
 
 def stamp(name="updated_at"):
@@ -93,19 +108,26 @@ def upgrade():
     op.create_table(
         "watchlist",
         user_id(),
-        sa.Column("ticker", sa.String(20), nullable=False),
+        sa.Column("security_id", sa.BigInteger(), nullable=False),
         stamp("created_at"),
-        sa.PrimaryKeyConstraint("user_id", "ticker", name="pk_watchlist"),
+        sa.PrimaryKeyConstraint("user_id", "security_id", name="pk_watchlist"),
         sa.ForeignKeyConstraint(
             ["user_id"],
             ["app.profiles.id"],
             name="fk_watchlist_user_id",
             ondelete="CASCADE",
         ),
-        sa.CheckConstraint(
-            "ticker ~ '^[A-Z0-9][A-Z0-9./-]*$'", name=op.f("ck_watchlist_ticker")
+        # A security on someone's watchlist can't be deleted (change 3).
+        sa.ForeignKeyConstraint(
+            ["security_id"],
+            ["perennial.securities.id"],
+            name="fk_watchlist_security_id",
+            ondelete="RESTRICT",
         ),
         schema="app",
+    )
+    op.create_index(
+        "ix_watchlist_security_id", "watchlist", ["security_id"], schema="app"
     )
     op.create_table(
         "auth_challenges",
@@ -163,22 +185,23 @@ def upgrade():
     op.create_index(
         "ix_verified_sessions_user", "verified_sessions", ["user_id"], schema="app"
     )
-    for table, column in (
-        ("profiles", "id"),
-        ("preferences", "user_id"),
-        ("notifications", "user_id"),
-        ("watchlist", "user_id"),
-    ):
+    for table in TABLES:
         op.execute(f"ALTER TABLE app.{table} ENABLE ROW LEVEL SECURITY")
         op.execute(f"ALTER TABLE app.{table} FORCE ROW LEVEL SECURITY")
-        owner = f"{column} = nullif(current_setting('request.jwt.claim.sub', true), '')::uuid"
-        op.execute(
-            f"CREATE POLICY own_rows ON app.{table} USING ({owner}) WITH CHECK ({owner})"
-        )
     op.execute("REVOKE ALL ON ALL TABLES IN SCHEMA app FROM PUBLIC")
 
 
 def downgrade():
+    # Refuse while any user exists: every user table cascades from profiles.
+    # Migrations run as the NOBYPASSRLS owner, which sees no rows under FORCE
+    # RLS, so lift FORCE first; a refusal rolls this back with everything else.
+    op.execute("ALTER TABLE app.profiles NO FORCE ROW LEVEL SECURITY")
+    if (
+        op.get_bind()
+        .execute(sa.text("SELECT EXISTS (SELECT 1 FROM app.profiles)"))
+        .scalar()
+    ):
+        raise RuntimeError("app.profiles has rows; downgrade would drop user data")
     for table in (
         "verified_sessions",
         "auth_challenges",

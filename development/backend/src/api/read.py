@@ -453,6 +453,29 @@ _WRITES = text(
     " JOIN pg_namespace n ON n.oid = c.relnamespace"
     " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p')"
 )
+# #22's schema app (fix packet, change 5): reads and writes only on its six
+# tables, never TRUNCATE, no CREATE on app, and no USAGE on Supabase's auth
+# schema (the login reaches auth.users only through app.email_is_registered).
+APP_TABLES = (
+    "profiles",
+    "preferences",
+    "notifications",
+    "watchlist",
+    "auth_challenges",
+    "verified_sessions",
+)
+_APP = text(
+    "SELECT (SELECT count(*) FROM pg_class c"
+    "  JOIN pg_namespace n ON n.oid = c.relnamespace"
+    "  WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p') AND ("
+    "   has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER')"
+    "   OR (c.relname <> ALL(CAST(:tables AS text[])) AND has_table_privilege("
+    "    current_user, c.oid, 'INSERT,UPDATE,DELETE')))),"
+    " coalesce((SELECT has_schema_privilege(current_user, oid, 'CREATE')"
+    "  FROM pg_namespace WHERE nspname = 'app'), false),"
+    " coalesce((SELECT has_schema_privilege(current_user, oid, 'USAGE')"
+    "  FROM pg_namespace WHERE nspname = 'auth'), false)"
+)
 _OWNERSHIP = text(
     "SELECT (SELECT count(*) FROM pg_class WHERE relowner = r.oid)"
     " + (SELECT count(*) FROM pg_namespace WHERE nspowner = r.oid),"
@@ -468,8 +491,11 @@ def check_startup(engine: Engine, api_role: str) -> None:
     Clauses (design note RA-15): 1 attributes of the session role itself;
     2 transitive membership is exactly {api_role}; 3 no write privilege on any
     perennial table, and at least one table exists; 4 owns nothing and has no
-    CREATE on the schema or database. Every failure, including an error while
-    checking, raises the same StartupRefused with no role name, URL or SQL.
+    CREATE on the schema or database. Where #22's schema app exists, clause 3
+    also allows writes only on its six tables and clause 4 refuses CREATE on
+    app; USAGE on schema auth (Supabase) is refused. Every failure, including an
+    error while checking, raises the same StartupRefused with no role name, URL
+    or SQL.
     """
     try:
         with engine.connect() as conn:
@@ -477,6 +503,9 @@ def check_startup(engine: Engine, api_role: str) -> None:
             members = list(conn.execute(_MEMBERSHIP).scalar_one())
             tables, writable = conn.execute(_WRITES).one()
             owned, schema_create, database_create = conn.execute(_OWNERSHIP).one()
+            app_writes, app_create, auth_usage = conn.execute(
+                _APP, {"tables": list(APP_TABLES)}
+            ).one()
             conn.rollback()
         ok = (
             same is True
@@ -487,6 +516,9 @@ def check_startup(engine: Engine, api_role: str) -> None:
             and owned == 0
             and not schema_create
             and not database_create
+            and app_writes == 0
+            and not app_create
+            and not auth_usage
         )
     except Exception:
         ok = False

@@ -18,8 +18,11 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 
 from src.api import account_models as tables
+from src.api.read import APIError, auth_rate_limit
 from src.api.supabase_auth import AuthProviderError, SupabaseAuth
+from src.db import models
 from src.db.session import make_engine
+from src.ingestion.schemas import _TICKER
 
 router = APIRouter()
 OTP_MINUTES = 15
@@ -40,15 +43,21 @@ def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+class APIDatabaseURLMissing(RuntimeError):
+    """Fixed text: names the setting, never a URL or credential."""
+
+    def __init__(self):
+        super().__init__("API_DATABASE_URL must name the dedicated API login")
+
+
 @lru_cache
 def get_engine() -> Engine:
-    # Separate restricted runtime credentials from DATABASE_URL (migrations).
+    # The restricted API login only, everywhere: never DATABASE_URL (migrations),
+    # whose owner login the startup check would refuse anyway (RB-6b).
     raw = os.getenv("API_DATABASE_URL", "").strip()
-    if not raw and os.getenv("APP_ENV", "development").casefold() == "production":
-        raise RuntimeError(
-            "API_DATABASE_URL must use a dedicated API login in production"
-        )
-    return make_engine(raw or None)
+    if not raw:
+        raise APIDatabaseURLMissing()
+    return make_engine(raw, workload="api")
 
 
 def get_provider() -> SupabaseAuth:
@@ -210,19 +219,31 @@ class WatchlistItem(BaseModel):
     @field_validator("ticker")
     @classmethod
     def clean_ticker(cls, value):
+        # The read API's ticker rule (R1's /v1/securities/{symbol}).
         value = value.strip().upper()
-        if not re.fullmatch(r"[A-Z0-9][A-Z0-9./-]*", value):
+        if not _TICKER.fullmatch(value):
             raise ValueError("Ticker is not valid")
         return value
 
 
+def set_subject(connection, user_id):
+    """The one place the RLS subject is set: a UUID, transaction-local.
+
+    Every policy casts the subject to uuid, so anything else is refused here,
+    before any statement, rather than failing in the database (change 6).
+    """
+    subject = str(UUID(str(user_id)))
+    connection.execute(
+        text("SELECT set_config('request.jwt.claim.sub', :subject, true)"),
+        {"subject": subject},
+    )
+
+
 @contextmanager
 def user_connection(engine, user_id):
+    UUID(str(user_id))  # refuse a bad subject before opening a transaction
     with engine.begin() as connection:
-        connection.execute(
-            text("SELECT set_config('request.jwt.claim.sub', :subject, true)"),
-            {"subject": str(user_id)},
-        )
+        set_subject(connection, user_id)
         yield connection
 
 
@@ -330,11 +351,9 @@ def user_from_identity(identity):
 
 
 def sync_profile(connection, identity):
+    UUID(str(identity.get("id")))  # refused before any statement (change 6)
     user = user_from_identity(identity)
-    connection.execute(
-        text("SELECT set_config('request.jwt.claim.sub', :subject, true)"),
-        {"subject": str(user.id)},
-    )
+    set_subject(connection, user.id)
     statement = pg_insert(tables.profiles).values(
         id=user.id, email=user.email, full_name=user.full_name
     )
@@ -433,7 +452,14 @@ def token_response(body, user, flow="login"):
         raise AuthProviderError() from None
 
 
-@router.post("/auth/signup", response_model=ChallengeResponse, status_code=201)
+# The auth bucket comes first on both email-lookup routes (an enumeration
+# oracle), before any other dependency or validation touches the database.
+@router.post(
+    "/auth/signup",
+    response_model=ChallengeResponse,
+    status_code=201,
+    dependencies=[Depends(auth_rate_limit)],
+)
 def signup(payload: SignupRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         lock_email(connection, payload.email)
@@ -493,7 +519,11 @@ def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
         return start_challenge(connection, payload.email, flow)
 
 
-@router.post("/auth/forgot-password", response_model=PasswordResetRequestResponse)
+@router.post(
+    "/auth/forgot-password",
+    response_model=PasswordResetRequestResponse,
+    dependencies=[Depends(auth_rate_limit)],
+)
 def forgot_password(payload: EmailRequest, engine: EngineDep, provider: ProviderDep):
     with engine.begin() as connection:
         lock_email(connection, payload.email)
@@ -803,27 +833,46 @@ def reset_password(
     return {"message": "Password reset successfully"}
 
 
+def security_id(connection, ticker):
+    """A ticker or alias resolved as R1 resolves it (BRK-B finds BRK.B), or None."""
+    return connection.execute(
+        select(models.security_identifiers.c.security_id).where(
+            models.security_identifiers.c.scheme == "ticker",
+            models.security_identifiers.c.value == ticker,
+        )
+    ).scalar_one_or_none()
+
+
 @router.get("/me/watchlist", response_model=list[WatchlistItem])
 def get_watchlist(user: UserDep, engine: EngineDep):
     with user_connection(engine, user.id) as connection:
         rows = (
             connection.execute(
-                select(tables.watchlist.c.ticker)
+                select(models.securities.c.symbol)
+                .select_from(
+                    tables.watchlist.join(
+                        models.securities,
+                        models.securities.c.id == tables.watchlist.c.security_id,
+                    )
+                )
                 .where(tables.watchlist.c.user_id == user.id)
-                .order_by(tables.watchlist.c.ticker)
+                .order_by(models.securities.c.symbol)
             )
             .scalars()
             .all()
         )
-    return [WatchlistItem(ticker=ticker) for ticker in rows]
+    return [WatchlistItem(ticker=symbol) for symbol in rows]
 
 
 @router.post("/me/watchlist", response_model=WatchlistItem, status_code=201)
 def add_watchlist(payload: WatchlistItem, user: UserDep, engine: EngineDep):
     with user_connection(engine, user.id) as connection:
+        found = security_id(connection, payload.ticker)
+        if found is None:  # decision 28: only a known security can be watched
+            raise APIError(404, "unknown_security", "no security has that ticker")
         connection.execute(
             pg_insert(tables.watchlist)
-            .values(user_id=user.id, ticker=payload.ticker)
+            .values(user_id=user.id, security_id=found)
             .on_conflict_do_nothing()
         )
     return payload
@@ -831,12 +880,16 @@ def add_watchlist(payload: WatchlistItem, user: UserDep, engine: EngineDep):
 
 @router.delete("/me/watchlist/{ticker}", status_code=204)
 def remove_watchlist(ticker: str, user: UserDep, engine: EngineDep):
-    item = WatchlistItem(ticker=ticker)
+    wanted = ticker.strip().upper()
+    if not _TICKER.fullmatch(wanted):
+        raise HTTPException(422, "Ticker is not valid")
     with user_connection(engine, user.id) as connection:
-        connection.execute(
-            delete(tables.watchlist).where(
-                tables.watchlist.c.user_id == user.id,
-                tables.watchlist.c.ticker == item.ticker,
+        found = security_id(connection, wanted)
+        if found is not None:  # an unknown ticker is already absent: 204
+            connection.execute(
+                delete(tables.watchlist).where(
+                    tables.watchlist.c.user_id == user.id,
+                    tables.watchlist.c.security_id == found,
+                )
             )
-        )
     return Response(status_code=204)

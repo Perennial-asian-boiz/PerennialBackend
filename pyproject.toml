@@ -76,7 +76,15 @@ files = [
     "development/backend/src/db",
     "development/backend/src/ingestion",
     "development/backend/src/pipeline",
-    "development/backend/src/api",
+    # Decision 29: the read API, the dashboard adapters and the integrated app;
+    # #22's accounts, supabase_auth and account_models get typed in a follow-up.
+    "development/backend/src/api/__init__.py",
+    "development/backend/src/api/__main__.py",
+    "development/backend/src/api/app.py",
+    "development/backend/src/api/dashboard.py",
+    "development/backend/src/api/dashboard_fixture.py",
+    "development/backend/src/api/rate_limit.py",
+    "development/backend/src/api/read.py",
 ]
 strict = true
 show_error_codes = true
@@ -85,6 +93,11 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = ["src.services.*"]
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# Not yet strict (decision 29): analyzed for app.py's imports, errors not reported.
+module = ["src.api.accounts", "src.api.supabase_auth", "src.api.account_models"]
+follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 # Shared legacy path helpers: analyzed for the fetchers' types, not yet strict.

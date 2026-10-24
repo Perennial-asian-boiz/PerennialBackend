@@ -2,6 +2,7 @@
 
 from sqlalchemy import (
     ARRAY,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -15,6 +16,8 @@ from sqlalchemy import (
     Uuid,
     text,
 )
+
+from src.db.models import securities
 
 metadata = MetaData(
     schema="app",
@@ -83,14 +86,21 @@ notifications = Table(
     ),
     timestamp(),
 )
+# Keyed by security, so aliases resolve to one entry (#22 fix packet, change 3).
+# The FK names the pipeline's Column object, so it resolves across registries.
 watchlist = Table(
     "watchlist",
     metadata,
     user_id(),
-    Column("ticker", String(20), primary_key=True),
+    Column(
+        "security_id",
+        BigInteger,
+        ForeignKey(securities.c.id, ondelete="RESTRICT"),
+        primary_key=True,
+    ),
     timestamp("created_at"),
-    CheckConstraint("ticker ~ '^[A-Z0-9][A-Z0-9./-]*$'", name="ticker"),
 )
+Index("ix_watchlist_security_id", watchlist.c.security_id)
 
 # These are backend-only security records, never exposed through the Data API.
 # No password, OTP value, access token or refresh token is stored here.

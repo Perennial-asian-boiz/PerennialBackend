@@ -80,7 +80,7 @@ export PERENNIAL_ENV=local
 cd development/database
 python -m alembic upgrade head
 cd ../backend
-python -m uvicorn src.api.app:app --reload --port 8000
+python -m src.api
 ```
 
 In Windows PowerShell, set the same setting with
@@ -90,8 +90,14 @@ If migrations have already been applied, start the API from
 `PerennialBackend/development/backend` instead:
 
 ```bash
-python -m uvicorn src.api.app:app --reload --port 8000
+python -m src.api
 ```
+
+`python -m src.api` is the one way to serve the API: it runs uvicorn with its
+access log off (auth links carry tokens), its own proxy handling off (the app
+installs the only proxy middleware) and its loggers on the app's JSON handler.
+`API_HOST` and `API_PORT` pick the listener (default `127.0.0.1:8000`). The API
+needs `API_DATABASE_URL` (below) everywhere, including locally.
 
 In a second terminal, start the frontend:
 
@@ -195,21 +201,36 @@ Fill the ignored backend `.env` privately. Exported environment settings win.
 | `CORS_ORIGINS` | Exact frontend origins |
 | `APP_ENV` | `development` locally; `production` when deployed |
 
-Do not run the API with migration-owner credentials in a deployment.
-An administrator applies migrations, then provisions the `perennial_api`
-NOLOGIN group with `development/database/ops/provision_api_role.py` using
-`OPS_DATABASE_URL`. Give a dedicated LOGIN role membership in that group;
-it must be NOSUPERUSER, NOCREATEDB, NOCREATEROLE and NOBYPASSRLS. Use that
-login in `API_DATABASE_URL`. Its only pipeline permissions are SELECT on
-`publications` and `current_publication`; it cannot alter company data.
-Reapply API grants after future migrations. Importer/reader groups must not
-receive access to `app`.
+The API never runs with migration-owner credentials, locally or deployed, and
+there is no fallback to `DATABASE_URL`: without `API_DATABASE_URL` it refuses to
+start. An administrator, using `OPS_DATABASE_URL`:
+
+1. runs `development/database/ops/provision_roles.py --phase bootstrap`, which
+   creates the NOLOGIN group roles, `perennial_api` included;
+2. applies migrations;
+3. runs `provision_roles.py --phase grants` and
+   `development/database/ops/provision_api_role.py`, in either order. The first
+   grants `perennial_api` its read-only published-data access in `perennial`;
+   the second makes schema `app` owned by `perennial_owner`, grants the API its
+   six `app` tables and `app.email_is_registered`, and creates the RLS policies
+   that name it. Reapply both after every migration.
+
+Then give a dedicated login membership in `perennial_api` and use it in
+`API_DATABASE_URL`. Locally, for example:
+
+```sql
+CREATE ROLE perennial_api_local LOGIN INHERIT PASSWORD '...' IN ROLE perennial_api;
+```
+
+The login must be NOSUPERUSER, NOCREATEDB, NOCREATEROLE and NOBYPASSRLS and a
+member of nothing else; the API's startup check refuses anything else.
+Importer/reader groups never receive access to `app`.
 
 ```bash
 cd development/database
 ../../.venv/bin/alembic upgrade head
 cd ../backend
-../../.venv/bin/uvicorn src.api.app:app --reload --port 8000
+../../.venv/bin/python -m src.api
 ```
 
 In the frontend repo, copy `.env.example` to `.env`, keep
@@ -282,22 +303,22 @@ Recovery-approved sessions can only reset a password, not read app data.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| POST | `/auth/signup` | Register with Supabase and start signup challenge |
-| POST | `/auth/confirm-email` | Validate email link, sync profile, return to Sign in; no app session |
-| POST | `/auth/resend-confirmation` | Resend a signup confirmation link |
-| POST | `/auth/login` | Validate password, send email OTP, no session yet |
-| POST | `/auth/forgot-password` | Start recovery; generic reply for unknown emails |
-| POST | `/auth/accept-recovery-link` | Approve a fresh recovery email session for password reset only |
-| POST | `/auth/resend-otp` | Resend within the existing challenge |
-| POST | `/auth/verify-otp` | Verify code and approve session |
-| POST | `/auth/refresh` | Refresh only an approved, unrevoked session |
-| POST | `/auth/reset-password` | Reset with a recovery-only session |
-| POST | `/auth/logout` | Revoke all of this user's app sessions |
-| GET | `/me` | Verified profile + onboarding status |
-| GET/PUT | `/me/preferences` | Selected sectors and risk level |
-| GET/PUT | `/me/notifications` | Notification toggles |
-| PUT | `/me/password` | Validate old password, change and revoke sessions |
-| GET/POST/DELETE | `/me/watchlist` | Personal ticker list |
+| POST | `/v1/auth/signup` | Register with Supabase and start signup challenge |
+| POST | `/v1/auth/confirm-email` | Validate email link, sync profile, return to Sign in; no app session |
+| POST | `/v1/auth/resend-confirmation` | Resend a signup confirmation link |
+| POST | `/v1/auth/login` | Validate password, send email OTP, no session yet |
+| POST | `/v1/auth/forgot-password` | Start recovery; generic reply for unknown emails |
+| POST | `/v1/auth/accept-recovery-link` | Approve a fresh recovery email session for password reset only |
+| POST | `/v1/auth/resend-otp` | Resend within the existing challenge |
+| POST | `/v1/auth/verify-otp` | Verify code and approve session |
+| POST | `/v1/auth/refresh` | Refresh only an approved, unrevoked session |
+| POST | `/v1/auth/reset-password` | Reset with a recovery-only session |
+| POST | `/v1/auth/logout` | Revoke all of this user's app sessions |
+| GET | `/v1/me` | Verified profile + onboarding status |
+| GET/PUT | `/v1/me/preferences` | Selected sectors and risk level |
+| GET/PUT | `/v1/me/notifications` | Notification toggles |
+| PUT | `/v1/me/password` | Validate old password, change and revoke sessions |
+| GET/POST/DELETE | `/v1/me/watchlist` | Personal watchlist of known securities, by ticker or alias (unknown ticker: `404 unknown_security`) |
 
 Access tokens are checked with the issuer on every request; failures do not
 fall back to accepting decoded claims. The app checks issuer, audience,
