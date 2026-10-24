@@ -1,8 +1,8 @@
 """Provision dedicated NOLOGIN owner/importer/reader/api groups using an explicit table policy.
 
 Run bootstrap before every upgrade, and grants after every migration. Bootstrap is
-idempotent and creates the schemas the owner migrates into: the owner holds no CREATE
-on the database. Before a pg_restore of a whole-database dump,
+idempotent and creates the schemas the owner migrates into, perennial and app: the
+owner holds no CREATE on the database. Before a pg_restore of a whole-database dump,
 run roles: it only creates the group roles that the dump's policies name, because the
 dump creates its own schemas. Administrative credentials come only from
 OPS_DATABASE_URL; login membership/secrets are deployment-owned. The administrative
@@ -121,6 +121,9 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
     conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS perennial AUTHORIZATION {}").format(sql.Identifier(owner)))
     _give_to_owner(conn, owner, "SCHEMA", sql.Identifier("perennial"),
                    "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname=%s", ("perennial",))
+    # Schema app (the accounts) for the owner, with no grants; an existing app is left
+    # alone: provision_api_role.py owns its ownership, grants and policies.
+    conn.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION {}").format(sql.Identifier(owner)))
     # Alembic's version table is in public; only the migration owner needs CREATE there.
     conn.execute("REVOKE CREATE ON SCHEMA public FROM PUBLIC")
     conn.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA public TO {}").format(sql.Identifier(owner)))

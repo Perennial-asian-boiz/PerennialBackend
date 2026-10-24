@@ -63,26 +63,33 @@ administrative secret:
 # Use a migration login that SET ROLEs to perennial_owner for the whole migration.
 .venv/bin/alembic -c development/database/alembic.ini upgrade head
 .venv/bin/python development/database/ops/provision_roles.py --phase grants
+.venv/bin/python development/database/ops/provision_api_role.py  # schema app
 ```
 
 A third phase, `--phase roles`, is only for restores: it runs bootstrap's role
 checks and creates the group roles, and nothing else (see "Backup and restore
 logins with row-level security" below).
 
-Bootstrap is idempotent. It creates schema `perennial` owned by the owner, and the
-owner deliberately holds no `CREATE` on the database, so it cannot create schemas,
-publications or extensions. PostgreSQL checks that right before `IF NOT EXISTS`, so
-a migration creates a schema only when `to_regnamespace()` finds none: that happens
-only where nothing ran bootstrap (the tests, dev Compose and the quality gate, which
-migrate as a superuser). A migration that adds a schema must also add it to bootstrap;
-without that, the owner's upgrade fails with `permission denied for database` and
-rolls back.
+Bootstrap is idempotent. It creates schemas `perennial` and `app` owned by the
+owner, and the owner deliberately holds no `CREATE` on the database, so it cannot
+create schemas, publications or extensions. PostgreSQL checks that right before
+`IF NOT EXISTS`, so a migration creates a schema only when `to_regnamespace()`
+finds none: that happens only where nothing ran bootstrap (the tests, dev Compose
+and the quality gate, which migrate as a superuser). A migration that adds a schema
+must also add it to bootstrap; without that, the owner's upgrade fails with
+`permission denied for database` and rolls back. Bootstrap gives nobody anything in
+`app` and leaves an existing `app` as it is: `provision_api_role.py` owns that
+schema's ownership, grants and policies.
 
 The administrative login may be a superuser or, as on Supabase, a non-superuser
 `CREATEROLE` login that owns the database. Such a login holds only `ADMIN OPTION` on
 the roles it creates, so bootstrap grants it `SET` on the owner (never `INHERIT`): it
-can then create the owner's schema and re-own objects to the owner, and both phases
-make the grants on the owner's objects as the owner. This needs PostgreSQL 16 or later.
+can then create the owner's schemas and re-own objects to the owner, and both scripts
+make the grants on the owner's objects as the owner. `provision_api_role.py` also
+makes the administrative login the owner of `app.email_is_registered`, which reads
+`auth.users`; for that one step it inherits the owner's privileges inside its own
+transaction and turns that off again before committing. This needs PostgreSQL 16 or
+later.
 
 Bootstrap also grants owner CREATE in `public` for Alembic's version table. Grant phase transfers the explicitly listed tables
 and their attached identity sequences to the owner, and fails if the migrated
