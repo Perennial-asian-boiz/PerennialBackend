@@ -788,14 +788,101 @@ def test_startup_refuses_a_write_through_any_app_object_outside_the_six(
     assert refused == reference
 
 
-def test_app_objects_alone_or_a_sequence_read_do_not_refuse_startup(
+def test_app_objects_alone_do_not_refuse_startup(
     engine, pr22_roles, monkeypatch, app_write_objects  # noqa: F811
 ):
-    """The control: the objects exist and SELECT on the sequence reads it; a
-    correctly provisioned login still starts."""
+    """The control: the objects exist and the login holds nothing on them; a correctly
+    provisioned login still starts. (It used to grant SELECT on the sequence too; the
+    final rule set refuses any privilege on an app relation outside the six.)"""
     from fastapi.testclient import TestClient
 
-    grant = f"GRANT SELECT ON SEQUENCE {app_write_objects['sequence']} TO {{login}}"
-    with integrated_app(engine, pr22_roles, monkeypatch, grants=[grant]) as (app, _, _), \
-            TestClient(app) as client:
+    with integrated_app(engine, pr22_roles, monkeypatch) as (app, _, _), TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+
+
+# ── RB-6 / RA-15, the final rule set (both reviewers) ────
+# The API login holds exactly what provisioning grants, on the objects it grants: no
+# privilege at all on an app relation outside the six, or on a view, materialized
+# view or foreign table in perennial; no EXECUTE on a perennial or app function but
+# app.email_is_registered (pg_catalog and other schemas are out of scope); no
+# REFERENCES on perennial.
+
+
+@pytest.fixture
+def owner_objects(engine):
+    """Superuser-owned objects, in app outside the six and in perennial."""
+    suffix = secrets.token_hex(4)
+    o = {"app_view": f"app.rb_view_{suffix}", "app_matview": f"app.rb_matview_{suffix}",
+         "app_foreign": f"app.rb_foreign_{suffix}", "app_sequence": f"app.rb_seq_{suffix}",
+         "app_table": f"app.rb_table_{suffix}", "app_function": f"app.rb_function_{suffix}()",
+         "perennial_view": f"perennial.rb_view_{suffix}",
+         "perennial_function": f"perennial.rb_function_{suffix}()",
+         "public_function": f"public.rb_function_{suffix}()"}
+    wrapper = f"rb_fdw_{suffix}"
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE VIEW {o['app_view']} AS SELECT id, email FROM app.profiles"))
+        conn.execute(text(f"CREATE MATERIALIZED VIEW {o['app_matview']} AS SELECT id FROM app.profiles"))
+        conn.execute(text(f"CREATE FOREIGN DATA WRAPPER {wrapper}"))
+        conn.execute(text(f"CREATE SERVER {wrapper}_server FOREIGN DATA WRAPPER {wrapper}"))
+        conn.execute(text(f"CREATE FOREIGN TABLE {o['app_foreign']} (id bigint) SERVER {wrapper}_server"))
+        conn.execute(text(f"CREATE SEQUENCE {o['app_sequence']}"))
+        conn.execute(text(f"CREATE TABLE {o['app_table']} (id int)"))
+        conn.execute(text(f"CREATE VIEW {o['perennial_view']} AS SELECT id, source FROM perennial.source_batches"))
+        for name in ("app_function", "perennial_function", "public_function"):
+            conn.execute(text(f"CREATE FUNCTION {o[name]} RETURNS int LANGUAGE sql AS 'SELECT 1'"))
+        for name in ("app_function", "perennial_function"):
+            conn.execute(text(f"REVOKE EXECUTE ON FUNCTION {o[name]} FROM PUBLIC"))
+    try:
+        yield o
+    finally:
+        with engine.begin() as conn:
+            for name in ("app_view", "perennial_view"):
+                conn.execute(text(f"DROP VIEW IF EXISTS {o[name]}"))
+            conn.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {o['app_matview']}"))
+            conn.execute(text(f"DROP FOREIGN DATA WRAPPER IF EXISTS {wrapper} CASCADE"))
+            conn.execute(text(f"DROP SEQUENCE IF EXISTS {o['app_sequence']}"))
+            conn.execute(text(f"DROP TABLE IF EXISTS {o['app_table']}"))
+            for name in ("app_function", "perennial_function", "public_function"):
+                conn.execute(text(f"DROP FUNCTION IF EXISTS {o[name]}"))
+
+
+OWNER_PATHS = {
+    "app_view_select": "GRANT SELECT ON {app_view} TO {login}",
+    "app_matview_select": "GRANT SELECT ON {app_matview} TO {login}",
+    "app_foreign_table_select": "GRANT SELECT ON {app_foreign} TO {login}",
+    "app_sequence_select": "GRANT SELECT ON SEQUENCE {app_sequence} TO {login}",
+    "app_other_table_select": "GRANT SELECT ON {app_table} TO {login}",
+    "app_other_table_column_select": "GRANT SELECT (id) ON {app_table} TO {login}",
+    "app_function_execute": "GRANT EXECUTE ON FUNCTION {app_function} TO {login}",
+    "app_function_execute_through_public": "GRANT EXECUTE ON FUNCTION {app_function} TO PUBLIC",
+    "perennial_view_select": "GRANT SELECT ON {perennial_view} TO {login}",
+    "perennial_function_execute": "GRANT EXECUTE ON FUNCTION {perennial_function} TO {login}",
+    "perennial_table_references": "GRANT REFERENCES ON perennial.securities TO {login}",
+    "perennial_column_references": "GRANT REFERENCES (id) ON perennial.securities TO {login}",
+}
+
+
+@pytest.mark.parametrize("case", sorted(OWNER_PATHS))
+def test_startup_refuses_a_path_through_another_owner(
+    engine, pr22_roles, monkeypatch, caplog, owner_objects, case  # noqa: F811
+):
+    grant = OWNER_PATHS[case]
+    for key, name in owner_objects.items():
+        grant = grant.replace("{" + key + "}", name)
+    refused = _refused(engine, pr22_roles, monkeypatch, caplog, grants=[grant])
+    reference = _refused(engine, pr22_roles, monkeypatch, caplog, options="BYPASSRLS")
+    assert refused == reference
+
+
+def test_owner_objects_alone_and_a_function_elsewhere_do_not_refuse_startup(
+    engine, pr22_roles, monkeypatch, owner_objects  # noqa: F811
+):
+    """Guards: the objects exist and the login holds nothing on them, and it can EXECUTE
+    a function in public (PUBLIC's default), outside the rule's scope. Provisioning's own
+    EXECUTE on app.email_is_registered is test_pr22_fix.py's guard."""
+    from fastapi.testclient import TestClient
+
+    with integrated_app(engine, pr22_roles, monkeypatch) as (app, _, _), TestClient(app) as client:
+        with app.state.engine.connect() as conn:
+            assert conn.execute(text(f"SELECT {owner_objects['public_function'][:-2]}()")).scalar() == 1
         assert client.get("/health").status_code == 200
