@@ -271,3 +271,96 @@ Bryan's open RLS/JWT questions for Jaden (`auth.uid()` vs `request.jwt.claim.sub
 - **Review:** the checker reviews this note. The auditor reviews R1's role, grants and startup check (RA-12 to RA-16) and R2's RLS and JWT boundary (RU-5b, RU-6, Gate M5).
 - **Builds:** each part is test-maker first, then the implementer. CI as usual: ruff, format, strict mypy and the full suite with `REQUIRE_DATABASE_TESTS=1`.
 - **Safety:** synthetic data only. No provider keys, no deployment, no push.
+
+## Addendum (2026-10-24): basic rate limiting for the public reads
+
+**Why:** decision 14 makes `/v1/watchlist` public, with no login and basic rate limiting. R1 (`feat/m5-read-api` at `25f38f0`) has none. The API runs only locally and on staging until D8 is settled (decision 16), and the API host isn't chosen yet (decision 21 covers only the database).
+
+**Scope:** R1's read routes, `GET /v1/watchlist` and `GET /v1/securities/{symbol}`. #22's `/v1/auth/*` routes are out of scope here. Supabase Auth limits its own endpoints, and issue #3's limits for auth entry points belong to #22, though they could reuse this limiter later.
+
+### Where it lives: both layers, and "basic" means the in-app one
+
+- **In the app (this addendum).** A per-client token bucket in front of the read routes. It is always on, host-independent and testable now. Its job is to stop one client from monopolizing the `api` pool (5 + 5 connections, 5 s statement timeout, `src/db/session.py:14-18`).
+- **At the edge or host (a deployment checklist item, not code).** Request-rate and connection limits, configured when the API host is chosen. Only this layer can absorb a flood, and it's required before any public deployment.
+- **Delivery (decision 26).** Recommended: a small follow-up PR on top of R1 before any public deployment, rather than reopening the reviewed R1 before its push. That's safe because the API isn't public until D8 (decision 16).
+
+### How a client is keyed
+
+- **The key is the client address the app sees** (`request.client.host`). App code never parses `X-Forwarded-For` or `Forwarded` itself.
+- **Trusted proxies live in the app.**
+  - `create_app()` wraps itself in uvicorn's `ProxyHeadersMiddleware` with `trusted_hosts` set from `API_TRUSTED_PROXIES`: IPs or CIDRs, empty by default, which means trust no one.
+  - Forwarded headers are honoured only when the immediate peer is in that set.
+  - The documented run command passes `--no-proxy-headers`, so uvicorn's own default (trusting `127.0.0.1`) never applies twice or behind the operator's back. With #22, the same command also carries `--no-access-log` (decision 23).
+  - In deployment, `API_TRUSTED_PROXIES` names exactly the host's proxy ranges, never `*`, unless the host guarantees that every request passes through its proxy and that the proxy overwrites client-supplied forwarded headers.
+- **Spoofing.** A client that sends `X-Forwarded-For` from an untrusted address is keyed by its real peer address.
+- **IPv6** is keyed by its /64, because one host commonly controls a whole /64. IPv4 is keyed by its full address.
+- **Shared addresses** (NAT, carrier-grade NAT) share one bucket. That's acceptable for "basic", and the limits are generous for that reason.
+
+### Limits and the response
+
+- **The bucket.** Capacity 30, refilling at 1 token per second (60 a minute sustained). The configuration is `API_RATE_LIMIT_BURST=30` and `API_RATE_LIMIT_PER_MINUTE=60`, passed through `create_app()` parameters with those environment defaults. Both must be positive integers.
+  - Why those numbers: the watchlist changes at most once a day, and a normal client revalidates with its ETag every few minutes. So 60 a minute is far above legitimate use and far below what 10 connections can serve.
+- **Every request to a read route costs one token, before any database work.** That includes `304` responses and `404` and `422` errors. A 304 still opens a read transaction to look up the pointer (`read.py`, `get_watchlist`), so not counting 304s would leave the database unprotected.
+- **Over the limit:**
+  - `429`
+  - `Retry-After: <whole seconds until the next token, rounded up, at least 1>`
+  - body `{"detail": "too many requests; retry later", "code": "rate_limited"}`, in R1's canonical JSON
+  - `Cache-Control: no-store`
+  - no `ETag` and no publication data
+
+  A limited request opens no transaction.
+- **No `RateLimit-*` headers in v1.**
+
+### State with several workers
+
+- **In memory, per process.** That's acceptable for "basic". With N workers the effective limit is up to N times higher. This is documented, and the edge limit is the global one. A restart resets the buckets.
+- **Thread-safe.** R1's routes are plain `def` functions, so FastAPI runs them in its threadpool. Bucket updates take a lock.
+- **Bounded memory.** The limiter tracks at most `API_RATE_LIMIT_MAX_CLIENTS` buckets (10,000 by default). When the table is full, it evicts the least recently used bucket, so rotating addresses can't exhaust memory. A full bucket carries no state, so it can be dropped at any time.
+- **A monotonic clock, injectable for tests.**
+- **Shared state** (Redis and the like) is out of scope. Revisit it only if the API runs several instances and the edge can't limit.
+
+### Effect on accepted criteria
+
+- **RA-15 (startup check):** unchanged.
+- **RA-16b (every route through the helper):**
+  - It still holds for every *served* request. Its test keeps each route under the limit by using a fresh client key.
+  - A limited request makes no helper call (RL-7).
+  - The limiter is a dependency on `read.router`, so it travels with the router into #22's app (#22 packet RB-5c), and #22's routes are unaffected.
+- **RA-3 and RA-6 (ETag, byte stability):** unchanged under the limit.
+- **RA-17 (logs):** a 429 writes one JSON log line, `rate_limited`, with no client address, path parameters or header values.
+- **RA-18 (OpenAPI snapshot):** the snapshot gains the `429` response on both routes. That is a deliberate snapshot update, and `docs/technical-specs/API.md` documents it.
+
+### Acceptance criteria (RL)
+
+**Limiting**
+- **RL-1** **Under the limit.** Responses don't change. R1's test suite passes with the limiter on at its defaults.
+- **RL-2** **Over the limit.** In one instant, the request after `burst` gets a `429` with an integer `Retry-After` of at least 1, the body exactly `{"code", "detail"}` in canonical JSON, `Cache-Control: no-store`, and no `ETag`.
+- **RL-3** **Refill.** With a fake clock, the next request succeeds after `Retry-After` seconds, and requests at the refill rate succeed indefinitely.
+- **RL-4** **Independent clients.** Two client keys have independent buckets.
+
+**Keying**
+- **RL-5** **Proxies and spoofing.**
+  - With `API_TRUSTED_PROXIES` empty, a client's own `X-Forwarded-For` doesn't change its key.
+  - With it set to the test proxy's address, requests from that proxy are keyed by the forwarded client.
+  - A forwarded header from any other peer is ignored.
+- **RL-6** **IPv6.** Two addresses in one /64 share a bucket, and addresses in different /64s don't.
+
+**Cost and safety**
+- **RL-7** **No database work when limited.** A `429` makes no `read_transaction` call and doesn't use the engine. The test patches the helper, as RA-16b does.
+- **RL-8** **304s count.** Conditional requests consume tokens. Once the bucket is empty, a matching `If-None-Match` gets `429`, not `304`.
+- **RL-9** **Thread safety.** With the clock frozen, concurrent requests from one client through the threadpool give exactly `burst` successes.
+- **RL-10** **Bounded memory.** With `max_clients = K`, K + M distinct clients never leave more than K buckets, and an evicted client starts again with a full bucket.
+
+**Configuration, docs and logs**
+- **RL-11** **Configuration.** The limits come from configuration. Zero, negative or non-integer values, or an invalid trusted-proxy entry, refuse at startup with a fixed error.
+- **RL-12** **Docs and snapshot.** `API.md` documents the `429`, `Retry-After`, the defaults, the per-worker caveat, `API_TRUSTED_PROXIES` and the run flags. The OpenAPI snapshot includes `429` on both routes.
+- **RL-13** **Logs.** A `429` writes exactly one JSON log line, with event `rate_limited` and no client address, path or header values.
+
+### For Bryan
+
+- **Decision 26 (open):** recommended as a follow-up PR on top of R1, before any public deployment.
+- **Edge limits:** a deployment checklist item once the API host is chosen.
+
+There are no new decisions. The limits are configurable defaults, not product choices.
+
+**Owner after review:** the implementer, on `feat/m5-rate-limit` from R1, test-maker first. **Review:** the checker; the auditor for keying, the trusted-proxy configuration and memory bounds (RL-5, RL-6, RL-10).
