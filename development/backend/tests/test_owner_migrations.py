@@ -12,6 +12,7 @@ drops both. The roles are cluster-wide, so they are dropped in `finally`, even w
 setup fails. The same file works with main's three group roles and #22's four.
 """
 
+import logging
 import re
 import secrets
 import sys
@@ -201,6 +202,103 @@ def test_mo1_a_non_superuser_createrole_admin_runs_the_documented_order(engine):
             assert not conn.execute(text(
                 "SELECT has_table_privilege(:a, 'perennial.securities', 'INSERT')"),
                 {"a": names["admin"]}).scalar()
+
+
+def admin_creates_roles(admin, names):
+    """The group roles, created by the admin as a roles-only step would: it gets ADMIN
+    OPTION on them (PostgreSQL 16+), and nothing more."""
+    with admin.begin() as conn:
+        for role in group_roles(names):
+            conn.execute(text(f'CREATE ROLE "{role}" NOLOGIN'))
+
+
+def test_ro1_grants_as_the_admin_re_own_what_a_no_owner_restore_left_it(engine):
+    """Checker RO-1, the restore path: after pg_restore --no-owner, run by the admin,
+    the admin owns perennial, its tables and alembic_version (here the admin runs the
+    migrations itself, which leaves the same state). Grants as that admin must end
+    where MO-1 ends, with the admin still SET-only on the owner."""
+    with scratch(engine) as (target, names), supabase_style_admin(engine, target, names) as admin:
+        admin_creates_roles(admin, names)
+        migrate(admin)
+        assert owners(target) == {names["admin"]}  # the restored state
+        provision(admin, names, "grants")
+        assert owners(target) == {names["owner"]}
+        with target.connect() as conn:
+            assert conn.execute(text(
+                "SELECT pg_has_role(:a, :o, 'SET'), pg_has_role(:a, :o, 'USAGE')"),
+                {"a": names["admin"], "o": names["owner"]}).one() == (True, False)
+
+
+# ── A shared platform database (auditor): PUBLIC's CONNECT ─
+
+
+def _outsider_connects(engine, target, names):
+    """A login outside our roles that relies on PUBLIC's CONNECT, as Supabase's
+    service logins (authenticator, supabase_auth_admin, ...) do."""
+    from sqlalchemy.exc import OperationalError
+
+    from tests.conftest import pinned_engine
+
+    names["outsider"] = f"rd_outsider_{secrets.token_hex(5)}"
+    password = f"synthetic-{secrets.token_hex(8)}"
+    with engine.begin() as conn:
+        conn.execute(text(f'CREATE ROLE "{names["outsider"]}" LOGIN PASSWORD \'{password}\''))
+    outsider = pinned_engine(target.url.set(username=names["outsider"], password=password))
+    try:
+        with outsider.connect() as conn:
+            return conn.execute(text("SELECT 1")).scalar() == 1
+    except OperationalError:
+        return False
+    finally:
+        outsider.dispose()
+
+
+def _public_privileges(target):
+    with target.connect() as conn:
+        return conn.execute(text(
+            "SELECT has_database_privilege('public', current_database(), 'CONNECT'),"
+            " has_database_privilege('public', current_database(), 'TEMPORARY')")).one()
+
+
+def _notices(caplog):
+    return [r.getMessage() for r in caplog.records
+            if r.levelno >= logging.INFO and "public" in r.getMessage().lower()]
+
+
+def _group_roles_connect(target, names):
+    """Our group roles' CONNECT comes from explicit grants, never only from PUBLIC."""
+    with target.connect() as conn:
+        explicit = set(conn.execute(text(
+            "SELECT pg_get_userbyid(a.grantee) FROM pg_database d, aclexplode(d.datacl) a"
+            " WHERE d.datname = current_database() AND a.privilege_type = 'CONNECT'"
+            " AND a.grantee <> 0")).scalars())
+    return set(group_roles(names)) <= explicit
+
+
+def test_bootstrap_keeps_publics_connect_on_a_shared_platform_database(engine, caplog):
+    """With a schema named auth (Supabase's postgres database), bootstrap skips the
+    PUBLIC revoke on CONNECT and TEMPORARY, and says so in a log record."""
+    with scratch(engine) as (target, names):
+        with target.begin() as conn:
+            conn.execute(text("CREATE SCHEMA auth"))
+        caplog.set_level(logging.DEBUG)
+        caplog.clear()
+        provision(target, names, "bootstrap")
+        assert tuple(_public_privileges(target)) == (True, True)
+        assert _outsider_connects(engine, target, names)
+        assert _notices(caplog), "no log record says PUBLIC's revoke was skipped"
+        assert _group_roles_connect(target, names)
+
+
+def test_bootstrap_still_revokes_publics_connect_on_a_dedicated_database(engine, caplog):
+    with scratch(engine) as (target, names):
+        caplog.set_level(logging.DEBUG)
+        caplog.clear()
+        provision(target, names, "bootstrap")
+        assert tuple(_public_privileges(target)) == (False, False)
+        assert not _outsider_connects(engine, target, names)
+        assert _notices(caplog) == []
+        assert _group_roles_connect(target, names)
 
 
 # ── MO-3: the owner's rights don't change ────────────────
