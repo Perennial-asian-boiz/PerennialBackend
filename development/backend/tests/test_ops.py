@@ -71,8 +71,11 @@ def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
     import secrets
 
     suffix = secrets.token_hex(6)
-    owner, importer, reader = [f"ops_test_{r}_{suffix}" for r in ("owner", "importer", "reader")]
-    roles = (owner, importer, reader)
+    # M5 R1: provisioning manages four groups; the API role is covered in test_read_api.py.
+    owner, importer, reader, api = [
+        f"ops_test_{r}_{suffix}" for r in ("owner", "importer", "reader", "api")
+    ]
+    roles = (owner, importer, reader, api)
     with engine.begin() as conn:
         # Legacy broad grants, including column grants, must be removed on reapply.
         provision(conn.connection.driver_connection, roles, phase="bootstrap")
