@@ -22,6 +22,7 @@ from test_owner_migrations import (
     provisioned,
     schemas,
     scratch,
+    supabase_style_admin,
     version,
 )
 from test_pr22_fix import EXPECTED_APP, _app_privileges
@@ -47,6 +48,28 @@ def test_mo1_a_fresh_database_reaches_the_provisioned_app_as_the_owner(engine):
         assert owners(target, "perennial") == {names["owner"]}
         assert owners(target, "app") == {names["owner"]}
         assert _app_privileges(target, names["api"]) == EXPECTED_APP
+
+
+def test_mo1_s3_a_non_superuser_createrole_admin_provisions_app(engine):
+    """Check S3, #22's half: the Supabase-style admin also runs provision_api_role.py.
+    It re-owns app to the owner and, as option (a)'s definer, takes
+    app.email_is_registered itself, ending with SET but not INHERIT on the owner."""
+    with scratch(engine) as (target, names), supabase_style_admin(engine, target, names) as admin:
+        provision(admin, names, "bootstrap")
+        migrate(target, owner=names["owner"])  # the migration login's session role
+        provision(admin, names, "grants")
+        provision_api(admin, names)
+        assert version(target) == head()
+        assert owners(target, "app") == {names["owner"]}
+        assert _app_privileges(target, names["api"]) == EXPECTED_APP
+        with target.connect() as conn:
+            assert conn.execute(text(
+                "SELECT pg_get_userbyid(proowner) FROM pg_proc"
+                " WHERE oid = 'app.email_is_registered(text)'::regprocedure")).scalar() == names["admin"]
+            can_set, inherits = conn.execute(text(
+                "SELECT pg_has_role(:a, :o, 'SET'), pg_has_role(:a, :o, 'USAGE')"),
+                {"a": names["admin"], "o": names["owner"]}).one()
+            assert (can_set, inherits) == (True, False)
 
 
 # ── MO-4: bootstrap and app ──────────────────────────────

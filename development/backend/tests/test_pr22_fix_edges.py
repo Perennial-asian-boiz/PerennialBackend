@@ -315,8 +315,9 @@ def test_an_older_backup_fails_closed_in_the_documented_restore_order(engine, ol
                 with pytest.raises(Exception):
                     provision_roles(scratch, names, "grants")
                     provision_api(scratch, names)
-                with scratch.connect() as conn:
-                    assert conn.execute(text("SELECT to_regnamespace('app')")).scalar() is None
+                with scratch.connect() as conn:  # option 2's provisioning may leave app empty
+                    assert conn.execute(text("SELECT count(*) FROM pg_class"
+                                             " WHERE relnamespace = to_regnamespace('app')")).scalar() == 0
             finally:
                 _release(scratch, names)
     finally:

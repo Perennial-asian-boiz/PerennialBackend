@@ -56,7 +56,8 @@ def _script():
 def _app_revision():
     """(revision, down_revision) of the migration that creates schema app."""
     for rev in _script().walk_revisions():
-        if "CREATE SCHEMA IF NOT EXISTS app" in Path(rev.path).read_text():
+        # Either form: IF NOT EXISTS, or option 2's catalog-checked CREATE (decision 37).
+        if re.search(r"CREATE SCHEMA (IF NOT EXISTS )?app\b", Path(rev.path).read_text()):
             return rev.revision, rev.down_revision
     raise AssertionError("no migration creates schema app")
 
