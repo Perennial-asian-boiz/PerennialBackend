@@ -40,9 +40,11 @@ data/
 # virtual environment
 .venv
 
-# cursor file for blue sky
-cursor.txt
 tickers.json
+
+# blue sky files
+bluesky_sentiments.json
+cursor.txt
 
 #mastodon data files
 mastodon_posts.json
