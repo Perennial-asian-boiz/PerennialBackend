@@ -54,8 +54,9 @@ parent role membership) are rejected. Deployments must also audit login group
 membership and privileges from other roles: this tool does not rewrite external
 login accounts or repair arbitrary legacy authorization.
 
-Run bootstrap using the administrative secret, migrate using the owner identity,
-then reapply grants using the administrative secret:
+Run bootstrap using the administrative secret before every upgrade, not only the
+first, then migrate using the owner identity, then reapply grants using the
+administrative secret:
 
 ```bash
 .venv/bin/python development/database/ops/provision_roles.py --phase bootstrap
@@ -64,8 +65,16 @@ then reapply grants using the administrative secret:
 .venv/bin/python development/database/ops/provision_roles.py --phase grants
 ```
 
-Bootstrap reserves `perennial` for the owner and grants owner CREATE in `public`
-for Alembic's version table. Grant phase transfers the explicitly listed tables
+Bootstrap is idempotent. It creates schema `perennial` owned by the owner, and the
+owner deliberately holds no `CREATE` on the database, so it cannot create schemas,
+publications or extensions. PostgreSQL checks that right before `IF NOT EXISTS`, so
+a migration creates a schema only when `to_regnamespace()` finds none: that happens
+only where nothing ran bootstrap (the tests, dev Compose and the quality gate, which
+migrate as a superuser). A migration that adds a schema must also add it to bootstrap;
+without that, the owner's upgrade fails with `permission denied for database` and
+rolls back.
+
+Bootstrap also grants owner CREATE in `public` for Alembic's version table. Grant phase transfers the explicitly listed tables
 and their attached identity sequences to the owner, and fails if the migrated
 schema does not match the policy. Custom groups are available through `--owner`,
 `--importer`, and `--reader`. An administrator separately creates authenticated

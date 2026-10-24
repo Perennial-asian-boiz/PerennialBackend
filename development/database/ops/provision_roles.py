@@ -1,7 +1,9 @@
 """Provision dedicated NOLOGIN owner/importer/reader groups using an explicit table policy.
 
-Run bootstrap before migrations and grants after every migration. Administrative
-credentials come only from OPS_DATABASE_URL; login membership/secrets are deployment-owned.
+Run bootstrap before every upgrade, and grants after every migration. Bootstrap is
+idempotent and creates the schemas the owner migrates into: the owner holds no CREATE
+on the database. Administrative credentials come only from OPS_DATABASE_URL; login
+membership/secrets are deployment-owned.
 """
 import argparse
 import os
