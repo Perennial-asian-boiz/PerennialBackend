@@ -112,10 +112,11 @@ def provision_target(target, roles, phase):
     import provision_api_role
     import provision_roles
 
+    owner, importer, reader, api = roles
     with psycopg.connect(**target) as conn:
         provision_roles.provision(conn, roles, phase=phase)
         if phase == "grants" and conn.execute("SELECT to_regnamespace('app')").fetchone()[0]:
-            provision_api_role.provision(conn, roles[3], owner=roles[0])
+            provision_api_role.provision(conn, api, owner=owner, importer=importer, reader=reader)
 
 
 def restore_into_disposable(admin, source, expected, report, restore, roles=None):
