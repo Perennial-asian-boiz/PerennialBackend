@@ -10,23 +10,35 @@ Design: docs/work-items/m5-read-api-design-note.md. Schemas: docs/technical-spec
   fields from immutable data only, and bodies are canonical JSON (sorted keys,
   no insignificant whitespace), so a publication's body never changes (RA-6).
 
-#22's application mounts ``router`` (it already carries ``/v1``), sets
-``app.state.engine`` and runs ``check_startup`` before serving.
+- Every route is rate limited per client before any database work
+  (``rate_limit``, installed by ``install``; the addendum's RL criteria).
+
+#22's application mounts ``router`` (it already carries ``/v1``), calls
+``install``, sets ``app.state.engine`` and runs ``check_startup`` before serving.
 """
 
 import json
+import os
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from datetime import timezone
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.engine import Connection, Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from src.api.rate_limit import (
+    Kind,
+    RateLimitConfig,
+    RateLimitConfigError,
+    RateLimiter,
+    client_key,
+)
 from src.db import models as m
 from src.ingestion.schemas import _TICKER
 
@@ -131,7 +143,8 @@ class SecurityResponse(BaseModel):
 class ErrorBody(BaseModel):
     detail: str
     code: str = Field(
-        description="no_current_publication, unknown_security or invalid_request"
+        description="no_current_publication, unknown_security, invalid_request"
+        " or rate_limited"
     )
 
 
@@ -251,6 +264,80 @@ def _security(conn: Connection, symbol: str) -> Any:
     ).one_or_none()
 
 
+# ── rate limiting (addendum: RL-*) ───────────────────────
+
+
+class RateLimited(StarletteHTTPException):
+    """Over the limit: 429 with Retry-After, rendered by ``install``'s handler."""
+
+    code = "rate_limited"
+
+    def __init__(self, retry_after: int):
+        super().__init__(
+            429,
+            "too many requests; retry later",
+            headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"},
+        )
+
+
+class RateLimiterMissing(StarletteHTTPException):
+    """A limited route on an app where ``install`` never ran: fail closed (RL-14)."""
+
+    code = "rate_limiter_missing"
+
+    def __init__(self) -> None:
+        super().__init__(503, f"{self.code}: the rate limiter is not installed")
+
+
+def _limit(request: Request, kind: Kind) -> None:
+    limiter = getattr(request.app.state, "rate_limiter", None)
+    if not isinstance(limiter, RateLimiter):
+        raise RateLimiterMissing()
+    client = request.client
+    retry_after = limiter.check(kind, client_key(client.host if client else None))
+    if retry_after is not None:
+        raise RateLimited(retry_after)
+
+
+async def rate_limit(request: Request) -> None:
+    """The read bucket, on every ``router`` route before anything else runs."""
+    _limit(request, "read")
+
+
+async def auth_rate_limit(request: Request) -> None:
+    """The auth bucket, for #22's signup and forgot-password (email lookups)."""
+    _limit(request, "auth")
+
+
+def install(app: FastAPI, config: RateLimitConfig) -> None:
+    """Rate limiting for an app: the only place ProxyHeadersMiddleware is added.
+
+    The proxy middleware rewrites request.client from X-Forwarded-For for
+    trusted peers only; run uvicorn with --no-proxy-headers (proxy_headers=False)
+    so this is the one trust decision. Limiter state is per app instance.
+    """
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=config.trusted_hosts())
+    app.state.rate_limiter = RateLimiter(config)
+
+    @app.exception_handler(RateLimited)
+    async def rate_limited(request: Request, exc: RateLimited) -> Response:
+        response = _error(429, exc.code, exc.detail)
+        response.headers.update(exc.headers or {})
+        return response
+
+
+RATE_LIMITED_429: dict[str, Any] = {
+    "model": ErrorBody,
+    "description": "rate_limited: too many requests from this client",
+    "headers": {
+        "Retry-After": {
+            "description": "Whole seconds until the next request is allowed",
+            "schema": {"type": "integer"},
+        }
+    },
+}
+
+
 # ── routes ───────────────────────────────────────────────
 
 
@@ -275,7 +362,12 @@ ERRORS: dict[int | str, dict[str, Any]] = {
 }
 WATCHLIST_404 = {"model": ErrorBody, "description": "No current publication"}
 
-router = APIRouter(prefix="/v1")
+# The limit runs before every other dependency, validation and database use.
+router = APIRouter(
+    prefix="/v1",
+    dependencies=[Depends(rate_limit)],
+    responses={429: RATE_LIMITED_429},
+)
 
 
 @router.get(
@@ -418,6 +510,8 @@ def _install_error_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if isinstance(exc, RateLimiterMissing):
+            return _error(exc.status_code, exc.code, "request failed")
         code = {404: "not_found", 405: "method_not_allowed"}.get(
             exc.status_code, "error"
         )
@@ -425,13 +519,20 @@ def _install_error_handlers(app: FastAPI) -> None:
 
 
 def create_app(
-    engine: Engine | None = None, *, api_role: str = "perennial_api"
+    engine: Engine | None = None,
+    *,
+    api_role: str = "perennial_api",
+    rate_limit: RateLimitConfig | None = None,
 ) -> FastAPI:
     """The R1 test and local app: ``router``, error handlers and the startup check.
 
     With no engine, one is made for the ``api`` workload from DATABASE_URL.
     ``api_role`` is the group role the login must inherit, and nothing else.
+    With no ``rate_limit``, the limits come from the API_* environment
+    variables; invalid settings raise RateLimitConfigError (fixed text).
     """
+    if rate_limit is None:
+        rate_limit = RateLimitConfig.from_environ(os.environ)
     if engine is None:
         from src.db.session import make_engine
 
@@ -447,7 +548,18 @@ def create_app(
     app.state.api_role = api_role
     app.include_router(router)
     _install_error_handlers(app)
+    install(app, rate_limit)
     return app
 
 
-__all__ = ["create_app", "check_startup", "read_transaction", "router"]
+__all__ = [
+    "RateLimitConfig",
+    "RateLimitConfigError",
+    "auth_rate_limit",
+    "check_startup",
+    "create_app",
+    "install",
+    "rate_limit",
+    "read_transaction",
+    "router",
+]
