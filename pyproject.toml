@@ -90,6 +90,7 @@ files = [
     "development/backend/src/api/app.py",
     "development/backend/src/api/dashboard.py",
     "development/backend/src/api/dashboard_fixture.py",
+    "development/backend/src/api/market_status.py",
     "development/backend/src/api/rate_limit.py",
     "development/backend/src/api/read.py",
 ]
