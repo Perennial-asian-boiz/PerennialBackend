@@ -68,8 +68,28 @@ A security by ticker or alias, with its entry in the current publication.
 | `is_active` | boolean | false for a retired security |
 | `sector` | string or null | from the reviewed company profile |
 | `industry` | string or null | from the reviewed company profile |
+| `summary` | object or null | a brief company summary (S1-12); see below. Always present |
 
 The profile's `legal_name`, `cik` and other columns are never served.
+
+### The `summary` object
+
+A short excerpt of a published company description, stored at ingestion. The API reads only stored columns: no provider, model or network call happens at request time.
+
+```json
+"summary": {
+  "text": "Synthetic Widgets makes small parts for home tools. It sells them to stores in many states.",
+  "source": {"name": "Synthetic Filings", "url": "https://filings.example.com/zzsw/profile"},
+  "as_of": "2026-10-20T12:00:00+00:00"
+}
+```
+
+- **`text`:** 2 to 4 sentences, verbatim from the source's description. There's no rewritten summary (Bryan declined Q9). Show it with "Source: <name>", linked to `source.url`.
+- **`source.url`** is always `https` with a host. A summary whose stored URL is anything else is served as `null` (the database already refuses one).
+- **`as_of`:** when the summary was stored, ISO 8601 in UTC (`+00:00`), like the publication's `created_at`.
+- **`"summary": null`** when the security has no company profile, no stored summary, or its summary status is `unavailable`. Show "Summary not available".
+- The route has no `ETag` (`Cache-Control: no-cache`). If one is ever added, it must cover `as_of`.
+- The profile's readability grade and description digest are never served.
 
 ## `GET /v1/market-status`
 

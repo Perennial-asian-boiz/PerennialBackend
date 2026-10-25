@@ -341,14 +341,32 @@ def _version(conn):
     return conn.execute(text("SELECT version_num FROM public.alembic_version")).scalar()
 
 
-def _previous_revision():
+# Pinned, not "the single head": a later migration on top (0012 and on) must not
+# turn these into tests of itself. Each test steps the session database down to
+# MIGRATION first, exercises MIGRATION -> PREVIOUS alone, then restores head.
+MIGRATION, PREVIOUS = "0011", "0010"
+
+
+def _revisions():
+    """(head, MIGRATION, PREVIOUS), checking the pins against the script directory."""
     from alembic.config import Config
     from alembic.script import ScriptDirectory
     from tests.conftest import ALEMBIC_INI
 
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
+    assert script.get_revision(MIGRATION).down_revision == PREVIOUS
     (head,) = script.get_heads()
-    return head, script.get_revision(head).down_revision
+    return head, MIGRATION, PREVIOUS
+
+
+def _at_migration(conn):
+    """Downgrade the session database to MIGRATION (nothing to do while it's head)."""
+    from alembic import command
+    from tests.conftest import alembic_config
+
+    command.downgrade(alembic_config(conn), MIGRATION)
+    conn.commit()
+    assert _version(conn) == MIGRATION
 
 
 def _schema(conn):
@@ -393,7 +411,7 @@ def test_downgrade_restores_the_previous_schema_exactly_and_upgrades_again(
     from alembic.migration import MigrationContext
     from tests.conftest import alembic_config
 
-    head, previous = _previous_revision()
+    head, migration, previous = _revisions()
     with scratch_database.connect() as conn:
         command.upgrade(alembic_config(conn), previous)
         conn.commit()
@@ -402,6 +420,7 @@ def test_downgrade_restores_the_previous_schema_exactly_and_upgrades_again(
         require_market_caps(conn)
         assert _version(conn) == head
         try:
+            _at_migration(conn)
             command.downgrade(alembic_config(conn), previous)
             conn.commit()
             assert not has_market_caps(conn)
@@ -467,7 +486,23 @@ def test_downgrade_refuses_while_market_caps_state_exists(engine, state):
 
     with engine.connect() as conn:
         require_market_caps(conn)
-    head, previous = _previous_revision()
+    head, migration, previous = _revisions()
+    with engine.connect() as conn:
+        _at_migration(conn)
+    try:
+        _refused_downgrade(engine, state, migration, previous)
+    finally:
+        with engine.connect() as conn:
+            command.upgrade(alembic_config(conn), "head")
+            conn.commit()
+            assert _version(conn) == head and has_market_caps(conn)
+
+
+def _refused_downgrade(engine, state, migration, previous):
+    """With market_caps state present, MIGRATION -> PREVIOUS refuses atomically."""
+    from alembic import command
+    from tests.conftest import alembic_config
+
     _populate(engine, state)
     with engine.connect() as conn:
         before = conn.execute(
@@ -485,11 +520,9 @@ def test_downgrade_refuses_while_market_caps_state_exists(engine, state):
                 command.downgrade(alembic_config(conn), previous)
         finally:
             conn.rollback()
-            if _version(conn) != head:  # a downgrade that went through: restore the session DB
-                command.upgrade(alembic_config(conn), "head")
-                conn.commit()
-        # Atomic: still at head with every table and row intact.
-        assert _version(conn) == head and has_market_caps(conn)
+        # Atomic: still at MIGRATION with every table and row intact (the caller
+        # restores head either way).
+        assert _version(conn) == migration and has_market_caps(conn)
         after = conn.execute(
             text(
                 "SELECT (SELECT count(*) FROM perennial.ingestion_runs WHERE source='market_caps'),"

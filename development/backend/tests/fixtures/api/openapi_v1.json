@@ -427,6 +427,17 @@
           ],
           "title": "Security Type"
         },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Summary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A brief company summary (S1-12), or null when there is none"
+        },
         "symbol": {
           "title": "Symbol",
           "type": "string"
@@ -442,7 +453,8 @@
         "country",
         "is_active",
         "sector",
-        "industry"
+        "industry",
+        "summary"
       ],
       "title": "Security",
       "type": "object"
@@ -541,6 +553,50 @@
         "age_seconds"
       ],
       "title": "StaleSource",
+      "type": "object"
+    },
+    "Summary": {
+      "properties": {
+        "as_of": {
+          "description": "When it was stored: ISO 8601, UTC",
+          "title": "As Of",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/components/schemas/SummarySource"
+        },
+        "text": {
+          "description": "2 to 4 sentences, verbatim from the source's description",
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "source",
+        "as_of"
+      ],
+      "title": "Summary",
+      "type": "object"
+    },
+    "SummarySource": {
+      "properties": {
+        "name": {
+          "description": "Who published the description",
+          "title": "Name",
+          "type": "string"
+        },
+        "url": {
+          "description": "An https link to that description",
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "title": "SummarySource",
       "type": "object"
     },
     "WatchlistResponse": {
