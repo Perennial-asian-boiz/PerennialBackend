@@ -69,6 +69,11 @@ Run
   python reddit.py --login --headed  (automatic Playwright login, visible window)
   python reddit.py --mode search --search-pages 3
   python reddit.py --output results.json --log-file logs/reddit.log
+  python reddit.py --days 3 --time 30  (stop making requests after 30 min)
+
+--time T stops making new requests after T minutes (counted from start, login
+included). Threads already fetched are still scored and the results saved;
+this is not counted as stopping early (exit code 0).
 """
 
 from __future__ import annotations
@@ -891,6 +896,8 @@ class Ctx:
     sem: asyncio.Semaphore = None
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     stop_reason: str = ""
+    time_up: asyncio.Event = field(default_factory=asyncio.Event)   # --time reached
+    deadline: float | None = None    # time.monotonic() value from --time
 
     consecutive_blocks: int = 0
     total_blocks: int = 0
@@ -932,12 +939,32 @@ def trip(ctx: Ctx, reason: str, level: int = logging.ERROR):
 # --------------------------------------------------------------------------- #
 # Fetch with block detection
 # --------------------------------------------------------------------------- #
+def halted(ctx: Ctx) -> bool:
+    """No new requests: the circuit breaker tripped or the --time limit was reached."""
+    return ctx.stop.is_set() or ctx.time_up.is_set()
+
+
 async def nap(ctx: Ctx, seconds: float):
-    """Sleep, but wake immediately if the circuit breaker trips."""
+    """Sleep, but wake immediately if the circuit breaker trips or time is up."""
+    if seconds <= 0:
+        return
+    waiters = {asyncio.ensure_future(ctx.stop.wait()),
+               asyncio.ensure_future(ctx.time_up.wait())}
     try:
-        await asyncio.wait_for(ctx.stop.wait(), timeout=seconds)
-    except asyncio.TimeoutError:
-        pass
+        await asyncio.wait(waiters, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for w in waiters:
+            w.cancel()
+
+
+async def time_limit(ctx: Ctx):
+    """Set ctx.time_up at the --time deadline. In-flight requests finish, no new
+    ones start, and every thread already fetched is still scored."""
+    await asyncio.sleep(max(0.0, ctx.deadline - time.monotonic()))
+    if not ctx.stop.is_set():
+        log.info("time limit reached, no more requests; scoring what was fetched")
+        print("\nTime limit reached: no more requests, scoring what was fetched...\n")
+    ctx.time_up.set()
 
 
 async def fetch(ctx: Ctx, url: str, params: dict | None = None,
@@ -959,7 +986,7 @@ async def fetch(ctx: Ctx, url: str, params: dict | None = None,
     what = _req_label(url, params)
     attempt = 0
     while attempt < ctx.retries:
-        if ctx.stop.is_set():
+        if halted(ctx):
             return None
 
         wait = ctx.cooldown_until - time.monotonic()
@@ -970,13 +997,13 @@ async def fetch(ctx: Ctx, url: str, params: dict | None = None,
         throttled = False
         latency = None
         async with ctx.sem:
-            if ctx.stop.is_set():
+            if halted(ctx):
                 return None
             if ctx.cooldown_until > time.monotonic():
                 throttled = True  # a block happened while we waited for a slot
             else:
                 await nap(ctx, random.uniform(0.5, 1.5) * ctx.delay)  # jitter
-                if ctx.stop.is_set():
+                if halted(ctx):
                     return None
                 try:
                     ctx.total_requests += 1
@@ -1337,11 +1364,11 @@ async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
     ctx.sub_status[sub] = "interrupted"
 
     try:
-        while url and not ctx.stop.is_set():
+        while url and not halted(ctx):
             what, info = _req_label(url, params), {}
             soup = await fetch(ctx, url, params, info=info)
             if soup is None:
-                if not ctx.stop.is_set():
+                if not halted(ctx):
                     log.error("listing r/%s/new page=%d failed, giving up on this "
                               "listing", sub, page)
                 return
@@ -1380,11 +1407,11 @@ async def produce_listing(ctx: Ctx, sub: str, kind: str, pages: int,
     url, params = f"{BASE}/r/{sub}/{kind}/", {"limit": 100}
     n, page, fetched = 0, 1, 0
     try:
-        while url and page <= pages and not ctx.stop.is_set():
+        while url and page <= pages and not halted(ctx):
             what, info = _req_label(url, params), {}
             soup = await fetch(ctx, url, params, info=info)
             if soup is None:
-                if not ctx.stop.is_set():
+                if not halted(ctx):
                     log.error("listing r/%s/%s page=%d failed, giving up on this "
                               "listing", sub, kind, page)
                 return
@@ -1425,13 +1452,13 @@ async def produce_search(ctx: Ctx, query: str, queue: asyncio.Queue, pages: int)
               "t": search_time_filter(ctx.cutoff), "limit": 100}
     n, page, fetched = 0, 1, 0
     try:
-        while url and page <= pages and not ctx.stop.is_set():
+        while url and page <= pages and not halted(ctx):
             # "#header" exists on every real old.reddit page, including zero-result
             # searches, so a ticker nobody mentions is not mistaken for a block
             what, info = _req_label(url, params), {}
             soup = await fetch(ctx, url, params, expect="#header", info=info)
             if soup is None:
-                if not ctx.stop.is_set():
+                if not halted(ctx):
                     log.error("search q=%s page=%d failed, giving up on this query",
                               query, page)
                 return
@@ -1462,7 +1489,7 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
     while True:
         post = await queue.get()
         try:
-            if ctx.stop.is_set():
+            if halted(ctx):
                 continue  # drain the queue so queue.join() can finish
 
             comments, seen_cids = [], set()
@@ -1473,7 +1500,7 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
                 soup = await fetch(ctx, post["permalink"], {"limit": 500, "sort": sort},
                                    info=info)
                 if soup is None:
-                    if ctx.stop.is_set():
+                    if halted(ctx):
                         break
                     log.error("thread page post=%s sort=%s failed, skipping it",
                               post["post_id"], sort)
@@ -1689,6 +1716,7 @@ def run_summary(ctx: Ctx, mode: str = "crawl") -> dict:
     return {
         "mode": mode,
         "stopped_early": ctx.stop.is_set(),
+        "time_limit_reached": ctx.time_up.is_set(),
         "stop_reason": ctx.stop_reason or None,
         "total_requests": ctx.total_requests,
         "total_blocked_responses": ctx.total_blocks,
@@ -1738,12 +1766,14 @@ async def run(ctx: Ctx, args) -> None:
     backend = make_backend(args)
     ctx.backend = backend
     queue: asyncio.Queue = asyncio.Queue()
-    workers, ckpt, work = [], None, None
+    workers, ckpt, work, timer = [], None, None, None
     try:
         await backend.start()
         workers = [asyncio.create_task(comment_worker(ctx, queue))
                    for _ in range(args.concurrency)]
         ckpt = asyncio.create_task(checkpoint_loop(ctx, args.checkpoint_secs))
+        timer = (asyncio.create_task(time_limit(ctx)) if ctx.deadline is not None
+                 else None)
 
         async def crawl():
             jobs = []
@@ -1770,7 +1800,7 @@ async def run(ctx: Ctx, args) -> None:
     finally:
         # cancel everything still running; never wait on stragglers for long
         # (the results file is written by main(), in its own finally block)
-        tasks = [t for t in workers + [ckpt, work] if t is not None]
+        tasks = [t for t in workers + [ckpt, work, timer] if t is not None]
         for t in tasks:
             t.cancel()
         if tasks:
@@ -1784,7 +1814,11 @@ async def run(ctx: Ctx, args) -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=int, default=7)
+    ap.add_argument("--days", type=float, default=7,
+                    help="only keep posts / comments from the last N days (default 7)")
+    ap.add_argument("--time", type=float, default=None,
+                    help="stop making requests after this many minutes; threads already "
+                         "fetched are still scored and saved (default: no limit)")
     ap.add_argument("--max-posts", type=int, default=None,
                     help="cap posts per subreddit (for testing)")
     ap.add_argument("--output", default=str(OUTPUT_FILE),
@@ -1838,6 +1872,12 @@ def main():
                     help="posts older than the window are only fetched if pinned, a "
                          "daily thread, or at least this many comments (default 50)")
     args = ap.parse_args()
+    if args.days <= 0:
+        ap.error("--days must be greater than 0")
+    if args.time is not None and args.time <= 0:
+        ap.error("--time must be greater than 0")
+    # counted from process start (login included), so the run stays inside the limit
+    deadline = time.monotonic() + args.time * 60 if args.time is not None else None
 
     args.listings = [x.strip() for x in args.extra_listings.split(",") if x.strip()]
     bad = set(args.listings) - {"hot", "rising"}
@@ -1890,11 +1930,12 @@ def main():
         max_blocks=args.max_blocks,
         max_posts=args.max_posts,
         matcher=matcher,
+        deadline=deadline,
     )
     tickers = set(companies.values())
     ctx.tickers, ctx.output_path = tickers, args.output
     run_start = time.monotonic()
-    log.info("run start tickers=%s days=%d since=%s mode=%s backend=%s concurrency=%d "
+    log.info("run start tickers=%s days=%g since=%s mode=%s backend=%s concurrency=%d "
              "delay=%.1fs max_posts=%s extra_listings=%s checkpoint=%ss",
              sorted(tickers), args.days, ctx.cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
              args.mode, args.backend, args.concurrency, args.delay, args.max_posts,
@@ -1926,6 +1967,8 @@ def main():
         if incomplete:
             print(f"Subreddit listings not fully crawled: {', '.join(incomplete)}")
         sys.exit(2)
+    if s["time_limit_reached"]:
+        print("Time limit reached: stopped making requests; everything fetched was scored.")
 
 
 if __name__ == "__main__":
