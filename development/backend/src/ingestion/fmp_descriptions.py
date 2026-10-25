@@ -16,7 +16,6 @@ cause or context, a log line or the stored source link.
 """
 
 from typing import Any
-from urllib.parse import quote
 
 import requests
 
@@ -24,9 +23,9 @@ from src.ingestion.collectors import _fetcher, _get_json
 from src.ingestion.company_summaries import Description, DescriptionAdapterError
 
 PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
-# FMP's public company page; financialmodelingprep.com/financial-summary/<symbol>
-# redirects here. It holds no credential, so it is safe to store and show.
-COMPANY_PAGE = "https://site.financialmodelingprep.com/financial-summary/{symbol}"
+# Decision 78 (a): the source link is FMP's public home page for every symbol,
+# because its per-company page only loads after logging in. No credential.
+SOURCE_URL = "https://financialmodelingprep.com/"
 SOURCE_NAME = "Financial Modeling Prep"
 REQUEST_TIMEOUT = 10  # as collect_market_caps
 
@@ -102,5 +101,5 @@ class FmpProfileDescriptions:
             raise DescriptionAdapterError("malformed_response")
         if not text.strip():
             return None
-        url = COMPANY_PAGE.format(symbol=quote(symbol, safe=""))
-        return Description(text=text, url=url)  # verbatim: selection is the job's
+        # Verbatim: selecting the excerpt is the job's.
+        return Description(text=text, url=SOURCE_URL)
