@@ -111,6 +111,11 @@ class Settings(ProviderSettings):
     # Pages per chamber per Congress run. The free FMP plan serves only page 0;
     # raise this on a paid tier (docs/work-items/congress-incremental-design-note.md).
     fmp_max_pages: int = Field(default=1, ge=1, le=1000)
+    # House trades come from the Clerk of the House's PTR filings (no key, every
+    # member). "fmp" uses FMP's House page instead, 20 rows per run on the free plan.
+    congress_house_source: Literal["house_clerk", "fmp"] = "house_clerk"
+    # Senate trades come from FMP's free page, accumulated into history.
+    congress_include_fmp_senate: bool = True
     quality_thresholds: dict[str, QualityThreshold] = Field(
         default_factory=_quality_defaults
     )
@@ -121,6 +126,20 @@ class Settings(ProviderSettings):
         default=MARKET_CAP_MAX_REUSE_AGE, gt=timedelta(0)
     )
     trading_holidays: tuple[date, ...] = TRADING_HOLIDAYS
+    # A name in src.ingestion.market_caps.ADAPTERS. None keeps the legacy
+    # market-cap path (M4 MC-A); no production adapter exists yet.
+    market_cap_adapter: str | None = None
+
+    @field_validator("market_cap_adapter")
+    @classmethod
+    def known_market_cap_adapter(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        from src.ingestion.market_caps import ADAPTERS  # the registry imports Settings
+
+        if value not in ADAPTERS:
+            raise ValueError("unknown market-cap adapter")
+        return value
 
     @field_validator("source_policies")
     @classmethod
