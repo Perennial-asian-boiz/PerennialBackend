@@ -3,7 +3,12 @@ SOURCE:
     Financial Modeling Prep (FMP) stable endpoints
     Senate: https://financialmodelingprep.com/stable/senate-latest
     House:  https://financialmodelingprep.com/stable/house-latest
-    Free tier: 250 requests/day
+    Free tier: 250 requests/day, and only the 20 latest trades per chamber
+
+    House trades come from the Clerk of the House instead (house_clerk.py):
+    the official PTR filings FMP's House rows link to, every member, no key.
+    FMP's House rows are kept only when that collection fails, and
+    trades_congress.json records which source the House rows came from.
 
 SCHEDULE:
     Runs daily at 9:00am via scheduler/cron.py
@@ -54,6 +59,10 @@ logger = logging.getLogger(__name__)
 FMP_API_KEY: str | None = None
 BASE_URL = "https://financialmodelingprep.com/stable"
 MAX_PAGES = 50  # Safety cap per chamber; full final page is not a complete result.
+
+# Take House trades from the Clerk of the House (house_clerk.py). False gives
+# the FMP-only output, byte for byte, which the fab7188 golden test pins.
+INCLUDE_HOUSE_CLERK = True
 
 
 # ─────────────────────────────────────────────────────────
@@ -313,8 +322,15 @@ def legacy_analyze_trades(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def legacy_save_to_json(
-    trades: List[Dict[str, Any]], filename: Optional[str | _Path] = None
+    trades: List[Dict[str, Any]],
+    filename: Optional[str | _Path] = None,
+    house: Optional[Dict[str, Any]] = None,
 ) -> None:
+    """
+    `house` is house_clerk.collect()'s result when it was attempted. Its
+    outcome is recorded so a reader can tell where the House rows came from,
+    and why, when the Clerk collection failed and FMP's rows were kept.
+    """
     if filename is None:
         output_dir = LOCAL_DATA_DIR
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -327,6 +343,15 @@ def legacy_save_to_json(
         "total_trades": len(trades),
         "trades": trades,
     }
+    if house is not None:
+        from house_clerk import INDEX_URL, SOURCE_NAME
+
+        clerk_used = house["status"] != "failed"
+        if clerk_used:
+            output["source"] = f"FMP (Senate) + {SOURCE_NAME} (House)"
+            output["endpoints"] = [f"{BASE_URL}/senate-latest", INDEX_URL]
+        output["house_source"] = "house_clerk" if clerk_used else "fmp"
+        output["house_clerk"] = {"status": house["status"], **house["coverage"]}
     with open(filename, "w") as f:
         json.dump(output, f, indent=2)
     logger.info("congress_saved records=%d", len(trades))
@@ -393,6 +418,30 @@ def legacy_run(
     # provider transaction identity and provenance via the default parsers.
     fmp_trades = parse_trades(all_raw, preserve_provenance=False)
 
+    house = None
+    if INCLUDE_HOUSE_CLERK:
+        import house_clerk
+
+        logger.info("house_clerk_collect_start")
+        house = house_clerk.collect()
+        cov = house["coverage"]
+        logger.info(
+            "house_clerk_collected status=%s reports=%d parsed=%d scanned=%d "
+            "failed=%d downloaded=%d trades=%d",
+            house["status"],
+            cov.get("reports", 0),
+            cov.get("parsed", 0),
+            cov.get("scanned", 0),
+            cov.get("failed", 0),
+            cov.get("downloaded_this_run", 0),
+            len(house["trades"]),
+        )
+        if house["status"] == "failed":
+            logger.warning("house_clerk_failed_keeping_fmp_house_rows")
+        else:
+            fmp_trades = [t for t in fmp_trades if t["chamber"] != "House"]
+            fmp_trades += house["trades"]
+
     trades = legacy_deduplicate(fmp_trades)
 
     # Filter to recent 2 years only
@@ -405,7 +454,7 @@ def legacy_run(
     # Analyze + print + save
     analysis = legacy_analyze_trades(trades)
     legacy_print_summary(trades, analysis)
-    legacy_save_to_json(trades)
+    legacy_save_to_json(trades, house=house)
 
     logger.info("Done.")
     return trades

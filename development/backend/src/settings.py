@@ -111,6 +111,11 @@ class Settings(ProviderSettings):
     # Pages per chamber per Congress run. The free FMP plan serves only page 0;
     # raise this on a paid tier (docs/work-items/congress-incremental-design-note.md).
     fmp_max_pages: int = Field(default=1, ge=1, le=1000)
+    # House trades come from the Clerk of the House's PTR filings (no key, every
+    # member). "fmp" uses FMP's House page instead, 20 rows per run on the free plan.
+    congress_house_source: Literal["house_clerk", "fmp"] = "house_clerk"
+    # Senate trades come from FMP's free page, accumulated into history.
+    congress_include_fmp_senate: bool = True
     quality_thresholds: dict[str, QualityThreshold] = Field(
         default_factory=_quality_defaults
     )

@@ -93,6 +93,11 @@ _COUNT_KEYS = (
     "senate_rows_served",
     "house_rows_served",
     "fmp_calls",
+    "house_reports",
+    "house_reports_scanned",
+    "house_reports_downloaded",
+    "house_stock_rows_skipped",
+    "house_trades_dated_after_disclosure",
 )
 
 _OWN_ERROR_TYPES = {"not_an_object", "duplicate_security", "conflicting_exchange"}
@@ -130,6 +135,7 @@ _REQUEST_ERRORS = frozenset(
 _HTTP_CODE = re.compile(r"^http_[1-5][0-9]{2}$")
 _UNIT = re.compile(
     r"^(?:[A-Z0-9][A-Z0-9./-]{0,19}|(?:senate|house) page [0-9]{1,2}|trades_congress\.json|ark_holdings\.json"
+    r"|house index [0-9]{4}|house report [0-9]{1,12}"  # House Clerk PTR units
     r"|[A-Z][A-Z0-9_]{1,63})$"  # GDELT theme codes
 )
 MAX_COUNT = 10**9
