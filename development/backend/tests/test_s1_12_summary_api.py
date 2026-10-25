@@ -1,14 +1,15 @@
 """S1-12, the API side only: CS-4, CS-5 and the storage the API reads.
 
 Spec: docs/work-items/s1-stories-plan.md (S1-12), on docs/s1-stories-plan @
-8cc9a21. Not ingestion (CS-1 to CS-3: Q5, Q9 and Q11 are open) and not the page
-(CS-6, Jaden's repo). Synthetic summaries only.
+25d2590: Q9 declined, so there's no rewrite, no summary_method and no method
+field. Not ingestion (CS-1 to CS-3 and CS-7 wait on Q13) and not the page (CS-6,
+Jaden's repo). Synthetic summaries only.
 
 Readings this file pins (each is a contract choice for the API):
 - The summary is security.summary, beside sector and industry (which also come
   from company_profiles), and the key is always present: an object or null.
 - summary.as_of uses the route's existing timestamp form: UTC isoformat, +00:00.
-- The API role may read the six columns it serves from (summary, summary_method,
+- The API role may read the five columns it serves from (summary,
   summary_status, summary_source_name, summary_source_url, summary_as_of), but
   not summary_grade or description_digest, which it doesn't need.
 - A summary is never served with a URL that isn't https: either the database
@@ -41,7 +42,6 @@ from test_read_api import (  # noqa: F401  (api, groups: pytest fixtures)
 SUMMARY_COLUMNS = {
     "summary": {"text"},
     "summary_grade": {"numeric"},
-    "summary_method": {"text", "character varying"},
     "summary_status": {"text", "character varying"},
     "summary_source_name": {"text", "character varying"},
     "summary_source_url": {"text", "character varying"},
@@ -50,7 +50,6 @@ SUMMARY_COLUMNS = {
 }
 SERVED_COLUMNS = (
     "summary",
-    "summary_method",
     "summary_status",
     "summary_source_name",
     "summary_source_url",
@@ -63,7 +62,6 @@ TEXT = (
 STORED = {
     "summary": TEXT,
     "summary_grade": 5.2,
-    "summary_method": "source",
     "summary_status": "ok",
     "summary_source_name": "Synthetic Filings",
     "summary_source_url": "https://filings.example.com/zzsw/profile",
@@ -72,7 +70,6 @@ STORED = {
 }
 SERVED = {
     "text": TEXT,
-    "method": "source",
     "source": {
         "name": "Synthetic Filings",
         "url": "https://filings.example.com/zzsw/profile",
@@ -120,6 +117,7 @@ def test_company_profiles_has_the_summary_columns_all_nullable(engine):
                 )
             )
         }
+    assert "summary_method" not in found  # dropped with Q9 (25d2590)
     for column, types in SUMMARY_COLUMNS.items():
         assert column in found, column
         data_type, nullable = found[column]
@@ -129,18 +127,14 @@ def test_company_profiles_has_the_summary_columns_all_nullable(engine):
 
 
 @pytest.mark.db
-@pytest.mark.parametrize(
-    "column, value",
-    [("summary_method", "invented"), ("summary_status", "maybe")],
-)
-def test_method_and_status_take_only_their_values(engine, column, value):
+@pytest.mark.parametrize("column, value", [("summary_status", "maybe")])
+def test_status_takes_only_its_values(engine, column, value):
     seed_security(engine, "ZZCK", profile={"sector": "Industrials"})
     profile = (
         "(SELECT company_profile_id FROM perennial.securities WHERE symbol = 'ZZCK')"
     )
     with engine.begin() as conn:
         for good in {
-            "summary_method": ("source", "rewritten", None),
             "summary_status": ("ok", "unavailable", None),
         }[column]:
             conn.execute(
@@ -195,12 +189,6 @@ def test_cs5_a_stored_summary_is_served_with_its_source(engine, api):  # noqa: F
     assert response.content == canonical(response.content)
     for hidden in ("summary_grade", "description_digest", "0" * 64, "5.2"):
         assert hidden not in response.text
-
-
-@pytest.mark.db
-def test_cs5_a_rewritten_summary_says_so(engine, api):  # noqa: F811
-    with_summary(engine, summary_method="rewritten")
-    assert summary_of(api)[1] == {**SERVED, "method": "rewritten"}
 
 
 @pytest.mark.db
@@ -311,10 +299,9 @@ def _summary_schema():
 
 def test_cs5_openapi_documents_the_summary_object():
     document, schema = _summary_schema()
-    assert set(schema["properties"]) == {"text", "method", "source", "as_of"}
-    assert set(schema.get("required", ())) == {"text", "method", "source", "as_of"}
-    method = json.dumps(schema["properties"]["method"])
-    assert '"source"' in method and '"rewritten"' in method
+    assert set(schema["properties"]) == {"text", "source", "as_of"}
+    assert set(schema.get("required", ())) == {"text", "source", "as_of"}
+    assert "rewritten" not in json.dumps(schema)
     source = schema["properties"]["source"]
     if "$ref" in source:
         source = document["schemas"][source["$ref"].rsplit("/", 1)[1]]
@@ -335,8 +322,6 @@ def test_cs5_api_md_documents_the_summary():
     content = (REPO / "docs" / "technical-specs" / "API.md").read_text()
     for term in (
         '"summary"',
-        '"method"',
-        "rewritten",
         '"source"',
         '"as_of"',
         "https",

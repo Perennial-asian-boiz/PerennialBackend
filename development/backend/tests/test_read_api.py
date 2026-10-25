@@ -37,7 +37,6 @@ COLUMNS = {
         "sector",
         "industry",
         "summary",
-        "summary_method",
         "summary_status",
         "summary_source_name",
         "summary_source_url",
