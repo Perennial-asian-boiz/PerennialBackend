@@ -32,6 +32,7 @@ from sqlalchemy.engine import Connection, Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from src.api import market_status
 from src.api.rate_limit import (
     Kind,
     RateLimitConfig,
@@ -138,6 +139,59 @@ class SecurityResponse(BaseModel):
     api_version: str = Field(examples=[API_VERSION])
     security: Security
     current: SecurityCurrent
+
+
+class MarketStatusResponse(BaseModel):
+    exchange: str = Field(description="XNYS: the New York Stock Exchange calendar")
+    is_open: bool = Field(description="True during regular hours only")
+    session: str = Field(description="regular or closed")
+    label: str = Field(description="Market Open or Market Closed")
+    note: str = Field(description="The regular hours, and that extended hours exist")
+    as_of: str = Field(description="When this was computed: ISO 8601, UTC")
+    next_open: str = Field(
+        description="The next session's open: ISO 8601, America/New_York offset"
+    )
+    next_close: str = Field(
+        description="While open, today's close; while closed, the next session's"
+        " close: ISO 8601, America/New_York offset"
+    )
+    early_close: bool = Field(
+        description="True when the session next_close belongs to closes early"
+    )
+
+
+MARKET_STATUS_EXAMPLES = {
+    "open": {
+        "summary": "Open (a Monday, 10:00 a.m. ET)",
+        "value": {
+            "exchange": "XNYS",
+            "is_open": True,
+            "session": "regular",
+            "label": "Market Open",
+            "note": "Regular hours, 9:30 a.m.–4:00 p.m. ET."
+            " Some brokers allow extended-hours trading.",
+            "as_of": "2026-10-26T14:00:00Z",
+            "next_close": "2026-10-26T16:00:00-04:00",
+            "next_open": "2026-10-27T09:30:00-04:00",
+            "early_close": False,
+        },
+    },
+    "closed": {
+        "summary": "Closed (a Saturday)",
+        "value": {
+            "exchange": "XNYS",
+            "is_open": False,
+            "session": "closed",
+            "label": "Market Closed",
+            "note": "Regular hours, 9:30 a.m.–4:00 p.m. ET."
+            " Some brokers allow extended-hours trading.",
+            "as_of": "2026-10-31T16:00:00Z",
+            "next_open": "2026-11-02T09:30:00-05:00",
+            "next_close": "2026-11-02T16:00:00-05:00",
+            "early_close": False,
+        },
+    },
+}
 
 
 class ErrorBody(BaseModel):
@@ -425,6 +479,22 @@ def get_security(symbol: str, request: Request) -> Response:
     }
     body = {"api_version": API_VERSION, "security": security, "current": current}
     return CanonicalJSONResponse(body, headers={"Cache-Control": "no-cache"})
+
+
+@router.get(
+    "/market-status",
+    response_model=MarketStatusResponse,
+    responses={
+        200: {"content": {"application/json": {"examples": MARKET_STATUS_EXAMPLES}}}
+    },
+)
+def get_market_status() -> Response:
+    """Whether the US stock market is in regular hours, and its next open and
+    close (S1-11). No database; cached until at most the next transition."""
+    body, max_age = market_status.status(market_status.now())
+    return CanonicalJSONResponse(
+        body, headers={"Cache-Control": f"public, max-age={max_age}"}
+    )
 
 
 # ── startup refusal (RA-15) ──────────────────────────────

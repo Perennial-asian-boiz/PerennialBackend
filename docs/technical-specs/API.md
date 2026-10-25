@@ -71,6 +71,50 @@ A security by ticker or alias, with its entry in the current publication.
 
 The profile's `legal_name`, `cik` and other columns are never served.
 
+## `GET /v1/market-status`
+
+Whether the US stock market (the NYSE calendar, `XNYS`) is in regular hours, and its next open and close (S1-11). It's public, touches no database and takes no input: query parameters and headers don't change the answer. Unlike the other routes, its body has no `api_version`.
+
+Open (a Monday, 10:00 a.m. ET):
+
+```json
+{
+  "exchange": "XNYS",
+  "is_open": true,
+  "session": "regular",
+  "label": "Market Open",
+  "note": "Regular hours, 9:30 a.m.–4:00 p.m. ET. Some brokers allow extended-hours trading.",
+  "as_of": "2026-10-26T14:00:00Z",
+  "next_close": "2026-10-26T16:00:00-04:00",
+  "next_open": "2026-10-27T09:30:00-04:00",
+  "early_close": false
+}
+```
+
+Closed (a Saturday):
+
+```json
+{
+  "exchange": "XNYS",
+  "is_open": false,
+  "session": "closed",
+  "label": "Market Closed",
+  "note": "Regular hours, 9:30 a.m.–4:00 p.m. ET. Some brokers allow extended-hours trading.",
+  "as_of": "2026-10-31T16:00:00Z",
+  "next_open": "2026-11-02T09:30:00-05:00",
+  "next_close": "2026-11-02T16:00:00-05:00",
+  "early_close": false
+}
+```
+
+- **Open** means regular hours only, from the session's open (inclusive) to its close (exclusive). `session` is `regular` or `closed`, and `label` is exactly `Market Open` or `Market Closed`.
+- **`next_open` and `next_close` are never null.** While open, `next_close` is today's close and `next_open` is the next session's open. While closed, `next_open` is the next session's open and `next_close` is that same session's close.
+- **`early_close`** describes the session `next_close` belongs to. When it's true, `note` reads "Regular hours, 9:30 a.m.–1:00 p.m. ET (early close). Some brokers allow extended-hours trading.", with the closing time from the calendar.
+- **Times:** ISO 8601. `next_open` and `next_close` carry the America/New_York offset (`-04:00` or `-05:00`), and `as_of` is UTC with whole seconds. The process time zone has no effect.
+- **Holidays and early closes** come from the `exchange_calendars` library, never from a hand-kept list. Its calendars reach about a year ahead, and unscheduled closures arrive only in library releases, so keep its pin current.
+- **Caching:** `Cache-Control: public, max-age=N`, where N is the whole seconds until the next open or close, at most 15 and at least 1. A cached answer never spans a transition, so a client polling every 30 seconds sees a change within 45.
+- **Errors:** only `429 rate_limited`, from the `read` bucket.
+
 ## Rate limiting
 
 Every route above is limited per client, before any other work: a limited request opens no database transaction. Each request costs one token, including `304` responses and `404` and `422` errors.

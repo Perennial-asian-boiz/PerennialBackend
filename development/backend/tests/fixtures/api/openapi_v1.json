@@ -1,5 +1,72 @@
 {
   "paths": {
+    "/v1/market-status": {
+      "get": {
+        "description": "Whether the US stock market is in regular hours, and its next open and\nclose (S1-11). No database; cached until at most the next transition.",
+        "operationId": "get_market_status_v1_market_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "examples": {
+                  "closed": {
+                    "summary": "Closed (a Saturday)",
+                    "value": {
+                      "as_of": "2026-10-31T16:00:00Z",
+                      "early_close": false,
+                      "exchange": "XNYS",
+                      "is_open": false,
+                      "label": "Market Closed",
+                      "next_close": "2026-11-02T16:00:00-05:00",
+                      "next_open": "2026-11-02T09:30:00-05:00",
+                      "note": "Regular hours, 9:30 a.m.\u20134:00 p.m. ET. Some brokers allow extended-hours trading.",
+                      "session": "closed"
+                    }
+                  },
+                  "open": {
+                    "summary": "Open (a Monday, 10:00 a.m. ET)",
+                    "value": {
+                      "as_of": "2026-10-26T14:00:00Z",
+                      "early_close": false,
+                      "exchange": "XNYS",
+                      "is_open": true,
+                      "label": "Market Open",
+                      "next_close": "2026-10-26T16:00:00-04:00",
+                      "next_open": "2026-10-27T09:30:00-04:00",
+                      "note": "Regular hours, 9:30 a.m.\u20134:00 p.m. ET. Some brokers allow extended-hours trading.",
+                      "session": "regular"
+                    }
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/MarketStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Market Status"
+      }
+    },
     "/v1/securities/{symbol}": {
       "get": {
         "description": "A security by ticker or alias, with its entry in the current publication.",
@@ -137,6 +204,68 @@
         "code"
       ],
       "title": "ErrorBody",
+      "type": "object"
+    },
+    "MarketStatusResponse": {
+      "properties": {
+        "as_of": {
+          "description": "When this was computed: ISO 8601, UTC",
+          "title": "As Of",
+          "type": "string"
+        },
+        "early_close": {
+          "description": "True when the session next_close belongs to closes early",
+          "title": "Early Close",
+          "type": "boolean"
+        },
+        "exchange": {
+          "description": "XNYS: the New York Stock Exchange calendar",
+          "title": "Exchange",
+          "type": "string"
+        },
+        "is_open": {
+          "description": "True during regular hours only",
+          "title": "Is Open",
+          "type": "boolean"
+        },
+        "label": {
+          "description": "Market Open or Market Closed",
+          "title": "Label",
+          "type": "string"
+        },
+        "next_close": {
+          "description": "While open, today's close; while closed, the next session's close: ISO 8601, America/New_York offset",
+          "title": "Next Close",
+          "type": "string"
+        },
+        "next_open": {
+          "description": "The next session's open: ISO 8601, America/New_York offset",
+          "title": "Next Open",
+          "type": "string"
+        },
+        "note": {
+          "description": "The regular hours, and that extended hours exist",
+          "title": "Note",
+          "type": "string"
+        },
+        "session": {
+          "description": "regular or closed",
+          "title": "Session",
+          "type": "string"
+        }
+      },
+      "required": [
+        "exchange",
+        "is_open",
+        "session",
+        "label",
+        "note",
+        "as_of",
+        "next_open",
+        "next_close",
+        "early_close"
+      ],
+      "title": "MarketStatusResponse",
       "type": "object"
     },
     "Publication": {
