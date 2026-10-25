@@ -108,10 +108,42 @@ company_profiles = Table(
             name="fk_company_profiles_insider_reporting_security_id_securities",
         ),
     ),
+    # S1-12: the stored excerpt, its source, and the SHA-256 of the description it
+    # came from. The description itself is never stored (migration 0012).
+    Column("summary", Text),
+    Column("summary_grade", Numeric(5, 2)),
+    Column("summary_status", String(16)),
+    Column("summary_source_name", String(128)),
+    Column("summary_source_url", Text),
+    Column("summary_as_of", DateTime(timezone=True)),
+    Column("description_digest", String(64)),
     UniqueConstraint("cik"),
     CheckConstraint("cik IS NULL OR cik ~ '^[0-9]{10}$'", name="cik_format"),
     CheckConstraint(
         "legal_name IS NULL OR btrim(legal_name) <> ''", name="legal_name_not_blank"
+    ),
+    CheckConstraint(
+        "summary IS NULL OR (btrim(summary) <> '' AND char_length(summary) <= 4000)",
+        name="summary_not_blank",
+    ),
+    CheckConstraint(
+        "summary_status IS NULL OR summary_status IN ('ok', 'unavailable')",
+        name="summary_status",
+    ),
+    CheckConstraint(
+        "summary_source_name IS NULL OR btrim(summary_source_name) <> ''",
+        name="summary_source_name_not_blank",
+    ),
+    # https with a host only: the API never serves another scheme (CS-5).
+    CheckConstraint(
+        "summary_source_url IS NULL OR (char_length(summary_source_url) <= 2048"
+        " AND summary_source_url"
+        " ~ '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?([/?#][^[:space:]]*)?$')",
+        name="summary_source_url_https",
+    ),
+    CheckConstraint(
+        "description_digest IS NULL OR description_digest ~ '^[0-9a-f]{64}$'",
+        name="description_digest_sha256",
     ),
 )
 
