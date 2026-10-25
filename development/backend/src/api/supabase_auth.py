@@ -12,6 +12,7 @@ import base64
 import json
 import math
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlencode, urlsplit
@@ -21,6 +22,10 @@ import requests
 
 # The one tolerance for comparing Supabase's clock with ours (J7).
 CLOCK_SKEW_SECONDS = 60
+
+# Path segments before /auth/confirm in AUTH_EMAIL_REDIRECT_URL: non-empty,
+# RFC 3986 unreserved ASCII only (an explicit class, never \w or isalnum).
+CONFIRM_PREFIX = re.compile(r"(?:/[A-Za-z0-9._~-]+)*")
 
 
 class AuthProviderError(Exception):
@@ -178,13 +183,21 @@ class SupabaseAuth:
             redirect = "http://127.0.0.1:5173/auth/confirm"
         parsed = urlsplit(redirect)
         local = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+        # A prefix (e.g. GitHub Pages' /PerennialFrontEnd) may precede
+        # /auth/confirm: unreserved ASCII segments only, no dot segments.
+        prefix = parsed.path.removesuffix("/auth/confirm")
+        segments = prefix.split("/")[1:]
         if (
             not parsed.hostname
             or parsed.username
             or parsed.password
             or parsed.query
             or parsed.fragment
-            or parsed.path != "/auth/confirm"
+            # urlsplit silently drops tabs and newlines; redirect_to wouldn't.
+            or any(char <= " " or char == "\x7f" for char in redirect)
+            or not parsed.path.endswith("/auth/confirm")
+            or not CONFIRM_PREFIX.fullmatch(prefix)
+            or any(segment in {".", ".."} for segment in segments)
             or (
                 parsed.scheme != "https"
                 and not (

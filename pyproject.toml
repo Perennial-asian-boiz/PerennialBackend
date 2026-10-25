@@ -42,6 +42,7 @@ include = [
     "development/backend/tests/test_supabase_accounts.py",
     "development/backend/tests/test_pr22_auth_hardening.py",
     "development/backend/tests/test_pr22_auth_hardening_edges.py",
+    "development/backend/tests/test_pr22_confirm_prefix.py",
     "development/database/migrations/versions/20261018_0011_supabase_accounts.py",
     "development/database/migrations/versions/20261018_0012_registration_email_check.py",
 ]

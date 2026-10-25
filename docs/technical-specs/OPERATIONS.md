@@ -139,6 +139,16 @@ an isolated server. The provisioning tool deliberately creates no passwords.
 - **Counted refusal lines.** Budget, ceiling, share and Supabase-`429` refusals are logged at most once a minute per reason, each line carrying how many happened since the last one. The count is written only when a later refusal of that reason arrives, so the tail of a burst followed by silence is never logged. Read a quiet log as "no new refusals since the last line", not as an exact total.
 - **New functions in `perennial` or `app`.** A migration that adds a function in either schema must `REVOKE EXECUTE ON FUNCTION ... FROM PUBLIC` on it (and grant it to the API role only if the API is meant to call it). PostgreSQL grants `EXECUTE` to PUBLIC by default, and the API's startup check refuses any login that can execute a function there, so an unrevoked function stops every API login from starting. The one function the API may call is `app.email_is_registered(text)`.
 
+### The email confirm URL (`AUTH_EMAIL_REDIRECT_URL`)
+
+Signup, resend-confirmation and forgot-password emails link back to the frontend's confirm page. The API sends Supabase this URL as `redirect_to`, exactly as configured.
+
+- **What it must be:** an `https` URL whose path ends in `/auth/confirm`, with no query, fragment, user name or password. Plain `http` is allowed only for `localhost`, `127.0.0.1` or `::1` while `APP_ENV=development`. Outside development the setting is required.
+- **A path prefix is allowed** for a frontend served under a subpath. Each prefix segment must be non-empty and use only ASCII letters, digits and `-` `.` `_` `~`. The API refuses `.` and `..` segments, empty segments (`//`), percent-encoding, `;`, backslashes, spaces or control characters, a trailing slash, and anything after `confirm`.
+- **A missing or refused URL fails closed:** no email is sent. Signup and resend-confirmation answer `503`; forgot-password still answers its uniform `200` and logs `forgot_password_send_failed code=unavailable`.
+- **GitHub Pages example:** `AUTH_EMAIL_REDIRECT_URL=https://perennial-asian-boiz.github.io/PerennialFrontEnd/auth/confirm`.
+- **Supabase's redirect allowlist:** add the same URL, character for character, under Supabase **Authentication > URL Configuration > Redirect URLs**. If it isn't there, Supabase ignores `redirect_to` and sends the user to the project's **Site URL** instead, so the emails still go out but their links land on the wrong page.
+
 ## Worker and observability
 
 Run the production worker from `development/backend`:
