@@ -18,7 +18,7 @@ dependencies = [
     "uvicorn==0.34.0",
     # S1-11 market status (Q8). Keep it current: its calendars reach about a year
     # ahead, and unscheduled closures arrive only in library releases.
-    "exchange_calendars==4.13.2",
+    "exchange-calendars==4.13.2",
 ]
 
 [project.optional-dependencies]
