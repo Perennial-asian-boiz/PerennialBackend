@@ -45,7 +45,7 @@ It creates three NOLOGIN groups by default:
 | Group | Access |
 | --- | --- |
 | `perennial_owner` | Owns application schema/tables, their identity sequences, and Alembic version table; migration-only membership |
-| `perennial_importer` | SELECT/INSERT on explicit application tables; UPDATE only ingestion runs and current publication; column UPDATE only securities exchange/currency; USAGE/SELECT on existing identity sequences |
+| `perennial_importer` | SELECT/INSERT on explicit application tables; UPDATE only ingestion runs and current publication; column UPDATE only securities exchange/currency and the seven company_profiles summary columns (S1-12); USAGE/SELECT on existing identity sequences |
 | `perennial_reader` | SELECT on explicit application tables; no writes or sequence access |
 
 Source batches, source rows, run dependencies, publications, publication sources,
@@ -140,6 +140,40 @@ the repository does not install alert integrations. A failed candidate keeps the
 previous current publication. Inspect persisted run status/error codes and the
 current publication before deciding whether to retry or escalate. Avoid bypassing
 coverage, freshness or lineage rules to make a publication appear current.
+
+## S1-12 company summaries (manual, staging only)
+
+Bryan runs this by hand to demo S1-12 on staging (decision 76). It is never
+scheduled and is not part of `run-pipeline`. Descriptions come from FMP's
+existing profile call (decision 75 (a)), still gated by decision 3's terms
+review, so don't run it against production.
+
+Environment, the same as the worker's:
+- `DATABASE_URL`: the application's importer login (exactly importer
+  membership). The importer may update only the seven summary columns of
+  `company_profiles`.
+- `FMP_API_KEY`: the FMP key. A missing or placeholder key stops the command
+  before any request.
+
+```sh
+cd development/backend
+python -m src.ingestion.cli summaries
+```
+
+It summarizes the current production publication's consensus members: one FMP
+`/stable/profile` call per member with a company profile, on the same daily
+FMP quota as market caps and Congress. Output on stdout:
+- Success, exit 0: `{"members": N, "with_summary": A, "unavailable": B}`. `A`
+  members now have a stored 2–4 sentence excerpt at grade 8 or below. `B`
+  show "Summary not available" (no description, no readable window, or no
+  company profile). A rerun with unchanged descriptions rewrites nothing.
+- Failure, exit 1: `{"error_code": "..."}`. `missing_credential` means
+  `FMP_API_KEY` isn't set. `collection_failed` means an FMP request failed (the
+  stderr log names the symbol and a fixed code). Nothing is written on
+  failure, and earlier summaries stay as they were.
+- Exit 2: a configuration or database error (see stderr).
+
+No company text, key or provider response appears in the output or logs.
 
 ## M3 database observability plan (Supabase PostgreSQL 17)
 
