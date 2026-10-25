@@ -30,7 +30,6 @@ for _name in [n for n in os.environ if n.startswith("PG")]:
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
-
 from src.db.config import parse_database_url  # noqa: E402
 from src.db.models import metadata  # noqa: E402
 from src.db.session import make_engine  # noqa: E402
@@ -121,7 +120,17 @@ def engine(migrated_engine):
     names = ", ".join(f"perennial.{t.name}" for t in metadata.sorted_tables)
     with migrated_engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
-    return migrated_engine
+    yield migrated_engine
+    # M4 MCB-4b, after every test: no publication pins market caps both ways.
+    with migrated_engine.connect() as conn:
+        both = conn.execute(text(
+            "SELECT to_regclass('perennial.publication_market_cap_rows') IS NOT NULL"
+            " AND to_regclass('perennial.publication_market_caps') IS NOT NULL"
+        )).scalar() and conn.execute(text(
+            "SELECT count(*) FROM perennial.publication_market_caps l"
+            " JOIN perennial.publication_market_cap_rows r USING (publication_id)"
+        )).scalar()
+    assert not both, "a publication has pins in both market-cap pin tables"
 
 
 @pytest.fixture

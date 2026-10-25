@@ -9,9 +9,9 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Literal, Mapping, Sequence, cast
 
-from sqlalchemy import insert, select, text
+from sqlalchemy import and_, insert, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Connection, Engine, RowMapping
 
@@ -25,7 +25,12 @@ from src.pipeline.demo_guard import (
     check_demo_database,
 )
 from src.pipeline.ranking import DEFAULT_CONFIG, VERSION, calculate, candidate_symbols
-from src.settings import QualityThreshold, _quality_defaults, _source_policy_defaults
+from src.settings import (
+    MARKET_CAP_MAX_REUSE_AGE,
+    QualityThreshold,
+    _quality_defaults,
+    _source_policy_defaults,
+)
 
 MAX_AGE = {
     "congress_trades": timedelta(days=3),
@@ -34,6 +39,7 @@ MAX_AGE = {
     "short_interest": timedelta(days=45),
 }
 DOWNSTREAM = ("insider_trades", "short_interest")
+MARKET_CAP_OBSERVED_AGE = timedelta(days=3)
 QUALITY_CHECKS = ("row_count", "null_share", "source_as_of")
 PUBLICATION_LOCK = 170099
 
@@ -487,6 +493,90 @@ def _caps(
     return normalized
 
 
+def _select_market_caps(
+    conn: Connection,
+    symbols: Sequence[str],
+    security_ids: Mapping[str, int],
+    now: datetime,
+    max_age: timedelta,
+    modes: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """Each candidate's latest eligible market_caps row, or an all-NULL pin (M4 MC-B).
+
+    Eligible: a succeeded market_caps run in the publication's modes collected
+    within max_age, whose row was observed (if dated) within 3 days and not in
+    the future. A batch reused by later runs ages from the latest of them. The
+    latest collected_at wins, ties to the higher run id; a NULL value wins too,
+    and means unavailable (Q3). Only value IS NULL marks unavailability.
+    """
+    runs, caps = m.ingestion_runs, m.market_caps
+    slack = timedelta(minutes=5)  # as _time_ok
+    latest = (
+        select(
+            caps.c.security_id,
+            runs.c.id.label("run_id"),
+            runs.c.batch_id,
+            caps.c.id.label("market_cap_id"),
+            caps.c.value,
+            caps.c.currency,
+            runs.c.collected_at,
+        )
+        .select_from(caps.join(runs, runs.c.batch_id == caps.c.batch_id))
+        .where(
+            caps.c.security_id.in_([security_ids[s] for s in symbols]),
+            runs.c.source == "market_caps",
+            runs.c.status == "succeeded",
+            runs.c.collection_mode.in_(modes),
+            runs.c.collected_at >= now - max_age,
+            runs.c.collected_at <= now + slack,
+            or_(
+                caps.c.observed_at.is_(None),
+                and_(
+                    caps.c.observed_at >= now - MARKET_CAP_OBSERVED_AGE,
+                    caps.c.observed_at <= now + slack,
+                ),
+            ),
+        )
+        .order_by(caps.c.security_id, runs.c.collected_at.desc(), runs.c.id.desc())
+        .distinct(caps.c.security_id)
+    )
+    found = {row.security_id: row for row in conn.execute(latest)}
+    selected = {}
+    for symbol in symbols:
+        row = found.get(security_ids[symbol])
+        if row is not None and row.value is not None and row.currency != "USD":
+            raise PublicationError("unsupported market-cap currency")
+        selected[symbol] = {
+            "security_id": security_ids[symbol],
+            "run_id": row.run_id if row else None,
+            "batch_id": row.batch_id if row else None,
+            "market_cap_id": row.market_cap_id if row else None,
+            "value": row.value if row else None,
+            "collected_at": row.collected_at if row else None,
+        }
+    if symbols and all(p["value"] is None for p in selected.values()):
+        raise PublicationError("all market-cap values are unavailable")
+    return selected
+
+
+def _pinned_market_caps_summary(
+    pinned: Mapping[str, dict[str, Any]], run_id: int | None, now: datetime
+) -> dict[str, Any]:
+    """Degraded-event counts (MCB-5a): no symbols, values or provider names."""
+    unavailable = sum(p["value"] is None for p in pinned.values())
+    refreshed = sum(
+        p["value"] is not None and run_id is not None and p["run_id"] == run_id
+        for p in pinned.values()
+    )
+    ages = [now - p["collected_at"] for p in pinned.values() if p["run_id"] is not None]
+    return {
+        "refreshed": refreshed,
+        "reused": len(pinned) - refreshed - unavailable,
+        "unavailable": unavailable,
+        "oldest_age_seconds": max(0, int(max(ages).total_seconds())) if ages else None,
+    }
+
+
 def _validate_reuse(
     conn: Connection,
     reuse: Mapping[str, Reuse],
@@ -554,7 +644,7 @@ def _with_market_cap_fallback(
 def publish(
     engine: Engine,
     run_ids: Mapping[str, int],
-    observations: Mapping[str, dict[str, Any]],
+    observations: Mapping[str, dict[str, Any]] | None,
     *,
     max_age: Mapping[str, timedelta] | None = None,
     quality_thresholds: Mapping[str, QualityThreshold] | None = None,
@@ -565,6 +655,10 @@ def publish(
     reuse_limits: Mapping[str, timedelta] | None = None,
     market_cap_fallback: timedelta | None = None,
     demo: bool = False,
+    market_caps: Literal["legacy", "pinned"] = "legacy",
+    market_cap_max_age: timedelta = MARKET_CAP_MAX_REUSE_AGE,
+    market_cap_run_id: int | None = None,
+    market_cap_adapter: str | None = None,
 ) -> int:
     """Publish and promote; an override skips only the named failed checks.
 
@@ -578,7 +672,19 @@ def publish(
 
     market_cap_fallback, when set, means the observations are earlier stored
     ones (M2 Q3): retrieval may be that old, and the publication is degraded.
+
+    market_caps="pinned" (M4 MC-B) selects each candidate's row from stored
+    market_caps runs instead of taking observations (which must be None).
+    market_cap_run_id is this pipeline call's collection, counted as refreshed;
+    market_cap_adapter names the adapter in the recorded policy.
     """
+    if market_caps == "pinned":
+        if observations is not None or market_cap_fallback is not None:
+            raise ValueError("pinned market caps take no observations or fallback")
+        if market_cap_max_age <= timedelta(0):
+            raise ValueError("market-cap max age must be positive")
+    elif market_caps != "legacy" or observations is None:
+        raise ValueError("legacy market caps require observations")
     reuse = dict(reuse or {})
     if reuse_limits is None:
         reuse_limits = {
@@ -691,11 +797,40 @@ def publish(
         }
         history = congress_history.summary(conn, through, now)
         symbols = candidate_symbols(ranked)
-        cap_data = _caps(
-            observations, symbols, now, market_cap_fallback or timedelta(days=1)
+        security_ids = dict(
+            conn.execute(
+                select(m.securities.c.symbol, m.securities.c.id).where(
+                    m.securities.c.symbol.in_(symbols)
+                )
+            )
+            .tuples()
+            .all()
         )
-        if market_cap_fallback is not None:
-            degraded = _with_market_cap_fallback(degraded, cap_data)
+        policy: dict[str, Any] = {}
+        if observations is None:
+            pinned = _select_market_caps(
+                conn, symbols, security_ids, now, market_cap_max_age, modes
+            )
+            cap_values = {s: p["value"] for s, p in pinned.items()}
+            policy["market_caps"] = {
+                "max_age_seconds": int(market_cap_max_age.total_seconds()),
+                "adapter": market_cap_adapter,
+            }
+            summary = _pinned_market_caps_summary(pinned, market_cap_run_id, now)
+            if summary["reused"] or summary["unavailable"]:
+                degraded = degraded or {
+                    "reused": {},
+                    "cohort": [],
+                    "all_sources_reused": False,
+                }
+                degraded["market_caps"] = summary
+        else:
+            cap_data = _caps(
+                observations, symbols, now, market_cap_fallback or timedelta(days=1)
+            )
+            cap_values = {s: o["value"] for s, o in cap_data.items()}
+            if market_cap_fallback is not None:
+                degraded = _with_market_cap_fallback(degraded, cap_data)
         if history["gaps_in_window"]["count"]:
             degraded = degraded or {
                 "reused": {},
@@ -711,9 +846,7 @@ def publish(
                 s: int(age.total_seconds()) for s, age in max_age.items()
             },
         }
-        output = calculate(
-            ranked, {s: o["value"] for s, o in cap_data.items()}, now, config
-        )
+        output = calculate(ranked, cap_values, now, config)
         pub_id = conn.execute(
             insert(m.publications)
             .values(
@@ -737,6 +870,7 @@ def publish(
                     "failed": failed_checks,
                     "overridden": overridden,
                     "congress_history": history,
+                    **({"policy": policy} if policy else {}),
                     # Demo publications are marked in their audit event, not in
                     # ranking_config (ranking inputs only).
                     **({"demo": True} if demo else {}),
@@ -772,28 +906,34 @@ def publish(
                 through_history_id=through,
             )
         )
-        security_ids = dict(
-            conn.execute(
-                select(m.securities.c.symbol, m.securities.c.id).where(
-                    m.securities.c.symbol.in_(symbols)
-                )
-            )
-            .tuples()
-            .all()
-        )
-        for symbol, obs in cap_data.items():
-            obs_id = conn.execute(
-                insert(m.market_cap_observations)
-                .values(security_id=security_ids[symbol], **obs)
-                .returning(m.market_cap_observations.c.id)
-            ).scalar_one()
-            conn.execute(
-                insert(m.publication_market_caps).values(
+        if observations is None:
+            pins = [
+                dict(
                     publication_id=pub_id,
-                    security_id=security_ids[symbol],
-                    observation_id=obs_id,
+                    security_id=p["security_id"],
+                    source="market_caps",
+                    run_id=p["run_id"],
+                    batch_id=p["batch_id"],
+                    market_cap_id=p["market_cap_id"],
                 )
-            )
+                for p in pinned.values()
+            ]
+            if pins:
+                conn.execute(insert(m.publication_market_cap_rows), pins)
+        else:
+            for symbol, obs in cap_data.items():
+                obs_id = conn.execute(
+                    insert(m.market_cap_observations)
+                    .values(security_id=security_ids[symbol], **obs)
+                    .returning(m.market_cap_observations.c.id)
+                ).scalar_one()
+                conn.execute(
+                    insert(m.publication_market_caps).values(
+                        publication_id=pub_id,
+                        security_id=security_ids[symbol],
+                        observation_id=obs_id,
+                    )
+                )
         conn.execute(
             pg_insert(m.current_publication)
             .values(channel="production", publication_id=pub_id, promoted_at=now)
@@ -919,7 +1059,27 @@ def replay(engine: Engine, publication_id: int) -> dict[str, Any]:
                 pub["created_at"],
                 pub["ranking_config"]["congress_window_years"],
             )
+        # New-path pins (M4 MC-B); an all-NULL pin means unavailable.
         caps = dict(
+            conn.execute(
+                select(m.securities.c.symbol, m.market_caps.c.value)
+                .select_from(
+                    m.publication_market_cap_rows.join(
+                        m.securities,
+                        m.securities.c.id
+                        == m.publication_market_cap_rows.c.security_id,
+                    ).outerjoin(
+                        m.market_caps,
+                        m.market_caps.c.id
+                        == m.publication_market_cap_rows.c.market_cap_id,
+                    )
+                )
+                .where(m.publication_market_cap_rows.c.publication_id == publication_id)
+            )
+            .tuples()
+            .all()
+        )
+        caps = caps or dict(
             conn.execute(
                 select(m.securities.c.symbol, m.market_cap_observations.c.value)
                 .select_from(

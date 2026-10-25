@@ -67,6 +67,8 @@ ENVELOPE_KEYS = {
         "min_articles",
         "input_batch_id",
     ),
+    # provider is the adapter name; it is also in every row, which is hashed.
+    "market_caps": ("provider", "fetched_at", "total_symbols", "symbols_with_value"),
 }
 MAX_LIST_ITEMS = 20
 
