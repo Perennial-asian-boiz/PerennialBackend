@@ -844,12 +844,13 @@ def test_every_v1_route_uses_the_helper_exactly_once(engine, fixture_path, group
                     outside.append(statement)
 
             routes = sorted(v1_routes(app))
-            assert routes == ["/v1/securities/{symbol}", "/v1/watchlist"]
+            assert routes == ["/v1/market-status", "/v1/securities/{symbol}", "/v1/watchlist"]
             for path in routes:
                 calls.clear()
                 response = c.get(path.replace("{symbol}", "ZZAA"))
                 assert response.status_code == 200, path
-                assert len(calls) == 1, path
+                # S1-11 MS-7: market status touches no database, so it never uses the helper.
+                assert len(calls) == (0 if path == "/v1/market-status" else 1), path
             event.remove(api_engine, "before_cursor_execute", watch)
     assert outside == []
 
@@ -917,11 +918,15 @@ def v1_routes(app):
     }
 
 
-def test_v1_routes_are_exactly_the_r1_reads():
+def test_v1_routes_are_exactly_the_r1_reads_and_market_status():
     from src.api.read import create_app
 
     routes = v1_routes(_router_app())
-    assert routes == {"/v1/watchlist": ["GET"], "/v1/securities/{symbol}": ["GET"]}
+    assert routes == {
+        "/v1/watchlist": ["GET"],
+        "/v1/securities/{symbol}": ["GET"],
+        "/v1/market-status": ["GET"],  # S1-11
+    }
     assert callable(create_app)
 
 
