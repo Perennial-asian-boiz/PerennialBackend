@@ -56,11 +56,10 @@ mastodon_ticker_sentiment.json
 /output
 
 #reddit stuff
-cookies.txt
-reddit_cookies.txt
-reddit_sentiments.json
 
 #youtube stuff
 /credentials
-youtube_cookies.txt
-youtube_sentiments.json
+
+
+*_cookies.txt
+*_sentiments.json

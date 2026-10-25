@@ -30,6 +30,11 @@ Run from the backend/ directory, as a module (so `src.utils` resolves):
     python -m src.services.sentiment.bluesky.bluesky_query                      # last 7 days
     python -m src.services.sentiment.bluesky.bluesky_query --since 2026-10-01 --until 2026-10-08
     python -m src.services.sentiment.bluesky.bluesky_query --tickers NVDA Apple --since 2026-10-20 --window-hours 6
+    python -m src.services.sentiment.bluesky.bluesky_query --days 3 --time 30      # last 3 days, stop fetching after 30 min
+
+--days N  looks back N days from --until (ignored when --since is given).
+--time T  stops making API requests after T minutes; posts already fetched are
+          still scored and the results file is written as usual.
 
 --tickers accepts ticker symbols or company names (case-insensitive); names are
 resolved to their symbol using the ticker file.
@@ -90,6 +95,10 @@ BODY_SNIPPET = 200                     # max chars of an error response body to 
 CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Za-z]{1,5})\b")
 
 log = logging.getLogger("bluesky_query")
+
+
+class TimeUp(Exception):
+    """The --time limit was reached: no more API requests are made."""
 
 
 # ---------- Logging ----------
@@ -245,11 +254,22 @@ async def handle_post(post):
 
 # ---------- Bluesky client ----------
 class BlueskyClient:
-    def __init__(self, handle, app_password):
+    def __init__(self, handle, app_password, deadline=None):
         self.handle = handle
         self.app_password = app_password
         self.http = httpx.AsyncClient(timeout=30)
         self.token = None
+        self.deadline = deadline   # time.monotonic() value from --time, or None
+
+    def time_up(self):
+        return self.deadline is not None and time.monotonic() >= self.deadline
+
+    async def _sleep(self, seconds):
+        """Back-off sleep that never runs past the --time deadline."""
+        if self.deadline is not None:
+            seconds = min(seconds, max(0.0, self.deadline - time.monotonic()))
+        if seconds > 0:
+            await asyncio.sleep(seconds)
 
     async def close(self):
         await self.http.aclose()
@@ -272,6 +292,8 @@ class BlueskyClient:
     async def get(self, method, params, retries=5):
         """GET with auto re-login on expired token and backoff on rate limits / 5xx / network errors."""
         for attempt in range(1, retries + 1):
+            if self.time_up():
+                raise TimeUp()
             try:
                 r = await self.http.get(
                     f"{PDS_URL}/{method}",
@@ -281,7 +303,7 @@ class BlueskyClient:
             except httpx.TransportError as e:
                 log.warning("%s network error attempt=%d/%d: %s: %s",
                             method, attempt, retries, type(e).__name__, e)
-                await asyncio.sleep(2 ** (attempt - 1))
+                await self._sleep(2 ** (attempt - 1))
                 continue
 
             if r.status_code == 200:
@@ -299,12 +321,12 @@ class BlueskyClient:
                 log.warning("%s rate limited status=429 sleeping=%ss attempt=%d/%d",
                             method, wait, attempt, retries)
                 print(f"Rate limited, sleeping {wait}s")
-                await asyncio.sleep(wait)
+                await self._sleep(wait)
                 continue
             if r.status_code >= 500:
                 log.warning("%s server error status=%s attempt=%d/%d body=%s",
                             method, r.status_code, attempt, retries, r.text[:BODY_SNIPPET])
-                await asyncio.sleep(2 ** (attempt - 1))
+                await self._sleep(2 ** (attempt - 1))
                 continue
 
             log.error("%s request rejected status=%s body=%s", method, r.status_code, r.text[:BODY_SNIPPET])
@@ -348,15 +370,18 @@ class BlueskyClient:
 
 
 # ---------- Query runner ----------
-async def run_query(tickers, since, until, window_hours, output_path):
-    """tickers: iterable of ticker symbols, e.g. {"NVDA", "AAPL"}"""
+async def run_query(tickers, since, until, window_hours, output_path, deadline=None):
+    """tickers: iterable of ticker symbols, e.g. {"NVDA", "AAPL"}
+
+    deadline: time.monotonic() value after which no more API requests are made
+    (from --time); posts fetched before it are still scored and saved."""
     handle = os.environ.get("BSKY_HANDLE")
     password = os.environ.get("BSKY_APP_PASSWORD")
     if not handle or not password:
         log.error("missing BSKY_HANDLE / BSKY_APP_PASSWORD, cannot start")
         raise SystemExit("Set BSKY_HANDLE and BSKY_APP_PASSWORD in your .env file.")
 
-    client = BlueskyClient(handle, password)
+    client = BlueskyClient(handle, password, deadline)
 
     allowed = frozenset(tickers)
     seen = set()   # a post mentioning $TSLA and $NVDA shows up in both searches; handle once
@@ -408,6 +433,9 @@ async def run_query(tickers, since, until, window_hours, output_path):
                 log.info("window done ticker=%s window=%s fetched=%d new=%d total=%d",
                          ticker, short_window(w_start, w_end), fetched, kept, count)
                 print(f"  {ticker} {iso(w_start)} -> {iso(w_end)} done (total {count})")
+    except TimeUp:
+        log.info("time limit reached, no more API requests (%d posts scored)", count)
+        print(f"Time limit reached: stopped fetching ({count} posts scored).")
     except Exception:
         log.exception("run aborted after %d posts", count)
         raise
@@ -492,6 +520,12 @@ def main():
     ap.add_argument("--since", help="Start, e.g. 2026-10-01 or 2026-10-01T12:00:00 "
                                     f"(default: {DEFAULT_LOOKBACK_DAYS} days ago)")
     ap.add_argument("--until", help="End (default: now)")
+    ap.add_argument("--days", type=float, default=DEFAULT_LOOKBACK_DAYS,
+                    help=f"Look back this many days from --until when --since is not given "
+                         f"(default: {DEFAULT_LOOKBACK_DAYS})")
+    ap.add_argument("--time", type=float, default=None,
+                    help="Stop making API requests after this many minutes; posts already "
+                         "fetched are scored and saved (default: no limit)")
     ap.add_argument("--window-hours", type=int, default=DEFAULT_WINDOW_HOURS,
                     help="Slice the range into windows of this size")
     ap.add_argument("--output", default=str(OUTPUT_FILE),
@@ -499,16 +533,21 @@ def main():
     ap.add_argument("--log-file", default=str(LOG_FILE),
                     help=f"Where to write the log (default: {LOG_FILE.name} next to this script)")
     args = ap.parse_args()
+    if args.days <= 0:
+        ap.error("--days must be greater than 0")
+    if args.time is not None and args.time <= 0:
+        ap.error("--time must be greater than 0")
+    deadline = time.monotonic() + args.time * 60 if args.time is not None else None
 
     setup_logging(args.log_file)
 
     until = parse_date(args.until) if args.until else datetime.now(timezone.utc)
-    since = parse_date(args.since) if args.since else until - timedelta(days=DEFAULT_LOOKBACK_DAYS)
+    since = parse_date(args.since) if args.since else until - timedelta(days=args.days)
 
     async def go():
         tickers = await load_tickers(args.tickers)
         print(f"Querying {sorted(tickers)} from {iso(since)} to {iso(until)}")
-        await run_query(tickers, since, until, args.window_hours, args.output)
+        await run_query(tickers, since, until, args.window_hours, args.output, deadline)
 
     try:
         asyncio.run(go())
