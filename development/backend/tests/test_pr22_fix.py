@@ -357,11 +357,13 @@ def test_read_routes_use_the_read_only_helper_once_in_the_integrated_app(
     with integrated_app(engine, pr22_roles, monkeypatch) as (app, _, _), TestClient(app) as c:
         monkeypatch.setattr(read, "read_transaction", recording)
         read_paths = [p for p in v1_routes(app) if not p.startswith(("/v1/auth", "/v1/me"))]
-        assert sorted(read_paths) == ["/v1/securities/{symbol}", "/v1/watchlist"]
+        assert sorted(read_paths) == [
+            "/v1/market-status", "/v1/securities/{symbol}", "/v1/watchlist"]
         for path in read_paths:
             calls.clear()
             assert c.get(path.replace("{symbol}", "ZZAA")).status_code == 200
-            assert len(calls) == 1, path
+            # Every database read uses the helper once; S1-11's market status uses no database.
+            assert len(calls) == (0 if path == "/v1/market-status" else 1), path
 
 
 def _call(app, path, **kwargs):
