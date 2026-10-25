@@ -940,6 +940,17 @@ def verify_otp(payload: VerifyRequest, engine: EngineDep, provider: ProviderDep)
             lock_email(connection, payload.email)
             give_back(connection)
 
+    def discard(body):
+        """Best effort, with no connection held: a Supabase session this route
+        won't approve is logged out locally, never left usable."""
+        token = body.get("access_token") if isinstance(body, dict) else None
+        if not isinstance(token, str):
+            return
+        try:
+            provider.logout(token, scope="local")
+        except AuthProviderError:
+            pass
+
     try:
         body = provider.verify_code(payload.email, payload.code, row.flow)
     except AuthProviderError as error:
@@ -954,8 +965,10 @@ def verify_otp(payload: VerifyRequest, engine: EngineDep, provider: ProviderDep)
         token_response(body, user_from_identity(identity))  # well-formed first
     except AuthProviderError:
         returned()
+        discard(body)
         raise
     if normalize_email(identity.get("email", "")) != row.email:
+        discard(body)
         raise HTTPException(400, "Invalid verification code.")
     # Finish: re-read under the lock; a revoke or a concurrent winner may have
     # consumed the challenge meanwhile (J3), and then this login loses cleanly.
@@ -991,10 +1004,7 @@ def verify_otp(payload: VerifyRequest, engine: EngineDep, provider: ProviderDep)
             )
             give_back(connection)
     if lost:
-        try:  # best effort: the new Supabase session is never approved here
-            provider.logout(body["access_token"], scope="local")
-        except AuthProviderError:
-            pass
+        discard(body)
         raise HTTPException(400, START_AGAIN)
     return token_response(body, user, row.flow)
 
