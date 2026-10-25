@@ -31,7 +31,18 @@ SNAPSHOT = Path(__file__).parent / "fixtures" / "api" / "openapi_v1.json"
 WATCHLIST = models.WATCHLIST_SOURCES
 FULL_TABLES = ("publications", "current_publication", "securities", "security_identifiers")
 COLUMNS = {
-    "company_profiles": ("id", "sector", "industry"),
+    # S1-12: the API also reads the stored summary (never summary_grade or description_digest).
+    "company_profiles": (
+        "id",
+        "sector",
+        "industry",
+        "summary",
+        "summary_method",
+        "summary_status",
+        "summary_source_name",
+        "summary_source_url",
+        "summary_as_of",
+    ),
     "publication_events": ("id", "publication_id", "kind", "checks", "created_at"),
 }
 PUBLICATION_KEYS = {
@@ -56,6 +67,7 @@ SECURITY_KEYS = {
     "is_active",
     "sector",
     "industry",
+    "summary",  # S1-12 CS-5: an object, or null
 }
 WRITES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
 
@@ -439,6 +451,7 @@ def test_security_lookup_resolves_aliases_and_returns_the_reviewed_fields(engine
             "is_active": True,
             "sector": "Financial Services",
             "industry": "Insurance - Diversified",
+            "summary": None,  # S1-12: no stored summary
         }
     assert "Synthetic Holdings Inc" not in api.get("/v1/securities/BRK-B").text  # legal_name
 
