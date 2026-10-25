@@ -85,7 +85,11 @@ def test_synthetic_fixture_inventory_and_existing_validators(monkeypatch):
         "finnhub/insider_transactions.json",
         "nasdaq/short_interest.json",
     }
-    assert {str(p.relative_to(FIXTURES)) for p in FIXTURES.glob("*/*.json")} == expected
+    # The fixture adapter's input (M4 MC-A), not a provider response.
+    adapter_inputs = {"market_caps/quotes.json"}
+    assert {str(p.relative_to(FIXTURES)) for p in FIXTURES.glob("*/*.json")} == (
+        expected | adapter_inputs
+    )
     payloads = {name: json.loads((FIXTURES / name).read_text()) for name in expected}
     for name in ("fmp/senate.json", "fmp/house.json"):
         assert payloads[name]

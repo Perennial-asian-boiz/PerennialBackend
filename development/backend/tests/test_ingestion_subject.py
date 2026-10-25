@@ -25,7 +25,9 @@ def test_watchlist_set_is_unchanged_and_the_vocabulary_is_append_only():
     assert models.WATCHLIST_SOURCES == WATCHLIST
     assert models.SOURCES[: len(WATCHLIST)] == WATCHLIST
     assert set(models.SUBJECTLESS_SOURCES).isdisjoint(WATCHLIST)
-    assert models.SOURCES == models.WATCHLIST_SOURCES + models.SUBJECTLESS_SOURCES
+    # Later groups append after these (M4: PINNED_ROW_SOURCES); nothing moves.
+    prior = models.WATCHLIST_SOURCES + models.SUBJECTLESS_SOURCES
+    assert models.SOURCES[: len(prior)] == prior
 
 
 def test_global_records_have_no_security_fields():
