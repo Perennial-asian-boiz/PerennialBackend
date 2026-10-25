@@ -34,10 +34,13 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from pr22_support import (
+    DEFAULT_EMAIL_BUDGET,
+    account_client,
+    integrated_app,
+    pr22_roles,  # noqa: F401  (pytest fixture)
+)
 from sqlalchemy import event, text
-
-from pr22_support import DEFAULT_EMAIL_BUDGET, account_client, integrated_app
-from pr22_support import pr22_roles  # noqa: F401  (pytest fixture)
 from test_supabase_accounts import FakeProvider
 
 pytestmark = pytest.mark.db
@@ -83,29 +86,46 @@ ROUTES = [
 ]
 KINDS = ("read", "auth", "credential", "session", "refresh")
 TIGHT = {  # every bucket one token deep, refilling far slower than a test runs
-    "API_RATE_LIMIT_BURST": "1", "API_RATE_LIMIT_PER_MINUTE": "1",
-    "API_AUTH_RATE_LIMIT_BURST": "1", "API_AUTH_RATE_LIMIT_PER_HOUR": "1",
-    "API_CREDENTIAL_RATE_LIMIT_BURST": "1", "API_CREDENTIAL_RATE_LIMIT_PER_HOUR": "1",
-    "API_SESSION_RATE_LIMIT_BURST": "1", "API_SESSION_RATE_LIMIT_PER_MINUTE": "1",
-    "API_REFRESH_RATE_LIMIT_BURST": "1", "API_REFRESH_RATE_LIMIT_PER_HOUR": "1",
+    "API_RATE_LIMIT_BURST": "1",
+    "API_RATE_LIMIT_PER_MINUTE": "1",
+    "API_AUTH_RATE_LIMIT_BURST": "1",
+    "API_AUTH_RATE_LIMIT_PER_HOUR": "1",
+    "API_CREDENTIAL_RATE_LIMIT_BURST": "1",
+    "API_CREDENTIAL_RATE_LIMIT_PER_HOUR": "1",
+    "API_SESSION_RATE_LIMIT_BURST": "1",
+    "API_SESSION_RATE_LIMIT_PER_MINUTE": "1",
+    "API_REFRESH_RATE_LIMIT_BURST": "1",
+    "API_REFRESH_RATE_LIMIT_PER_HOUR": "1",
 }
 ROOMY = {  # for concurrency tests: the limiter must never turn a race into a 429
-    "API_CREDENTIAL_RATE_LIMIT_BURST": "500", "API_SESSION_RATE_LIMIT_BURST": "500",
-    "API_AUTH_RATE_LIMIT_BURST": "500", "API_REFRESH_RATE_LIMIT_BURST": "500",
+    "API_CREDENTIAL_RATE_LIMIT_BURST": "500",
+    "API_SESSION_RATE_LIMIT_BURST": "500",
+    "API_AUTH_RATE_LIMIT_BURST": "500",
+    "API_REFRESH_RATE_LIMIT_BURST": "500",
 }
 
 
 # ── the recorded fake provider ───────────────────────────
 
-PROVIDER_METHODS = ("signup", "check_password", "send_code", "verify_code", "identity",
-                    "recovery_identity", "refresh", "logout", "change_password")
+PROVIDER_METHODS = (
+    "signup",
+    "check_password",
+    "send_code",
+    "verify_code",
+    "identity",
+    "recovery_identity",
+    "refresh",
+    "logout",
+    "change_password",
+)
 
 
 def _recorded(name):
     def method(self, *args, **kwargs):
         checked_out = self.engine.pool.checkedout() if self.engine is not None else None
-        call = SimpleNamespace(name=name, args=args, kwargs=kwargs,
-                               checked_out=checked_out, result=None)
+        call = SimpleNamespace(
+            name=name, args=args, kwargs=kwargs, checked_out=checked_out, result=None
+        )
         with self.lock:
             self.calls.append(call)
         hook = self.hooks.get(name)
@@ -138,8 +158,10 @@ for _name in PROVIDER_METHODS:
 def hardened(engine, roles, monkeypatch, env=None):
     """The integrated app with a Recording provider: (client, provider, app)."""
     provider = Recording()
-    with integrated_app(engine, roles, monkeypatch, env=env) as (app, _, _), \
-            account_client(app, monkeypatch, provider) as (client, _, _):
+    with (
+        integrated_app(engine, roles, monkeypatch, env=env) as (app, _, _),
+        account_client(app, monkeypatch, provider) as (client, _, _),
+    ):
         provider.engine = app.state.engine
         yield client, provider, app
 
@@ -165,14 +187,18 @@ def confirmed_user(provider, email=EMAIL):
 
 
 def login(client, email=EMAIL):
-    response = client.post("/v1/auth/login", json={"email": email, "password": PASSWORD})
+    response = client.post(
+        "/v1/auth/login", json={"email": email, "password": PASSWORD}
+    )
     assert response.status_code == 200, response.text
     return response.json()["challenge_id"]
 
 
 def verify(client, challenge_id, email=EMAIL, code="123456"):
-    return client.post("/v1/auth/verify-otp",
-                       json={"email": email, "challenge_id": challenge_id, "code": code})
+    return client.post(
+        "/v1/auth/verify-otp",
+        json={"email": email, "challenge_id": challenge_id, "code": code},
+    )
 
 
 def session(client, provider, email=EMAIL):
@@ -186,10 +212,14 @@ def session(client, provider, email=EMAIL):
 
 def recovery_session(client, provider, email=EMAIL):
     """forgot-password, then the emailed link accepted: (link tokens, headers)."""
-    assert client.post("/v1/auth/forgot-password", json={"email": email}).status_code == 200
+    assert (
+        client.post("/v1/auth/forgot-password", json={"email": email}).status_code
+        == 200
+    )
     link = FakeProvider.verify_code(provider, email, "123456", "recovery")
-    accepted = client.post("/v1/auth/accept-recovery-link",
-                           json={"access_token": link["access_token"]})
+    accepted = client.post(
+        "/v1/auth/accept-recovery-link", json={"access_token": link["access_token"]}
+    )
     assert accepted.status_code == 200, accepted.text
     return link, {"Authorization": "Bearer " + link["access_token"]}
 
@@ -200,28 +230,45 @@ def digest(challenge_id):
 
 def challenges(engine, email=EMAIL):
     with engine.connect() as conn:  # superuser: past RLS, read-only
-        return conn.execute(text(
-            "SELECT token_hash, flow, consumed_at, created_at, expires_at, attempts,"
-            " send_count FROM app.auth_challenges WHERE email = :e ORDER BY created_at"),
-            {"e": email}).all()
+        return conn.execute(
+            text(
+                "SELECT token_hash, flow, consumed_at, created_at, expires_at, attempts,"
+                " send_count FROM app.auth_challenges WHERE email = :e ORDER BY created_at"
+            ),
+            {"e": email},
+        ).all()
 
 
 def open_hashes(engine, email=EMAIL, flow=None):
-    return {r.token_hash for r in challenges(engine, email)
-            if r.consumed_at is None and (flow is None or r.flow == flow)}
+    return {
+        r.token_hash
+        for r in challenges(engine, email)
+        if r.consumed_at is None and (flow is None or r.flow == flow)
+    }
 
 
-def seed_challenge(engine, flow, email=EMAIL, *, minutes_back=5, send_count=1, consumed=False):
+def seed_challenge(
+    engine, flow, email=EMAIL, *, minutes_back=5, send_count=1, consumed=False
+):
     """A challenge row on the database clock; returns its challenge id."""
     challenge_id = secrets.token_urlsafe(32)
     with engine.begin() as conn:
-        conn.execute(text(
-            "INSERT INTO app.auth_challenges (token_hash, email, flow, send_count, expires_at,"
-            " consumed_at, created_at, last_sent_at) VALUES (:h, :e, :f, :n,"
-            " now() + interval '10 minutes', CASE WHEN :c THEN now() END,"
-            " now() - make_interval(mins => :m), now() - make_interval(mins => :m))"),
-            {"h": digest(challenge_id), "e": email, "f": flow, "n": send_count,
-             "c": consumed, "m": minutes_back})
+        conn.execute(
+            text(
+                "INSERT INTO app.auth_challenges (token_hash, email, flow, send_count, expires_at,"
+                " consumed_at, created_at, last_sent_at) VALUES (:h, :e, :f, :n,"
+                " now() + interval '10 minutes', CASE WHEN :c THEN now() END,"
+                " now() - make_interval(mins => :m), now() - make_interval(mins => :m))"
+            ),
+            {
+                "h": digest(challenge_id),
+                "e": email,
+                "f": flow,
+                "n": send_count,
+                "c": consumed,
+                "m": minutes_back,
+            },
+        )
     return challenge_id
 
 
@@ -232,20 +279,30 @@ def age_challenge(engine, challenge_id, *, created_minutes=None, sent_seconds=No
     if sent_seconds is not None:
         sets.append(f"last_sent_at = now() - interval '{sent_seconds} seconds'")
     with engine.begin() as conn:
-        conn.execute(text(f"UPDATE app.auth_challenges SET {', '.join(sets)} WHERE token_hash = :h"),
-                     {"h": digest(challenge_id)})
+        conn.execute(
+            text(
+                f"UPDATE app.auth_challenges SET {', '.join(sets)} WHERE token_hash = :h"
+            ),
+            {"h": digest(challenge_id)},
+        )
 
 
 def sessions(engine, user_id):
     with engine.connect() as conn:
-        return conn.execute(text("SELECT session_id, recovery_only, revoked_at"
-                                 " FROM app.verified_sessions WHERE user_id = :u"),
-                            {"u": str(user_id)}).all()
+        return conn.execute(
+            text(
+                "SELECT session_id, recovery_only, revoked_at"
+                " FROM app.verified_sessions WHERE user_id = :u"
+            ),
+            {"u": str(user_id)},
+        ).all()
 
 
 def session_id_of(token):
     payload = token.split(".")[1]
-    return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))["session_id"]
+    return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))[
+        "session_id"
+    ]
 
 
 def run(target, *args):
@@ -258,10 +315,14 @@ def run(target, *args):
 
 def blocking(arrived, release, when=lambda *a, **k: True):
     """A provider hook that signals `arrived` and waits for `release` when `when` holds."""
+
     def hook(*args, **kwargs):
         if when(*args, **kwargs):
-            arrived.release() if isinstance(arrived, threading.Semaphore) else arrived.set()
+            arrived.release() if isinstance(
+                arrived, threading.Semaphore
+            ) else arrived.set()
             assert release.wait(WAIT), "a blocked provider call was never released"
+
     return hook
 
 
@@ -275,12 +336,16 @@ def test_ah1a_h1_forgot_password_over_an_open_login_sends_nothing(api, engine):
     sends = len(provider.named("send_code"))
     response = client.post("/v1/auth/forgot-password", json={"email": EMAIL})
     assert response.status_code == 200 and response.json() == UNIFORM
-    assert len(provider.named("send_code")) == sends, "a recovery code was sent over a login"
+    assert len(provider.named("send_code")) == sends, (
+        "a recovery code was sent over a login"
+    )
     assert digest(challenge_id) in open_hashes(engine, flow="login")
     assert verify(client, challenge_id).status_code == 200
 
 
-def test_ah1b_h2_five_recovery_requests_use_up_the_hour_but_login_still_works(api, engine):
+def test_ah1b_h2_five_recovery_requests_use_up_the_hour_but_login_still_works(
+    api, engine
+):
     """The per-email recovery cap. AH-9's share and ceilings would bind first at their
     defaults, so integrated_app's raised email budget (pr22_support) keeps them out."""
     client, provider, app = api
@@ -288,24 +353,34 @@ def test_ah1b_h2_five_recovery_requests_use_up_the_hour_but_login_still_works(ap
 
     confirmed_user(provider)
     for _ in range(5):  # one client's whole auth burst
-        assert client.post("/v1/auth/forgot-password", json={"email": EMAIL}).json() == UNIFORM
+        assert (
+            client.post("/v1/auth/forgot-password", json={"email": EMAIL}).json()
+            == UNIFORM
+        )
     assert [c.args for c in provider.named("send_code")] == [(EMAIL, "recovery")] * 5
-    owner = TestClient(app, client=("198.51.100.200", 4000))  # anyone else, the owner too
+    owner = TestClient(
+        app, client=("198.51.100.200", 4000)
+    )  # anyone else, the owner too
     sixth = owner.post("/v1/auth/forgot-password", json={"email": EMAIL})
     assert sixth.status_code == 200 and sixth.json() == UNIFORM
-    assert len(provider.named("send_code")) == 5, "the sixth recovery request in an hour sent"
+    assert len(provider.named("send_code")) == 5, (
+        "the sixth recovery request in an hour sent"
+    )
     login(client)  # the recovery cap never makes login 429
     assert provider.named("send_code")[-1].args == (EMAIL, "login")
 
 
-@pytest.mark.parametrize("seeded, login_limited", [
-    ("login", True), ("signup", False), ("recovery", False)])
+@pytest.mark.parametrize(
+    "seeded, login_limited", [("login", True), ("signup", False), ("recovery", False)]
+)
 def test_ah1b_caps_count_only_their_own_flow(api, engine, seeded, login_limited):
     """60 sends this hour in one flow: login is capped only by its own."""
     client, provider, _ = api
     confirmed_user(provider)
     seed_challenge(engine, seeded, send_count=60, consumed=True)
-    response = client.post("/v1/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    response = client.post(
+        "/v1/auth/login", json={"email": EMAIL, "password": PASSWORD}
+    )
     assert (response.status_code == 429) is login_limited, response.text
 
 
@@ -318,14 +393,24 @@ def test_ah1c_a_new_challenge_supersedes_only_its_own_flow(api, engine, new_flow
         login(client)
     elif new_flow == "signup":  # an address not yet registered
         others = [seed_challenge(engine, f) for f in ("login", "recovery")]
-        assert client.post("/v1/auth/signup", json={
-            "email": EMAIL, "full_name": "Test Person", "password": PASSWORD}).status_code == 201
+        assert (
+            client.post(
+                "/v1/auth/signup",
+                json={"email": EMAIL, "full_name": "Test Person", "password": PASSWORD},
+            ).status_code
+            == 201
+        )
     else:  # an open login would hold the recovery send back (AH-1a), so none here
         confirmed_user(provider)
         others = [seed_challenge(engine, "signup")]
-        assert client.post("/v1/auth/forgot-password", json={"email": EMAIL}).status_code == 200
+        assert (
+            client.post("/v1/auth/forgot-password", json={"email": EMAIL}).status_code
+            == 200
+        )
     still_open = open_hashes(engine)
-    assert {digest(c) for c in others} <= still_open, "another flow's challenge was consumed"
+    assert {digest(c) for c in others} <= still_open, (
+        "another flow's challenge was consumed"
+    )
     assert open_hashes(engine, flow=new_flow)
 
 
@@ -333,8 +418,10 @@ def test_ah1c_a_new_challenge_supersedes_only_its_own_flow(api, engine, new_flow
 
 
 def _signup(client, email=EMAIL):
-    response = client.post("/v1/auth/signup",
-                           json={"email": email, "full_name": "Test Person", "password": PASSWORD})
+    response = client.post(
+        "/v1/auth/signup",
+        json={"email": email, "full_name": "Test Person", "password": PASSWORD},
+    )
     assert response.status_code == 201, response.text
     return response.json()["challenge_id"]
 
@@ -357,15 +444,18 @@ def _route_resend_otp(client, provider, engine):
     confirmed_user(provider)
     challenge_id = login(client)
     age_challenge(engine, challenge_id, sent_seconds=61)
-    return lambda: client.post("/v1/auth/resend-otp",
-                               json={"email": EMAIL, "challenge_id": challenge_id})
+    return lambda: client.post(
+        "/v1/auth/resend-otp", json={"email": EMAIL, "challenge_id": challenge_id}
+    )
 
 
 def _route_resend_confirmation(client, provider, engine):
     challenge_id = _signup(client)
     age_challenge(engine, challenge_id, sent_seconds=61)
-    return lambda: client.post("/v1/auth/resend-confirmation",
-                               json={"email": EMAIL, "challenge_id": challenge_id})
+    return lambda: client.post(
+        "/v1/auth/resend-confirmation",
+        json={"email": EMAIL, "challenge_id": challenge_id},
+    )
 
 
 def _route_verify(client, provider, engine):
@@ -377,20 +467,28 @@ def _route_verify(client, provider, engine):
 def _route_confirm(client, provider, engine):
     _signup(client)
     link = FakeProvider.verify_code(provider, EMAIL, "123456", "signup")
-    return lambda: client.post("/v1/auth/confirm-email", json={"access_token": link["access_token"]})
+    return lambda: client.post(
+        "/v1/auth/confirm-email", json={"access_token": link["access_token"]}
+    )
 
 
 def _route_accept_link(client, provider, engine):
     session(client, provider)
-    assert client.post("/v1/auth/forgot-password", json={"email": EMAIL}).status_code == 200
+    assert (
+        client.post("/v1/auth/forgot-password", json={"email": EMAIL}).status_code
+        == 200
+    )
     link = FakeProvider.verify_code(provider, EMAIL, "123456", "recovery")
-    return lambda: client.post("/v1/auth/accept-recovery-link",
-                               json={"access_token": link["access_token"]})
+    return lambda: client.post(
+        "/v1/auth/accept-recovery-link", json={"access_token": link["access_token"]}
+    )
 
 
 def _route_refresh(client, provider, engine):
     body, _ = session(client, provider)
-    return lambda: client.post("/v1/auth/refresh", json={"refresh_token": body["refresh_token"]})
+    return lambda: client.post(
+        "/v1/auth/refresh", json={"refresh_token": body["refresh_token"]}
+    )
 
 
 def _route_logout(client, provider, engine):
@@ -401,14 +499,20 @@ def _route_logout(client, provider, engine):
 def _route_reset(client, provider, engine):
     session(client, provider)
     _, headers = recovery_session(client, provider)
-    return lambda: client.post("/v1/auth/reset-password", headers=headers,
-                               json={"new_password": "Newpassword123"})
+    return lambda: client.post(
+        "/v1/auth/reset-password",
+        headers=headers,
+        json={"new_password": "Newpassword123"},
+    )
 
 
 def _route_password(client, provider, engine):
     _, headers = session(client, provider)
-    return lambda: client.put("/v1/me/password", headers=headers,
-                              json={"old_password": PASSWORD, "new_password": "Newpassword123"})
+    return lambda: client.put(
+        "/v1/me/password",
+        headers=headers,
+        json={"old_password": PASSWORD, "new_password": "Newpassword123"},
+    )
 
 
 def _route_me(client, provider, engine):
@@ -417,11 +521,18 @@ def _route_me(client, provider, engine):
 
 
 AH2A_ROUTES = {
-    "signup": _route_signup, "login": _route_login, "forgot_password": _route_forgot,
-    "resend_otp": _route_resend_otp, "resend_confirmation": _route_resend_confirmation,
-    "verify_otp": _route_verify, "confirm_email": _route_confirm,
-    "accept_recovery_link": _route_accept_link, "refresh": _route_refresh,
-    "logout": _route_logout, "reset_password": _route_reset, "change_password": _route_password,
+    "signup": _route_signup,
+    "login": _route_login,
+    "forgot_password": _route_forgot,
+    "resend_otp": _route_resend_otp,
+    "resend_confirmation": _route_resend_confirmation,
+    "verify_otp": _route_verify,
+    "confirm_email": _route_confirm,
+    "accept_recovery_link": _route_accept_link,
+    "refresh": _route_refresh,
+    "logout": _route_logout,
+    "reset_password": _route_reset,
+    "change_password": _route_password,
     "me": _route_me,
 }
 
@@ -443,7 +554,9 @@ def test_ah2b_a_second_login_is_not_held_by_the_first_ones_send(roomy):
     client, provider, _ = roomy
     confirmed_user(provider)
     arrived, release = threading.Semaphore(0), threading.Event()
-    provider.hooks["send_code"] = blocking(arrived, release, lambda email, flow: flow == "login")
+    provider.hooks["send_code"] = blocking(
+        arrived, release, lambda email, flow: flow == "login"
+    )
     first, second, both_in = run(login, client), None, False
     try:
         assert arrived.acquire(timeout=WAIT), "the first login never reached send_code"
@@ -468,8 +581,10 @@ def test_ah2c_a_failed_send_leaves_no_open_challenge(api, engine, route):
 
     if route == "signup":
         provider.hooks["signup"] = fail
-        client.post("/v1/auth/signup",
-                    json={"email": EMAIL, "full_name": "Test Person", "password": PASSWORD})
+        client.post(
+            "/v1/auth/signup",
+            json={"email": EMAIL, "full_name": "Test Person", "password": PASSWORD},
+        )
     else:
         confirmed_user(provider)
         provider.hooks["send_code"] = fail
@@ -496,7 +611,10 @@ def test_ah2c_a_slower_login_never_consumes_a_newer_challenge(roomy, engine):
     arrived, release = threading.Event(), threading.Event()
     calls = []
     provider.hooks["send_code"] = blocking(
-        arrived, release, lambda email, flow: flow == "login" and not calls.append(1) and len(calls) == 1)
+        arrived,
+        release,
+        lambda email, flow: flow == "login" and not calls.append(1) and len(calls) == 1,
+    )
     first = run(login, client)
     try:
         assert arrived.wait(WAIT), "login A never reached send_code"
@@ -512,7 +630,9 @@ def test_ah2c_a_slower_login_never_consumes_a_newer_challenge(roomy, engine):
     assert digest(first[1][0]) not in open_hashes(engine)
 
 
-def test_ah2d_ten_concurrent_wrong_codes_reach_the_provider_at_most_max_attempts(roomy, engine):
+def test_ah2d_ten_concurrent_wrong_codes_reach_the_provider_at_most_max_attempts(
+    roomy, engine
+):
     from src.api import accounts
 
     client, provider, _ = roomy
@@ -540,7 +660,9 @@ def test_ah2d_a_provider_503_gives_the_attempt_back(api, engine):
 
     provider.hooks["verify_code"] = unavailable
     assert verify(client, challenge_id).status_code == 503
-    assert [r.attempts for r in challenges(engine) if r.token_hash == digest(challenge_id)] == [0]
+    assert [
+        r.attempts for r in challenges(engine) if r.token_hash == digest(challenge_id)
+    ] == [0]
 
 
 def test_ah2d_after_five_wrong_codes_a_sixth_makes_no_provider_call(api):
@@ -554,7 +676,9 @@ def test_ah2d_after_five_wrong_codes_a_sixth_makes_no_provider_call(api):
     assert len(provider.named("verify_code")) == calls
 
 
-def test_ah2e_verify_otp_loses_cleanly_when_the_challenge_is_consumed_meanwhile(api, engine):
+def test_ah2e_verify_otp_loses_cleanly_when_the_challenge_is_consumed_meanwhile(
+    api, engine
+):
     client, provider, _ = api
     confirmed_user(provider)
     challenge_id = login(client)
@@ -565,8 +689,13 @@ def test_ah2e_verify_otp_loses_cleanly_when_the_challenge_is_consumed_meanwhile(
             conn.execute(text("SET LOCAL lock_timeout = '2s'"))
             try:
                 with conn.begin_nested():
-                    conn.execute(text("UPDATE app.auth_challenges SET consumed_at = now()"
-                                      " WHERE token_hash = :h"), {"h": digest(challenge_id)})
+                    conn.execute(
+                        text(
+                            "UPDATE app.auth_challenges SET consumed_at = now()"
+                            " WHERE token_hash = :h"
+                        ),
+                        {"h": digest(challenge_id)},
+                    )
                 consumed.append(True)
             except Exception:
                 consumed.append(False)
@@ -593,9 +722,15 @@ def b64(value):
 
 
 def token(user, sid, **changes):
-    claims = {"iss": f"{SUPABASE_URL}/auth/v1", "aud": "authenticated", "role": "authenticated",
-              "exp": int(time.time()) + 600, "sub": str(user), "session_id": str(sid),
-              "amr": [{"method": "recovery", "timestamp": int(time.time())}]}
+    claims = {
+        "iss": f"{SUPABASE_URL}/auth/v1",
+        "aud": "authenticated",
+        "role": "authenticated",
+        "exp": int(time.time()) + 600,
+        "sub": str(user),
+        "session_id": str(sid),
+        "amr": [{"method": "recovery", "timestamp": int(time.time())}],
+    }
     claims.update(changes)
     return f"{b64({'alg': 'HS256', 'typ': 'JWT'})}.{b64(claims)}.c3ludGhldGlj"
 
@@ -633,7 +768,9 @@ class FakeSupabase:
         if path.startswith("logout"):
             return _Response(204)
         if path.startswith("token?grant_type=password"):
-            return _Response(200, {"access_token": "synthetic-checked", "user": self.user})
+            return _Response(
+                200, {"access_token": "synthetic-checked", "user": self.user}
+            )
         raise AssertionError(f"unexpected Supabase call {method} {path}")
 
     def user_calls(self):
@@ -648,25 +785,42 @@ def supabase(engine, pr22_roles, monkeypatch):  # noqa: F811
     answers from a set the test controls (registered).
     """
     from fastapi.testclient import TestClient
-
     from src.api import accounts, supabase_auth
 
     user_id, session_id = uuid4(), uuid4()
     with engine.begin() as conn:  # superuser: seed past RLS
-        conn.execute(text("INSERT INTO app.profiles (id, email, full_name)"
-                          " VALUES (:i, :e, 'Private Person')"), {"i": str(user_id), "e": EMAIL})
-        conn.execute(text("INSERT INTO app.verified_sessions (session_id, user_id)"
-                          " VALUES (:s, :u)"), {"s": str(session_id), "u": str(user_id)})
-    fake = FakeSupabase({"id": str(user_id), "email": EMAIL,
-                         "email_confirmed_at": "2026-10-24T00:00:00Z", "user_metadata": {}})
+        conn.execute(
+            text(
+                "INSERT INTO app.profiles (id, email, full_name)"
+                " VALUES (:i, :e, 'Private Person')"
+            ),
+            {"i": str(user_id), "e": EMAIL},
+        )
+        conn.execute(
+            text(
+                "INSERT INTO app.verified_sessions (session_id, user_id)"
+                " VALUES (:s, :u)"
+            ),
+            {"s": str(session_id), "u": str(user_id)},
+        )
+    fake = FakeSupabase(
+        {
+            "id": str(user_id),
+            "email": EMAIL,
+            "email_confirmed_at": "2026-10-24T00:00:00Z",
+            "user_metadata": {},
+        }
+    )
     fake.registered = {EMAIL}
     monkeypatch.setattr(supabase_auth.requests, "request", fake)
-    monkeypatch.setattr(accounts, "email_is_registered",
-                        lambda _conn, email: email in fake.registered)
+    monkeypatch.setattr(
+        accounts, "email_is_registered", lambda _conn, email: email in fake.registered
+    )
     env = {"API_AUTH_RATE_LIMIT_BURST": "1000", **ROOMY}
     with integrated_app(engine, pr22_roles, monkeypatch, env=env) as (app, _, _):
-        app.dependency_overrides[accounts.get_provider] = lambda: supabase_auth.SupabaseAuth(
-            SUPABASE_URL, "synthetic-publishable-key")
+        app.dependency_overrides[accounts.get_provider] = lambda: (
+            supabase_auth.SupabaseAuth(SUPABASE_URL, "synthetic-publishable-key")
+        )
         try:
             with TestClient(app) as client:
                 yield client, fake, user_id, session_id
@@ -688,13 +842,19 @@ MALFORMED = {
 def _send(client, where, bearer):
     if where == "me":
         return client.get("/v1/me", headers={"Authorization": "Bearer " + bearer})
-    path = "/v1/auth/confirm-email" if where == "confirm_email" else "/v1/auth/accept-recovery-link"
+    path = (
+        "/v1/auth/confirm-email"
+        if where == "confirm_email"
+        else "/v1/auth/accept-recovery-link"
+    )
     return client.post(path, json={"access_token": bearer})
 
 
 @pytest.mark.parametrize("where", ["me", "confirm_email", "accept_recovery_link"])
 @pytest.mark.parametrize("case", sorted(MALFORMED))
-def test_ah2f_a_structurally_bad_token_is_refused_with_no_provider_call(supabase, where, case):
+def test_ah2f_a_structurally_bad_token_is_refused_with_no_provider_call(
+    supabase, where, case
+):
     client, fake, user_id, session_id = supabase
     response = _send(client, where, MALFORMED[case](user_id, session_id))
     # accept-recovery-link answers a bad link with Jaden's 400 (contract kept, AH-8a)
@@ -705,7 +865,9 @@ def test_ah2f_a_structurally_bad_token_is_refused_with_no_provider_call(supabase
 
 def test_ah2f_a_structurally_valid_token_still_calls_user_and_is_served(supabase):
     client, fake, user_id, session_id = supabase
-    response = client.get("/v1/me", headers={"Authorization": "Bearer " + token(user_id, session_id)})
+    response = client.get(
+        "/v1/me", headers={"Authorization": "Bearer " + token(user_id, session_id)}
+    )
     assert response.status_code == 200 and response.json()["email"] == EMAIL
     assert fake.user_calls() == [("GET", "user")]
 
@@ -713,7 +875,10 @@ def test_ah2f_a_structurally_valid_token_still_calls_user_and_is_served(supabase
 def test_ah2f_an_expired_token_is_still_refused_after_the_user_call(supabase):
     client, fake, user_id, session_id = supabase
     expired = token(user_id, session_id, exp=int(time.time()) - 60)
-    assert client.get("/v1/me", headers={"Authorization": "Bearer " + expired}).status_code == 401
+    assert (
+        client.get("/v1/me", headers={"Authorization": "Bearer " + expired}).status_code
+        == 401
+    )
     assert fake.user_calls() == [("GET", "user")]
 
 
@@ -734,7 +899,11 @@ def test_ah2f_a_valid_recovery_link_still_calls_user_and_is_accepted(supabase, e
 def _limits():
     from src.api import read
 
-    return {obj for name, obj in vars(read).items() if name.endswith("rate_limit") and callable(obj)}
+    return {
+        obj
+        for name, obj in vars(read).items()
+        if name.endswith("rate_limit") and callable(obj)
+    }
 
 
 def _api_routes(app):
@@ -747,8 +916,11 @@ def _api_routes(app):
 
     included = getattr(routing, "_IncludedRouter", ())
     for route in app.routes:
-        contexts = route.effective_route_contexts() if included and isinstance(route, included) else (
-            [route] if isinstance(route, routing.APIRoute) else [])
+        contexts = (
+            route.effective_route_contexts()
+            if included and isinstance(route, included)
+            else ([route] if isinstance(route, routing.APIRoute) else [])
+        )
         for context in contexts:
             calls = [d.call for d in context.dependant.dependencies]
             for method in sorted(context.methods):
@@ -764,8 +936,12 @@ def test_ah3a_h6_every_route_has_exactly_one_limit_dependency_first(api):
             continue
         if not calls or calls[0] not in limits or sum(c in limits for c in calls) != 1:
             missing.append(f"{method} {path}")
-    documented = {(m.upper(), p) for p, ops in app.openapi()["paths"].items() for m in ops}
-    assert documented <= seen, f"routes the walk missed: {documented - seen}"  # the test's own guard
+    documented = {
+        (m.upper(), p) for p, ops in app.openapi()["paths"].items() for m in ops
+    }
+    assert documented <= seen, (
+        f"routes the walk missed: {documented - seen}"
+    )  # the test's own guard
     assert missing == [], f"routes without exactly one leading limit: {missing}"
 
 
@@ -796,8 +972,12 @@ def tight(engine, pr22_roles, monkeypatch):  # noqa: F811
         yield parts
 
 
-@pytest.mark.parametrize("method, path, bucket", ROUTES, ids=[f"{m} {p}" for m, p, _ in ROUTES])
-def test_ah3b_h6_each_route_is_limited_by_its_own_bucket_only(tight, method, path, bucket):
+@pytest.mark.parametrize(
+    "method, path, bucket", ROUTES, ids=[f"{m} {p}" for m, p, _ in ROUTES]
+)
+def test_ah3b_h6_each_route_is_limited_by_its_own_bucket_only(
+    tight, method, path, bucket
+):
     client, _, app = tight
     outcomes = {}
     for kind in KINDS:
@@ -809,8 +989,10 @@ def test_ah3b_h6_each_route_is_limited_by_its_own_bucket_only(tight, method, pat
 @contextmanager
 def _engine_use(engine):
     used = []
-    listeners = [("checkout", lambda *a: used.append("checkout")),
-                 ("before_cursor_execute", lambda *a: used.append(a[2]))]
+    listeners = [
+        ("checkout", lambda *a: used.append("checkout")),
+        ("before_cursor_execute", lambda *a: used.append(a[2])),
+    ]
     for name, fn in listeners:
         event.listen(engine, name, fn)
     try:
@@ -820,12 +1002,24 @@ def _engine_use(engine):
             event.remove(engine, name, fn)
 
 
-INVALID_FIELDS = {"email": 7, "password": None, "full_name": [], "code": "x", "challenge_id": 1,
-                  "access_token": 5, "refresh_token": 5, "new_password": 1, "old_password": 1,
-                  "ticker": "BAD TICKER", "sectors": "x"}
+INVALID_FIELDS = {
+    "email": 7,
+    "password": None,
+    "full_name": [],
+    "code": "x",
+    "challenge_id": 1,
+    "access_token": 5,
+    "refresh_token": 5,
+    "new_password": 1,
+    "old_password": 1,
+    "ticker": "BAD TICKER",
+    "sectors": "x",
+}
 
 
-@pytest.mark.parametrize("method, path, bucket", ROUTES, ids=[f"{m} {p}" for m, p, _ in ROUTES])
+@pytest.mark.parametrize(
+    "method, path, bucket", ROUTES, ids=[f"{m} {p}" for m, p, _ in ROUTES]
+)
 def test_ah3c_h6_a_limited_request_runs_nothing(tight, method, path, bucket):
     """429 before validation and the bearer check: no provider call, no engine use
     (so no advisory lock either), even with invalid fields and a garbage token."""
@@ -833,19 +1027,29 @@ def test_ah3c_h6_a_limited_request_runs_nothing(tight, method, path, bucket):
     _drain(app, bucket)
     provider.calls.clear()
     with _engine_use(app.state.engine) as used:
-        response = _request(client, method, path, json=None if method == "DELETE" else INVALID_FIELDS,
-                            headers={"Authorization": "Bearer rb-garbage-token"})
+        response = _request(
+            client,
+            method,
+            path,
+            json=None if method == "DELETE" else INVALID_FIELDS,
+            headers={"Authorization": "Bearer rb-garbage-token"},
+        )
     assert response.status_code == 429, response.text
     assert provider.calls == [] and used == []
 
 
-@pytest.mark.parametrize("path", ["/v1/auth/login", "/v1/auth/signup", "/v1/auth/verify-otp"])
+@pytest.mark.parametrize(
+    "path", ["/v1/auth/login", "/v1/auth/signup", "/v1/auth/verify-otp"]
+)
 def test_ah3c_a_body_that_is_not_json_is_a_422_that_runs_nothing(api, path):
     client, provider, app = api
     provider.calls.clear()
     with _engine_use(app.state.engine) as used:
-        response = client.post(path, content=b'{"email": "rb-sentinel@example.com", oops',
-                               headers={"Content-Type": "application/json"})
+        response = client.post(
+            path,
+            content=b'{"email": "rb-sentinel@example.com", oops',
+            headers={"Content-Type": "application/json"},
+        )
     assert response.status_code == 422
     assert "rb-sentinel" not in response.text
     assert provider.calls == [] and used == []
@@ -856,29 +1060,66 @@ def _limiter_sequence(app, kind, n):
     return [limiter.check(kind, KEY) for _ in range(n)]
 
 
-@pytest.mark.parametrize("kind, burst_env, rate_env, interval", [
-    ("credential", "API_CREDENTIAL_RATE_LIMIT_BURST", "API_CREDENTIAL_RATE_LIMIT_PER_HOUR", 600),
-    ("session", "API_SESSION_RATE_LIMIT_BURST", "API_SESSION_RATE_LIMIT_PER_MINUTE", 10),
-    ("refresh", "API_REFRESH_RATE_LIMIT_BURST", "API_REFRESH_RATE_LIMIT_PER_HOUR", 600),
-])
-def test_ah3d_h6_the_new_settings_take_effect(engine, pr22_roles, monkeypatch,  # noqa: F811
-                                               kind, burst_env, rate_env, interval):
+@pytest.mark.parametrize(
+    "kind, burst_env, rate_env, interval",
+    [
+        (
+            "credential",
+            "API_CREDENTIAL_RATE_LIMIT_BURST",
+            "API_CREDENTIAL_RATE_LIMIT_PER_HOUR",
+            600,
+        ),
+        (
+            "session",
+            "API_SESSION_RATE_LIMIT_BURST",
+            "API_SESSION_RATE_LIMIT_PER_MINUTE",
+            10,
+        ),
+        (
+            "refresh",
+            "API_REFRESH_RATE_LIMIT_BURST",
+            "API_REFRESH_RATE_LIMIT_PER_HOUR",
+            600,
+        ),
+    ],
+)
+def test_ah3d_h6_the_new_settings_take_effect(
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
+    kind,
+    burst_env,
+    rate_env,
+    interval,
+):
     """Burst 2 and a rate of 6 (one token per `interval` seconds)."""
-    with hardened(engine, pr22_roles, monkeypatch, env={burst_env: "2", rate_env: "6"}) as (_, _, app):
+    with hardened(
+        engine, pr22_roles, monkeypatch, env={burst_env: "2", rate_env: "6"}
+    ) as (_, _, app):
         first, second, third = _limiter_sequence(app, kind, 3)
     assert first is None and second is None
     assert third is not None and interval - 2 <= third <= interval
 
 
-@pytest.mark.parametrize("setting", ["API_CREDENTIAL_RATE_LIMIT_BURST",
-                                     "API_CREDENTIAL_RATE_LIMIT_PER_HOUR",
-                                     "API_SESSION_RATE_LIMIT_BURST",
-                                     "API_SESSION_RATE_LIMIT_PER_MINUTE",
-                                     "API_REFRESH_RATE_LIMIT_BURST",
-                                     "API_REFRESH_RATE_LIMIT_PER_HOUR"])
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "API_CREDENTIAL_RATE_LIMIT_BURST",
+        "API_CREDENTIAL_RATE_LIMIT_PER_HOUR",
+        "API_SESSION_RATE_LIMIT_BURST",
+        "API_SESSION_RATE_LIMIT_PER_MINUTE",
+        "API_REFRESH_RATE_LIMIT_BURST",
+        "API_REFRESH_RATE_LIMIT_PER_HOUR",
+    ],
+)
 @pytest.mark.parametrize("value", ["0", "-3", "2.5", "ten"])
-def test_ah3d_invalid_new_settings_refuse_at_startup(engine, pr22_roles, monkeypatch,  # noqa: F811
-                                                      setting, value):
+def test_ah3d_invalid_new_settings_refuse_at_startup(
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
+    setting,
+    value,
+):
     with pytest.raises(Exception) as caught:
         with integrated_app(engine, pr22_roles, monkeypatch, env={setting: value}):
             pass
@@ -887,8 +1128,10 @@ def test_ah3d_invalid_new_settings_refuse_at_startup(engine, pr22_roles, monkeyp
         assert value not in str(caught.value)
 
 
-@pytest.mark.parametrize("kind, burst, interval", [
-    ("credential", 10, 60), ("session", 30, 1), ("refresh", 10, 60)])
+@pytest.mark.parametrize(
+    "kind, burst, interval",
+    [("credential", 10, 60), ("session", 30, 1), ("refresh", 10, 60)],
+)
 def test_ah3d_h6_the_new_defaults_match_the_table(api, kind, burst, interval):
     """credential: burst 10, then 60 an hour; session: burst 30, then 60 a minute;
     refresh (L6): burst 10, then 60 an hour."""
@@ -898,21 +1141,36 @@ def test_ah3d_h6_the_new_defaults_match_the_table(api, kind, burst, interval):
     assert results[burst] is not None and interval - 1 <= results[burst] <= interval
 
 
-@pytest.mark.parametrize("method, path", [("POST", "/v1/auth/login"), ("GET", "/v1/me")])
+@pytest.mark.parametrize(
+    "method, path", [("POST", "/v1/auth/login"), ("GET", "/v1/me")]
+)
 def test_ah3e_the_429_is_exactly_rl2s(tight, method, path):
     client, _, app = tight
     _drain(app, "credential" if path == "/v1/auth/login" else "session")
     response = _request(client, method, path)
     assert response.status_code == 429
-    assert response.content == json.dumps(RATE_LIMITED, sort_keys=True, separators=(",", ":")).encode()
+    assert (
+        response.content
+        == json.dumps(RATE_LIMITED, sort_keys=True, separators=(",", ":")).encode()
+    )
     assert re.fullmatch(r"[1-9][0-9]*", response.headers["retry-after"])
-    assert response.headers["cache-control"] == "no-store" and "etag" not in response.headers
+    assert (
+        response.headers["cache-control"] == "no-store"
+        and "etag" not in response.headers
+    )
 
 
-@pytest.mark.parametrize("kind, method, path", [
-    ("credential", "POST", "/v1/auth/login"), ("session", "GET", "/v1/me"),
-    ("refresh", "POST", "/v1/auth/refresh")])
-def test_ah3e_new_kinds_log_once_per_key_without_the_client(tight, caplog, kind, method, path):
+@pytest.mark.parametrize(
+    "kind, method, path",
+    [
+        ("credential", "POST", "/v1/auth/login"),
+        ("session", "GET", "/v1/me"),
+        ("refresh", "POST", "/v1/auth/refresh"),
+    ],
+)
+def test_ah3e_new_kinds_log_once_per_key_without_the_client(
+    tight, caplog, kind, method, path
+):
     client, _, app = tight
     caplog.set_level(logging.DEBUG)
     _drain(app, kind, probe=False)
@@ -926,15 +1184,19 @@ def test_ah3e_new_kinds_log_once_per_key_without_the_client(tight, caplog, kind,
 
 @pytest.mark.parametrize("kind", ["credential", "session", "refresh", "email"])
 def test_ah3e_memory_stays_bounded_per_kind(engine, pr22_roles, monkeypatch, kind):  # noqa: F811
-    with hardened(engine, pr22_roles, monkeypatch, env={"API_RATE_LIMIT_MAX_CLIENTS": "3"}) as (_, _, app):
+    with hardened(
+        engine, pr22_roles, monkeypatch, env={"API_RATE_LIMIT_MAX_CLIENTS": "3"}
+    ) as (_, _, app):
         limiter = _fresh_limiter(app)
         for i in range(5):
             limiter.check(kind, f"ip:198.51.100.{i}")
         assert limiter.size(kind) == 3
 
 
-@pytest.mark.parametrize("path, kind", [("/v1/auth/login", "credential"),
-                                        ("/v1/auth/forgot-password", "auth")])
+@pytest.mark.parametrize(
+    "path, kind",
+    [("/v1/auth/login", "credential"), ("/v1/auth/forgot-password", "auth")],
+)
 def test_ah3e_the_429_never_depends_on_the_email(tight, path, kind):
     client, provider, app = tight
     confirmed_user(provider)
@@ -953,8 +1215,11 @@ def test_ah3e_the_429_never_depends_on_the_email(tight, path, kind):
 def _revoke(client, via, headers):
     if via == "logout":
         return client.post("/v1/auth/logout", headers=headers)
-    return client.put("/v1/me/password", headers=headers,
-                      json={"old_password": PASSWORD, "new_password": "Newpassword123"})
+    return client.put(
+        "/v1/me/password",
+        headers=headers,
+        json={"old_password": PASSWORD, "new_password": "Newpassword123"},
+    )
 
 
 @pytest.mark.parametrize("via", ["logout", "password_change"])
@@ -974,7 +1239,9 @@ def test_ah4a_revoke_wins_and_the_in_flight_verify_is_refused(roomy, engine, via
         release.set()
     verifying[0].join(WAIT)
     revoked[0].join(WAIT)
-    assert revoke_finished, "the revoke waited on (or failed against) the in-flight verify"
+    assert revoke_finished, (
+        "the revoke waited on (or failed against) the in-flight verify"
+    )
     assert verifying[1][0].status_code == 400, verifying[1][0].text
     assert all(s.revoked_at is not None for s in sessions(engine, body["user"]["id"]))
 
@@ -986,7 +1253,9 @@ def test_ah4a_verify_wins_and_the_revoke_revokes_its_new_session(roomy, engine, 
     pending = login(client)
     old_token = body["access_token"]
     arrived, release = threading.Event(), threading.Event()
-    provider.hooks["identity"] = blocking(arrived, release, lambda tok: tok == old_token)
+    provider.hooks["identity"] = blocking(
+        arrived, release, lambda tok: tok == old_token
+    )
     revoked = run(_revoke, client, via, headers)
     try:
         assert arrived.wait(WAIT), "the revoke never reached the provider"
@@ -1007,8 +1276,11 @@ def test_ah4b_revoke_takes_verify_otps_email_lock_through_the_helper(api, monkey
 
     client, provider, _ = api
     real, seen = accounts.lock_email, []
-    monkeypatch.setattr(accounts, "lock_email",
-                        lambda connection, email: (seen.append(email), real(connection, email))[1])
+    monkeypatch.setattr(
+        accounts,
+        "lock_email",
+        lambda connection, email: (seen.append(email), real(connection, email))[1],
+    )
     _, headers = session(client, provider)
     verify_keys = list(seen)
     seen.clear()
@@ -1030,13 +1302,16 @@ PROVIDER_FAILURES = {
     "503": lambda: _Response(503, {"msg": "synthetic provider text"}),
     "500": lambda: _Response(500, {"msg": "synthetic provider text"}),
     "timeout": _requests_timeout,
-    "unmapped_400": lambda: _Response(400, {"error_code": "rb_unmapped",
-                                            "msg": "synthetic provider text"}),
+    "unmapped_400": lambda: _Response(
+        400, {"error_code": "rb_unmapped", "msg": "synthetic provider text"}
+    ),
 }
 
 
 @pytest.mark.parametrize("failure", sorted(PROVIDER_FAILURES))
-def test_ah5a_forgot_password_answers_the_same_for_registered_and_unknown(supabase, failure):
+def test_ah5a_forgot_password_answers_the_same_for_registered_and_unknown(
+    supabase, failure
+):
     client, fake, _, _ = supabase
     fake.answers[("POST", "recover")] = PROVIDER_FAILURES[failure]
     answers = []
@@ -1049,8 +1324,11 @@ def test_ah5a_forgot_password_answers_the_same_for_registered_and_unknown(supaba
 
 
 def _app_lines(caplog):
-    return [r.getMessage() for r in caplog.records
-            if r.name.startswith("src.api") and "rate_limited" not in r.getMessage()]
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("src.api") and "rate_limited" not in r.getMessage()
+    ]
 
 
 def test_ah5a_the_failure_logs_only_the_fixed_provider_code(supabase, caplog):
@@ -1058,12 +1336,23 @@ def test_ah5a_the_failure_logs_only_the_fixed_provider_code(supabase, caplog):
     fake.answers[("POST", "recover")] = PROVIDER_FAILURES["503"]
     caplog.set_level(logging.DEBUG)
     caplog.clear()
-    assert client.post("/v1/auth/forgot-password", json={"email": EMAIL}).status_code == 200
+    assert (
+        client.post("/v1/auth/forgot-password", json={"email": EMAIL}).status_code
+        == 200
+    )
     lines = _app_lines(caplog)
     assert lines, "the provider failure was not logged"
-    assert any("unavailable" in line for line in lines), lines  # AuthProviderError's code
+    assert any("unavailable" in line for line in lines), (
+        lines
+    )  # AuthProviderError's code
     for line in lines:
-        for leak in (EMAIL, "testclient", "synthetic provider text", "redirect_to", "/auth/v1"):
+        for leak in (
+            EMAIL,
+            "testclient",
+            "synthetic provider text",
+            "redirect_to",
+            "/auth/v1",
+        ):
             assert leak not in line, line
 
 
@@ -1073,25 +1362,36 @@ def test_ah5a_failure_lines_are_capped_like_rl13(supabase, caplog):
     caplog.set_level(logging.DEBUG)
     caplog.clear()
     for _ in range(70):  # within one minute
-        assert client.post("/v1/auth/forgot-password", json={"email": EMAIL}).status_code == 200
+        assert (
+            client.post("/v1/auth/forgot-password", json={"email": EMAIL}).status_code
+            == 200
+        )
     lines = _app_lines(caplog)
-    assert 1 <= len(lines) <= 61, len(lines)  # 60 a minute, plus at most one suppressed-count line
+    assert 1 <= len(lines) <= 61, len(
+        lines
+    )  # 60 a minute, plus at most one suppressed-count line
 
 
-@pytest.mark.parametrize("provider_code, status, detail", [
-    ("reauthentication_needed", 403, REAUTH),
-    ("reauthentication_not_valid", 403, REAUTH),
-    ("rb_unmapped", 401, "Invalid email, password, or session."),
-])
+@pytest.mark.parametrize(
+    "provider_code, status, detail",
+    [
+        ("reauthentication_needed", 403, REAUTH),
+        ("reauthentication_not_valid", 403, REAUTH),
+        ("rb_unmapped", 401, "Invalid email, password, or session."),
+    ],
+)
 def test_ah5b_h5_reauthentication_on_a_password_change_is_a_fixed_403(
     supabase, provider_code, status, detail
 ):
     client, fake, user_id, session_id = supabase
-    fake.answers[("PUT", "user")] = _Response(400, {"error_code": provider_code,
-                                                    "msg": "synthetic provider text"})
-    response = client.put("/v1/me/password",
-                          headers={"Authorization": "Bearer " + token(user_id, session_id)},
-                          json={"old_password": PASSWORD, "new_password": "Newpassword123"})
+    fake.answers[("PUT", "user")] = _Response(
+        400, {"error_code": provider_code, "msg": "synthetic provider text"}
+    )
+    response = client.put(
+        "/v1/me/password",
+        headers={"Authorization": "Bearer " + token(user_id, session_id)},
+        json={"old_password": PASSWORD, "new_password": "Newpassword123"},
+    )
     assert response.status_code == status, response.text
     assert response.json()["detail"] == detail
     if status == 403:
@@ -1113,10 +1413,19 @@ def test_ah6a_signup_uses_the_normalized_address_everywhere(api, engine, monkeyp
 
     client, provider, _ = api
     real, locked = accounts.lock_email, []
-    monkeypatch.setattr(accounts, "lock_email",
-                        lambda connection, email: (locked.append(email), real(connection, email))[1])
-    response = client.post("/v1/auth/signup", json={
-        "email": "  Straße@Example.COM ", "full_name": "Test Person", "password": PASSWORD})
+    monkeypatch.setattr(
+        accounts,
+        "lock_email",
+        lambda connection, email: (locked.append(email), real(connection, email))[1],
+    )
+    response = client.post(
+        "/v1/auth/signup",
+        json={
+            "email": "  Straße@Example.COM ",
+            "full_name": "Test Person",
+            "password": PASSWORD,
+        },
+    )
     assert response.status_code == 201, response.text
     assert [c.args[0] for c in provider.named("signup")] == ["straße@example.com"]
     assert [r.flow for r in challenges(engine, "straße@example.com")] == ["signup"]
@@ -1140,24 +1449,41 @@ def test_ah6b_no_casefold_on_an_email_in_src_api():
 # ── J7: AH-7a to AH-7c (H4) ──────────────────────────────
 
 
-@pytest.mark.parametrize("skew_hours", [1, -1], ids=["app_an_hour_fast", "app_an_hour_slow"])
-def test_ah7a_challenges_follow_the_database_clock(api, engine, monkeypatch, skew_hours):
+@pytest.mark.parametrize(
+    "skew_hours", [1, -1], ids=["app_an_hour_fast", "app_an_hour_slow"]
+)
+def test_ah7a_challenges_follow_the_database_clock(
+    api, engine, monkeypatch, skew_hours
+):
     from datetime import datetime, timedelta, timezone
 
     from src.api import accounts
 
     client, provider, _ = api
-    monkeypatch.setattr(accounts, "now", lambda: datetime.now(timezone.utc)
-                        + timedelta(hours=skew_hours), raising=False)
+    monkeypatch.setattr(
+        accounts,
+        "now",
+        lambda: datetime.now(timezone.utc) + timedelta(hours=skew_hours),
+        raising=False,
+    )
     confirmed_user(provider)
     fresh = login(client)
-    cooldown = client.post("/v1/auth/resend-otp", json={"email": EMAIL, "challenge_id": fresh})
-    assert cooldown.status_code == 429, cooldown.text  # the resend cooldown still applies
+    cooldown = client.post(
+        "/v1/auth/resend-otp", json={"email": EMAIL, "challenge_id": fresh}
+    )
+    assert cooldown.status_code == 429, (
+        cooldown.text
+    )  # the resend cooldown still applies
     assert verify(client, fresh).status_code == 200  # a fresh challenge verifies
     stale = login(client)
     with engine.begin() as conn:
-        conn.execute(text("UPDATE app.auth_challenges SET expires_at = now() - interval '1 minute'"
-                          " WHERE token_hash = :h"), {"h": digest(stale)})
+        conn.execute(
+            text(
+                "UPDATE app.auth_challenges SET expires_at = now() - interval '1 minute'"
+                " WHERE token_hash = :h"
+            ),
+            {"h": digest(stale)},
+        )
     assert verify(client, stale).status_code == 400  # past the database's expires_at
 
 
@@ -1176,9 +1502,16 @@ def test_ah7b_h4_a_resend_never_extends_past_sixty_minutes(api, engine, flow):
     response = client.post(path, json={"email": EMAIL, "challenge_id": challenge_id})
     assert response.status_code == 200, response.text
     with engine.connect() as conn:
-        assert conn.execute(text(
-            "SELECT expires_at = created_at + interval '60 minutes' FROM app.auth_challenges"
-            " WHERE token_hash = :h"), {"h": digest(challenge_id)}).scalar() is True
+        assert (
+            conn.execute(
+                text(
+                    "SELECT expires_at = created_at + interval '60 minutes' FROM app.auth_challenges"
+                    " WHERE token_hash = :h"
+                ),
+                {"h": digest(challenge_id)},
+            ).scalar()
+            is True
+        )
 
 
 @pytest.mark.parametrize("flow", ["login", "signup"])
@@ -1188,15 +1521,21 @@ def test_ah7b_h4_past_sixty_minutes_a_resend_says_start_again(api, engine, flow)
     age_challenge(engine, challenge_id, created_minutes=61, sent_seconds=120)
     sends = len(provider.named("send_code"))
     response = client.post(path, json={"email": EMAIL, "challenge_id": challenge_id})
-    assert response.status_code == 400 and response.json()["detail"] == START_AGAIN, response.text
+    assert response.status_code == 400 and response.json()["detail"] == START_AGAIN, (
+        response.text
+    )
     assert len(provider.named("send_code")) == sends
 
 
 def _age_session(engine, access_token, minutes):
     with engine.begin() as conn:
-        conn.execute(text("UPDATE app.verified_sessions SET created_at = now()"
-                          " - make_interval(mins => :m) WHERE session_id = :s"),
-                     {"m": minutes, "s": session_id_of(access_token)})
+        conn.execute(
+            text(
+                "UPDATE app.verified_sessions SET created_at = now()"
+                " - make_interval(mins => :m) WHERE session_id = :s"
+            ),
+            {"m": minutes, "s": session_id_of(access_token)},
+        )
 
 
 def test_ah7c_h4_a_recovery_session_14_minutes_old_still_resets(api, engine):
@@ -1204,8 +1543,11 @@ def test_ah7c_h4_a_recovery_session_14_minutes_old_still_resets(api, engine):
     session(client, provider)
     link, headers = recovery_session(client, provider)
     _age_session(engine, link["access_token"], 14)
-    response = client.post("/v1/auth/reset-password", headers=headers,
-                           json={"new_password": "Newpassword123"})
+    response = client.post(
+        "/v1/auth/reset-password",
+        headers=headers,
+        json={"new_password": "Newpassword123"},
+    )
     assert response.status_code == 200, response.text
 
 
@@ -1216,10 +1558,15 @@ def test_ah7c_h4_a_recovery_session_16_minutes_old_is_refused(api, engine, route
     link, headers = recovery_session(client, provider)
     _age_session(engine, link["access_token"], 16)
     if route == "reset_password":
-        response = client.post("/v1/auth/reset-password", headers=headers,
-                               json={"new_password": "Newpassword123"})
+        response = client.post(
+            "/v1/auth/reset-password",
+            headers=headers,
+            json={"new_password": "Newpassword123"},
+        )
     else:
-        response = client.post("/v1/auth/refresh", json={"refresh_token": link["refresh_token"]})
+        response = client.post(
+            "/v1/auth/refresh", json={"refresh_token": link["refresh_token"]}
+        )
     assert response.status_code == 401, response.text
     assert response.json()["detail"] == RECOVERY_EXPIRED
 
@@ -1229,8 +1576,12 @@ def test_ah7c_a_login_session_16_minutes_old_is_unaffected(api, engine):
     body, headers = session(client, provider)
     _age_session(engine, body["access_token"], 16)
     assert client.get("/v1/me", headers=headers).status_code == 200
-    assert client.post("/v1/auth/refresh",
-                       json={"refresh_token": body["refresh_token"]}).status_code == 200
+    assert (
+        client.post(
+            "/v1/auth/refresh", json={"refresh_token": body["refresh_token"]}
+        ).status_code
+        == 200
+    )
 
 
 # ── AH-8b: docs ──────────────────────────────────────────
@@ -1238,9 +1589,16 @@ def test_ah7c_a_login_session_16_minutes_old_is_unaffected(api, engine):
 
 def test_ah8b_api_md_documents_the_buckets_and_the_new_errors():
     doc = (REPO / "docs" / "technical-specs" / "API.md").read_text()
-    for term in ("API_CREDENTIAL_RATE_LIMIT_BURST", "API_CREDENTIAL_RATE_LIMIT_PER_HOUR",
-                 "API_SESSION_RATE_LIMIT_BURST", "API_SESSION_RATE_LIMIT_PER_MINUTE",
-                 "credential", "session", REAUTH, RECOVERY_EXPIRED):
+    for term in (
+        "API_CREDENTIAL_RATE_LIMIT_BURST",
+        "API_CREDENTIAL_RATE_LIMIT_PER_HOUR",
+        "API_SESSION_RATE_LIMIT_BURST",
+        "API_SESSION_RATE_LIMIT_PER_MINUTE",
+        "credential",
+        "session",
+        REAUTH,
+        RECOVERY_EXPIRED,
+    ):
         assert term in doc, term
 
 
@@ -1259,10 +1617,12 @@ SEND_REFUSED = "We can't send a code right now. Please try again in a few minute
 
 
 def budget(total=25, recovery=6, signup=6, share=3):
-    return {"API_EMAIL_BUDGET_PER_HOUR": str(total),
-            "API_EMAIL_BUDGET_RECOVERY_PER_HOUR": str(recovery),
-            "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": str(signup),
-            "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": str(share)}
+    return {
+        "API_EMAIL_BUDGET_PER_HOUR": str(total),
+        "API_EMAIL_BUDGET_RECOVERY_PER_HOUR": str(recovery),
+        "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": str(signup),
+        "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": str(share),
+    }
 
 
 def peer(app, n):
@@ -1293,8 +1653,10 @@ def post_forgot(client, email):
 
 
 def post_signup(client, email):
-    return client.post("/v1/auth/signup",
-                       json={"email": email, "full_name": "Test Person", "password": PASSWORD})
+    return client.post(
+        "/v1/auth/signup",
+        json={"email": email, "full_name": "Test Person", "password": PASSWORD},
+    )
 
 
 def assert_send_refused(response):
@@ -1315,11 +1677,13 @@ def budgeted(engine, roles, monkeypatch, **limits):
 
 
 def test_ah9a_l4_the_app_wide_total_refuses_the_next_send_in_any_flow(
-    engine, pr22_roles, monkeypatch  # noqa: F811
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
 ):
-    with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
-        _, provider, app
-    ):
+    with budgeted(
+        engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1
+    ) as (_, provider, app):
         emails = users(provider, 5)
         first = login(peer(app, 1), emails[0])
         login(peer(app, 2), emails[1])
@@ -1329,8 +1693,11 @@ def test_ah9a_l4_the_app_wide_total_refuses_the_next_send_in_any_flow(
         assert len(sent(provider)) == 5  # the whole budget, from five clients
         age_challenge(engine, first, sent_seconds=61)
         calls = len(provider.calls)
-        assert_send_refused(peer(app, 6).post("/v1/auth/resend-otp",
-                                              json={"email": emails[0], "challenge_id": first}))
+        assert_send_refused(
+            peer(app, 6).post(
+                "/v1/auth/resend-otp", json={"email": emails[0], "challenge_id": first}
+            )
+        )
         assert len(provider.calls) == calls  # no provider call at all
         assert_send_refused(post_login(peer(app, 7), emails[4]))
         assert_uniform(post_forgot(peer(app, 8), emails[1]))
@@ -1338,11 +1705,13 @@ def test_ah9a_l4_the_app_wide_total_refuses_the_next_send_in_any_flow(
 
 
 def test_ah9b_l4_at_their_ceilings_recovery_and_signup_stop_but_login_sends(
-    engine, pr22_roles, monkeypatch  # noqa: F811
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
 ):
-    with budgeted(engine, pr22_roles, monkeypatch, total=10, recovery=2, signup=2, share=1) as (
-        _, provider, app
-    ):
+    with budgeted(
+        engine, pr22_roles, monkeypatch, total=10, recovery=2, signup=2, share=1
+    ) as (_, provider, app):
         emails = users(provider, 4)
         assert_uniform(post_forgot(peer(app, 1), emails[0]))
         assert_uniform(post_forgot(peer(app, 2), emails[1]))
@@ -1357,7 +1726,9 @@ def test_ah9b_l4_at_their_ceilings_recovery_and_signup_stop_but_login_sends(
 
 
 def test_ah9b_l4_two_clients_block_recovery_for_everyone_while_login_works(
-    engine, pr22_roles, monkeypatch  # noqa: F811
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
 ):
     """The trade-off, pinned at the defaults (25, 6, 6, 3): two clients spending
     their shares on forgot-password use up recovery's hour for every address."""
@@ -1375,17 +1746,20 @@ def test_ah9b_l4_two_clients_block_recovery_for_everyone_while_login_works(
 
 
 def test_ah9c_two_app_instances_on_one_database_share_one_budget(
-    engine, pr22_roles, monkeypatch  # noqa: F811
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
 ):
     from fastapi.testclient import TestClient
-
     from src.api import accounts
     from src.api.app import create_app
 
-    with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
-        _, provider, app
-    ):
-        second = create_app(api_role=pr22_roles["api"])  # its own limiter, the same database
+    with budgeted(
+        engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1
+    ) as (_, provider, app):
+        second = create_app(
+            api_role=pr22_roles["api"]
+        )  # its own limiter, the same database
         second.dependency_overrides[accounts.get_provider] = lambda: provider
         emails = users(provider, 7)
         for n in range(3):
@@ -1393,21 +1767,38 @@ def test_ah9c_two_app_instances_on_one_database_share_one_budget(
         for n in (3, 4):
             login(TestClient(second, client=(f"198.51.100.{n + 1}", 5000)), emails[n])
         assert len(sent(provider)) == 5
-        assert_send_refused(post_login(TestClient(second, client=("198.51.100.20", 5000)), emails[5]))
+        assert_send_refused(
+            post_login(TestClient(second, client=("198.51.100.20", 5000)), emails[5])
+        )
         assert_send_refused(post_login(peer(app, 21), emails[6]))
         assert len(sent(provider)) == 5
 
 
 def test_ah9c_one_short_concurrent_requests_send_exactly_one_email(
-    engine, pr22_roles, monkeypatch  # noqa: F811
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
 ):
-    with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
-        _, provider, app
-    ):
-        seed_challenge(engine, "login", email="earlier@example.com", send_count=4, consumed=True)
+    from src.api import accounts
+
+    with budgeted(
+        engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1
+    ) as (_, provider, app):
+        seed_challenge(
+            engine, "login", email="earlier@example.com", send_count=4, consumed=True
+        )
         emails = users(provider, 5)
-        provider.hooks["send_code"] = lambda *a, **k: time.sleep(0.2)  # widen the race
-        threads = [run(post_login, peer(app, n + 1), email) for n, email in enumerate(emails)]
+        real = accounts.reserve_email
+
+        def held_open(*args, **kwargs):  # force the race: hold count-to-insert open
+            key = real(*args, **kwargs)
+            time.sleep(0.3)
+            return key
+
+        monkeypatch.setattr(accounts, "reserve_email", held_open)
+        threads = [
+            run(post_login, peer(app, n + 1), email) for n, email in enumerate(emails)
+        ]
         for thread, _ in threads:
             thread.join(WAIT * 2)
         statuses = sorted(result[0].status_code for _, result in threads)
@@ -1416,13 +1807,15 @@ def test_ah9c_one_short_concurrent_requests_send_exactly_one_email(
 
 
 def test_ah9c_a_failed_and_released_first_send_doesnt_count(
-    engine, pr22_roles, monkeypatch  # noqa: F811
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
 ):
     from src.api.supabase_auth import AuthProviderError
 
-    with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
-        _, provider, app
-    ):
+    with budgeted(
+        engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1
+    ) as (_, provider, app):
         emails = users(provider, 7)
         failures = []
 
@@ -1446,16 +1839,25 @@ AH9D_INVALID = {
     "share_not_an_integer": {"API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "1.5"},
     "recovery_above_the_total": {"API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "26"},
     "signup_above_the_total": {"API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "30"},
-    "ceilings_together_reach_the_total": {"API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "13",
-                                          "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "12"},
+    "ceilings_together_reach_the_total": {
+        "API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "13",
+        "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "12",
+    },
     "share_equal_to_a_ceiling": {"API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "6"},
-    "share_above_one_ceiling": {"API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "4",
-                                "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "5"},
+    "share_above_one_ceiling": {
+        "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "4",
+        "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "5",
+    },
 }
 
 
 @pytest.mark.parametrize("case", sorted(AH9D_INVALID))
-def test_ah9d_invalid_email_budgets_refuse_at_startup(engine, pr22_roles, monkeypatch, case):  # noqa: F811
+def test_ah9d_invalid_email_budgets_refuse_at_startup(
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
+    case,
+):
     env = {**budget(), **AH9D_INVALID[case]}  # otherwise valid: 25, 6, 6, 3
     with pytest.raises(Exception) as caught:
         with integrated_app(engine, pr22_roles, monkeypatch, env=env):
@@ -1496,14 +1898,20 @@ def test_ah9e_supabases_own_429_is_the_fixed_answer(api, engine, route, code):
             challenge_id = login(client)
             age_challenge(engine, challenge_id, sent_seconds=61)
             provider.hooks["send_code"] = too_many
-            response = client.post("/v1/auth/resend-otp",
-                                   json={"email": EMAIL, "challenge_id": challenge_id})
+            response = client.post(
+                "/v1/auth/resend-otp",
+                json={"email": EMAIL, "challenge_id": challenge_id},
+            )
     assert response.status_code == 429, response.text
     assert response.json()["detail"] == SEND_REFUSED
     assert "address" not in response.text
 
 
-def test_ah9f_a_clients_share_of_three_covers_every_flow(engine, pr22_roles, monkeypatch):  # noqa: F811
+def test_ah9f_a_clients_share_of_three_covers_every_flow(
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
+):
     with budgeted(engine, pr22_roles, monkeypatch, share=3) as (_, provider, app):
         emails = users(provider, 4)
         mine, other = peer(app, 1), peer(app, 2)
@@ -1519,21 +1927,32 @@ def test_ah9f_a_clients_share_of_three_covers_every_flow(engine, pr22_roles, mon
         assert len(sent(provider)) == 4
 
 
-def test_ah9f_a_request_that_sends_nothing_spends_no_share(engine, pr22_roles, monkeypatch):  # noqa: F811
+def test_ah9f_a_request_that_sends_nothing_spends_no_share(
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
+):
     with budgeted(engine, pr22_roles, monkeypatch, share=3) as (_, provider, app):
         emails = users(provider, 4)
         mine = peer(app, 1)
         for _ in range(4):
             assert_uniform(post_forgot(mine, "nobody-here@example.com"))
         for _ in range(2):
-            assert mine.post("/v1/auth/login", json={"email": emails[0], "password": "Wrong1234"}).status_code == 401
+            assert (
+                mine.post(
+                    "/v1/auth/login", json={"email": emails[0], "password": "Wrong1234"}
+                ).status_code
+                == 401
+            )
         for email in emails[:3]:
             login(mine, email)
         assert_send_refused(post_login(mine, emails[3]))
 
 
 def test_ah9f_failed_first_sends_refund_the_share_but_never_above_full(
-    engine, pr22_roles, monkeypatch  # noqa: F811
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
 ):
     """Three failed logins from one address, then the provider is back: three send,
     and the fourth is refused (the refunds didn't lift the share above 3)."""
@@ -1570,23 +1989,39 @@ def test_ah9f_a_failed_resend_still_spends_the_share(engine, pr22_roles, monkeyp
         provider.hooks["send_code"] = fail
         for _ in range(2):
             age_challenge(engine, challenge_id, sent_seconds=61)
-            assert mine.post("/v1/auth/resend-otp", json={
-                "email": emails[0], "challenge_id": challenge_id}).status_code == 503
+            assert (
+                mine.post(
+                    "/v1/auth/resend-otp",
+                    json={"email": emails[0], "challenge_id": challenge_id},
+                ).status_code
+                == 503
+            )
         provider.hooks.pop("send_code")
         assert_send_refused(post_login(mine, emails[1]))
 
 
 def test_ah9g_the_budget_lock_is_named_unique_and_taken_after_the_email_lock(api):
     client, provider, app = api
-    sources = {path: path.read_text() for root in ("development/backend/src", "development/database/ops")
-               for path in (REPO / root).rglob("*.py")}
-    definitions = [p for p, text_ in sources.items() if re.search(r"^EMAIL_BUDGET_LOCK = 170101\b", text_, re.M)]
+    sources = {
+        path: path.read_text()
+        for root in ("development/backend/src", "development/database/ops")
+        for path in (REPO / root).rglob("*.py")
+    }
+    definitions = [
+        p
+        for p, text_ in sources.items()
+        if re.search(r"^EMAIL_BUDGET_LOCK = 170101\b", text_, re.M)
+    ]
     assert len(definitions) == 1 and "/src/api/" in str(definitions[0]), definitions
     others = set()
     for path, text_ in sources.items():
         for line in text_.splitlines():
-            if not line.lstrip().startswith("#") and not line.startswith("EMAIL_BUDGET_LOCK ="):
-                others |= {int(v) for v in re.findall(r"\b(17\d{4})\b", line.split("#")[0])}
+            if not line.lstrip().startswith("#") and not line.startswith(
+                "EMAIL_BUDGET_LOCK ="
+            ):
+                others |= {
+                    int(v) for v in re.findall(r"\b(17\d{4})\b", line.split("#")[0])
+                }
     assert 170101 not in others, "another fixed advisory-lock key is 170101"
     confirmed_user(provider)
     with _engine_use(app.state.engine) as used:
@@ -1594,12 +2029,19 @@ def test_ah9g_the_budget_lock_is_named_unique_and_taken_after_the_email_lock(api
     statements = [u for u in used if u != "checkout"]
     locks = [i for i, s in enumerate(statements) if "pg_advisory_xact_lock" in s]
     email_lock = next(i for i in locks if "hashtextextended" in statements[i])
-    budget_lock = next((i for i in locks if "hashtextextended" not in statements[i]), None)
-    assert budget_lock is not None and email_lock < budget_lock, [statements[i] for i in locks]
+    budget_lock = next(
+        (i for i in locks if "hashtextextended" not in statements[i]), None
+    )
+    assert budget_lock is not None and email_lock < budget_lock, [
+        statements[i] for i in locks
+    ]
 
 
 def test_ah9h_share_refusals_are_counted_not_logged_one_by_one(
-    engine, pr22_roles, monkeypatch, caplog  # noqa: F811
+    engine,
+    pr22_roles,  # noqa: F811
+    monkeypatch,
+    caplog,
 ):
     with budgeted(engine, pr22_roles, monkeypatch, share=1) as (_, provider, app):
         emails = users(provider, 11)
