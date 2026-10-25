@@ -41,25 +41,44 @@ def test_connection(raw):
         raise ValueError("Expected a loopback PostgreSQL test URL without routing parameters") from None
 
 
+def bypasses_row_security(conn):
+    """False if any table has row security and this login is neither superuser nor BYPASSRLS.
+
+    Such a login is filtered by every RLS-enabled table it does not own, so a dump
+    fails partway (pg_dump runs with row_security off) and a verification would
+    count only the rows its policies allow. Callers refuse before starting (PK-9).
+    """
+    return conn.execute(
+        "SELECT NOT EXISTS (SELECT 1 FROM pg_class WHERE relrowsecurity)"
+        " OR (SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user)").fetchone()[0]
+
+
 def table_manifest(conn):
-    """Hash all application rows in stable order using bounded client memory."""
-    tables = conn.execute("SELECT tablename FROM pg_tables WHERE schemaname='perennial' ORDER BY tablename").fetchall()
-    if not tables:
+    """Hash all application rows in stable order using bounded client memory.
+
+    Tables in schema perennial are keyed by name, those in app (accounts, #22) as
+    "app.<table>". With row_security off, a login that RLS would filter fails here
+    instead of verifying fewer rows.
+    """
+    conn.execute("SET row_security = off")
+    tables = conn.execute("SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN ('perennial', 'app') "
+                          "ORDER BY schemaname, tablename").fetchall()
+    if not any(schema == "perennial" for schema, _ in tables):
         raise ValueError("No perennial application tables to verify")
     result = {}
-    for (table,) in tables:
+    for schema, table in tables:
         digest, count = hashlib.sha256(), 0
         with conn.cursor(name="drill_manifest") as rows:
             rows.execute(sql.SQL("SELECT row_to_json(t)::text FROM {} t ORDER BY row_to_json(t)::text COLLATE \"C\"")
-                         .format(sql.Identifier("perennial", table)))
+                         .format(sql.Identifier(schema, table)))
             for (row,) in rows:
                 data = row.encode()
                 digest.update(len(data).to_bytes(8, "big"))
                 digest.update(data)
                 count += 1
-        result[table] = {"rows": count, "sha256": digest.hexdigest()}
+        result[table if schema == "perennial" else f"{schema}.{table}"] = {"rows": count, "sha256": digest.hexdigest()}
     invalid = conn.execute("SELECT count(*) FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace "
-                           "WHERE n.nspname='perennial' AND NOT c.convalidated").fetchone()[0]
+                           "WHERE n.nspname IN ('perennial', 'app') AND NOT c.convalidated").fetchone()[0]
     if invalid:
         raise ValueError("Unvalidated application constraints")
     return result
@@ -83,10 +102,29 @@ def _clear_libpq_environment():
     return clean_environment()
 
 
-def restore_into_disposable(admin, source, expected, report, restore):
+def provision_target(target, roles, phase):
+    """The restore runbook's provisioning, run as the drill (administrative) login.
+
+    Phase roles before pg_restore creates the group roles the dump's policies
+    name. Phase grants after it re-owns and re-grants perennial, then
+    provision_api_role.py does the same for app, policies included.
+    """
+    import provision_api_role
+    import provision_roles
+
+    owner, importer, reader, api = roles
+    with psycopg.connect(**target) as conn:
+        provision_roles.provision(conn, roles, phase=phase)
+        if phase == "grants" and conn.execute("SELECT to_regnamespace('app')").fetchone()[0]:
+            provision_api_role.provision(conn, api, owner=owner, importer=importer, reader=reader)
+
+
+def restore_into_disposable(admin, source, expected, report, restore, roles=None):
     """Restore into a new random database, compare, and always drop only that database.
 
-    restore(target) loads the new database given its connection parameters.
+    restore(target) loads the new database given its connection parameters. With
+    roles (owner, importer, reader, api) it follows the restore order: the roles
+    phase, the restore, then the grants; without them the roles must already exist.
     """
     target_name = "perennial_test_restore_" + secrets.token_hex(12)
     target = dict(source, dbname=target_name)
@@ -95,7 +133,11 @@ def restore_into_disposable(admin, source, expected, report, restore):
     try:
         admin.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(target_name)))
         created = True
+        if roles:
+            provision_target(target, roles, "roles")
         restore(target)
+        if roles:
+            provision_target(target, roles, "grants")
         with psycopg.connect(**target) as restored:
             restored.execute("SET TIME ZONE 'UTC'")
             actual = table_manifest(restored)
@@ -108,7 +150,10 @@ def restore_into_disposable(admin, source, expected, report, restore):
             report["target_dropped"] = True
 
 
-def run_drill(raw, output):
+ROW_SECURITY_REFUSAL = "Tables have row security; dump and restore need a superuser or BYPASSRLS login"
+
+
+def run_drill(raw, output, roles=None):
     source = test_connection(raw)
     env = _clear_libpq_environment()
     output = Path(output)
@@ -117,6 +162,8 @@ def run_drill(raw, output):
     report = {"verified": False, "target_dropped": False}
     with psycopg.connect(**source, autocommit=True) as admin:
         try:
+            if not bypasses_row_security(admin):
+                raise RuntimeError(ROW_SECURITY_REFUSAL)
             with psycopg.connect(**source) as snapshot:
                 snapshot.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 snapshot.execute("SET TIME ZONE 'UTC'")
@@ -126,7 +173,7 @@ def run_drill(raw, output):
                 expected = table_manifest(snapshot)
             restore_into_disposable(admin, source, expected, report, lambda target: pg_tool(
                 "pg_restore", target, ["--exit-on-error", "--single-transaction", "--no-owner",
-                                       "--no-acl", str(archive)], env))
+                                       "--no-acl", str(archive)], env), roles)
         finally:
             (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
@@ -172,13 +219,15 @@ def decrypt_into(target, encrypted, key, env):
         raise RuntimeError(f"pg_restore failed (exit {restored}); raw server output suppressed")
 
 
-def run_backup_drill(raw, store, key, output, manifest_name=None, incident_start=None):
+def run_backup_drill(raw, store, key, output, manifest_name=None, incident_start=None, roles=None):
     """Timed restore of a stored backup (backup.py) against the D6 RTO/RPO targets.
 
     The clock starts at incident_start (default: now) and covers retrieval,
     checksum, decryption, restore and verification. Only report.json is left
     in the new private output directory: the decrypted dump is streamed into
-    pg_restore, and the copied encrypted archive is removed on every path.
+    pg_restore, and the copied encrypted archive is removed on every path. The
+    restore and the row verification (app included, decision 32) run as this
+    login, which must be the administrative one; roles as in restore_into_disposable.
     """
     from backup import ARCHIVE_SUFFIX, BACKUP_NAME, MANIFEST_SUFFIX, manifests, require_openssl3
     from backup import sha256_file
@@ -217,8 +266,10 @@ def run_backup_drill(raw, store, key, output, manifest_name=None, incident_start
             raise RuntimeError("Stored archive checksum differs from its manifest")
         mark("retrieve")
         with psycopg.connect(**source, autocommit=True) as admin:
+            if not bypasses_row_security(admin):
+                raise RuntimeError(ROW_SECURITY_REFUSAL)
             restore_into_disposable(admin, source, manifest["tables"], report,
-                                    lambda target: decrypt_into(target, encrypted, key, env))
+                                    lambda target: decrypt_into(target, encrypted, key, env), roles)
         mark("decrypt_restore_and_verify")
         rto = (datetime.now(timezone.utc) - incident_start).total_seconds()
         rpo = (incident_start - datetime.fromisoformat(manifest["snapshot_time"])).total_seconds()
@@ -241,6 +292,8 @@ def main():
     parser.add_argument("--from-store", help="Restore the newest verified backup.py archive in this store")
     parser.add_argument("--key", help="PEM private key for --from-store archives")
     parser.add_argument("--manifest", help="A specific backup name instead of the newest")
+    parser.add_argument("--roles", nargs=4, metavar=("OWNER", "IMPORTER", "READER", "API"),
+                        help="Provision these group roles before and after the restore, as the runbook does")
     args = parser.parse_args()
     if bool(args.from_store) != bool(args.key):
         parser.error("--from-store and --key must be given together")
@@ -249,9 +302,9 @@ def main():
         if args.from_store:
             from backup import LocalStore
             report = run_backup_drill(raw, LocalStore(args.from_store), args.key, args.output,
-                                      manifest_name=args.manifest)
+                                      manifest_name=args.manifest, roles=args.roles)
         else:
-            report = run_drill(raw, args.output)
+            report = run_drill(raw, args.output, roles=args.roles)
     except Exception as exc:
         print(f"Restore drill failed ({type(exc).__name__}); no existing database was replaced", file=sys.stderr)
         return 1

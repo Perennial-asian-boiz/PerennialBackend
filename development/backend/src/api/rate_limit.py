@@ -3,7 +3,9 @@
 Design: docs/work-items/m5-read-api-design-note.md, "Addendum (2026-10-24)".
 
 - One token bucket per (kind, client key), kept in memory per app instance:
-  ``read`` for R1's routes, ``auth`` for #22's signup and forgot-password.
+  ``read`` for R1's routes, ``auth`` for #22's signup and forgot-password, and
+  (#22 auth hardening) ``credential``, ``session`` and ``refresh`` for the other
+  account routes, and ``email``, each client's share of the app's email budget.
 - Buckets are GCRA timestamps, so refill needs no background work. A bucket
   table holds at most ``max_clients`` keys per kind and evicts the least
   recently used, so rotating addresses can't grow memory.
@@ -26,8 +28,8 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-Kind = Literal["read", "auth"]
-KINDS: tuple[Kind, ...] = ("read", "auth")
+Kind = Literal["read", "auth", "credential", "session", "refresh", "email"]
+KINDS: tuple[Kind, ...] = ("read", "auth", "credential", "session", "refresh", "email")
 LOG_LINES_PER_MINUTE = 60
 _EPSILON = 1e-9  # float slack: a token due "exactly now" is available
 _IPV4_PORT = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}):\d+")
@@ -68,6 +70,20 @@ class RateLimitConfig:
     per_minute: int = 60
     auth_burst: int = 5
     auth_per_hour: int = 30
+    # #22 auth hardening (decisions 39-44, L6): the other account routes.
+    credential_burst: int = 10
+    credential_per_hour: int = 60
+    session_burst: int = 30
+    session_per_minute: int = 60
+    refresh_burst: int = 10
+    refresh_per_hour: int = 60
+    # AH-9: every email the app asks Supabase to send in a rolling hour (below
+    # Supabase's own project-wide limit), ceilings for the flows strangers
+    # control, and each client's share across every flow.
+    email_budget_per_hour: int = 25
+    email_budget_recovery_per_hour: int = 6
+    email_budget_signup_per_hour: int = 6
+    email_budget_per_client_per_hour: int = 3
     max_clients: int = 10000
     trusted_proxies: tuple[str, ...] = ()
     trust_all_proxies: bool = False
@@ -81,9 +97,32 @@ class RateLimitConfig:
             self.per_minute,
             self.auth_burst,
             self.auth_per_hour,
+            self.credential_burst,
+            self.credential_per_hour,
+            self.session_burst,
+            self.session_per_minute,
+            self.refresh_burst,
+            self.refresh_per_hour,
+            self.email_budget_per_hour,
+            self.email_budget_recovery_per_hour,
+            self.email_budget_signup_per_hour,
+            self.email_budget_per_client_per_hour,
             self.max_clients,
         )
         if any(type(v) is not int or v <= 0 for v in limits):
+            raise RateLimitConfigError()
+        total = self.email_budget_per_hour
+        ceilings = (
+            self.email_budget_recovery_per_hour,
+            self.email_budget_signup_per_hour,
+        )
+        # AH-9d: each ceiling within the total, the two together leaving login
+        # room, and a client's share below each ceiling.
+        if (
+            any(c > total for c in ceilings)
+            or sum(ceilings) >= total
+            or any(self.email_budget_per_client_per_hour >= c for c in ceilings)
+        ):
             raise RateLimitConfigError()
         if not isinstance(self.trusted_proxies, tuple) or not isinstance(
             self.trust_all_proxies, bool
@@ -116,6 +155,33 @@ class RateLimitConfig:
             per_minute=limit("API_RATE_LIMIT_PER_MINUTE", cls.per_minute),
             auth_burst=limit("API_AUTH_RATE_LIMIT_BURST", cls.auth_burst),
             auth_per_hour=limit("API_AUTH_RATE_LIMIT_PER_HOUR", cls.auth_per_hour),
+            credential_burst=limit(
+                "API_CREDENTIAL_RATE_LIMIT_BURST", cls.credential_burst
+            ),
+            credential_per_hour=limit(
+                "API_CREDENTIAL_RATE_LIMIT_PER_HOUR", cls.credential_per_hour
+            ),
+            session_burst=limit("API_SESSION_RATE_LIMIT_BURST", cls.session_burst),
+            session_per_minute=limit(
+                "API_SESSION_RATE_LIMIT_PER_MINUTE", cls.session_per_minute
+            ),
+            refresh_burst=limit("API_REFRESH_RATE_LIMIT_BURST", cls.refresh_burst),
+            refresh_per_hour=limit(
+                "API_REFRESH_RATE_LIMIT_PER_HOUR", cls.refresh_per_hour
+            ),
+            email_budget_per_hour=limit(
+                "API_EMAIL_BUDGET_PER_HOUR", cls.email_budget_per_hour
+            ),
+            email_budget_recovery_per_hour=limit(
+                "API_EMAIL_BUDGET_RECOVERY_PER_HOUR", cls.email_budget_recovery_per_hour
+            ),
+            email_budget_signup_per_hour=limit(
+                "API_EMAIL_BUDGET_SIGNUP_PER_HOUR", cls.email_budget_signup_per_hour
+            ),
+            email_budget_per_client_per_hour=limit(
+                "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR",
+                cls.email_budget_per_client_per_hour,
+            ),
             max_clients=limit("API_RATE_LIMIT_MAX_CLIENTS", cls.max_clients),
             trusted_proxies=proxies,
             trust_all_proxies=trust_all == "1",
@@ -179,13 +245,20 @@ class RateLimiter:
             kind: OrderedDict() for kind in KINDS
         }
         # (interval seconds, burst) per kind
+        share = config.email_budget_per_client_per_hour
         self._limits: dict[Kind, tuple[float, int]] = {
             "read": (60 / config.per_minute, config.burst),
             "auth": (3600 / config.auth_per_hour, config.auth_burst),
+            "credential": (3600 / config.credential_per_hour, config.credential_burst),
+            "session": (60 / config.session_per_minute, config.session_burst),
+            "refresh": (3600 / config.refresh_per_hour, config.refresh_burst),
+            "email": (3600 / share, share),
         }
         self._log_window_start = -math.inf
         self._log_lines = 0
         self._log_suppressed = 0
+        # event -> (start of its one-line-a-minute window, events since the line)
+        self._counted: dict[str, tuple[float, int]] = {}
 
     def size(self, kind: Kind) -> int:
         with self._lock:
@@ -220,10 +293,46 @@ class RateLimiter:
             logger.warning(message, *args)
         return retry_after
 
+    def refund(self, kind: Kind, key: str) -> None:
+        """Give back one token (AH-9f): never past the present, so never above full."""
+        interval, _ = self._limits[kind]
+        with self._lock:
+            bucket = self._buckets[kind].get(key)
+            if bucket is not None:
+                bucket.tat = max(bucket.tat - interval, self._clock())
+
+    def log_event(self, message: str, *args: object) -> None:
+        """One fixed-text line, under RL-13's global cap (AH-5a)."""
+        with self._lock:
+            lines = self._capped(message, args, self._clock())
+        for line, line_args in lines:
+            logger.warning(line, *line_args)
+
+    def count_event(self, event: str) -> None:
+        """Counted, not logged one by one (AH-9h): at most one line a minute per
+        event, carrying how many happened, under RL-13's global cap."""
+        lines: list[tuple[str, tuple[object, ...]]] = []
+        with self._lock:
+            now = self._clock()
+            start, count = self._counted.get(event, (-math.inf, 0))
+            count += 1
+            if now - start >= 60:
+                lines = self._capped("%s count=%d", (event, count), now)
+                start, count = now, 0
+            self._counted[event] = (start, count)
+        for line, line_args in lines:
+            logger.warning(line, *line_args)
+
     def _log_line(
         self, kind: Kind, held: int, now: float
     ) -> list[tuple[str, tuple[object, ...]]]:
         """Lines to write, under the global cap. The caller holds the lock."""
+        return self._capped("rate_limited kind=%s held_back=%d", (kind, held), now)
+
+    def _capped(
+        self, message: str, args: tuple[object, ...], now: float
+    ) -> list[tuple[str, tuple[object, ...]]]:
+        """At most 60 lines a minute in all, then one suppressed-count line."""
         lines: list[tuple[str, tuple[object, ...]]] = []
         if now - self._log_window_start >= 60:
             if self._log_suppressed:
@@ -233,7 +342,7 @@ class RateLimiter:
             self._log_window_start, self._log_lines, self._log_suppressed = now, 0, 0
         if self._log_lines < LOG_LINES_PER_MINUTE:
             self._log_lines += 1
-            lines.append(("rate_limited kind=%s held_back=%d", (kind, held)))
+            lines.append((message, args))
         else:
             self._log_suppressed += 1
         return lines

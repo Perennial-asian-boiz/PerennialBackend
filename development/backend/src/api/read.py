@@ -392,12 +392,21 @@ class RateLimiterMissing(StarletteHTTPException):
         super().__init__(503, f"{self.code}: the rate limiter is not installed")
 
 
-def _limit(request: Request, kind: Kind) -> None:
+def limiter_of(request: Request) -> RateLimiter:
+    """The app's limiter; a limited route without ``install`` fails closed."""
     limiter = getattr(request.app.state, "rate_limiter", None)
     if not isinstance(limiter, RateLimiter):
         raise RateLimiterMissing()
+    return limiter
+
+
+def client_key_of(request: Request) -> str:
     client = request.client
-    retry_after = limiter.check(kind, client_key(client.host if client else None))
+    return client_key(client.host if client else None)
+
+
+def _limit(request: Request, kind: Kind) -> None:
+    retry_after = limiter_of(request).check(kind, client_key_of(request))
     if retry_after is not None:
         raise RateLimited(retry_after)
 
@@ -410,6 +419,22 @@ async def rate_limit(request: Request) -> None:
 async def auth_rate_limit(request: Request) -> None:
     """The auth bucket, for #22's signup and forgot-password (email lookups)."""
     _limit(request, "auth")
+
+
+async def credential_rate_limit(request: Request) -> None:
+    """Password and code routes: login, verify-otp, both resends, confirm-email,
+    accept-recovery-link, reset-password and the password change."""
+    _limit(request, "credential")
+
+
+async def session_rate_limit(request: Request) -> None:
+    """Routine signed-in use: logout and every other /v1/me route."""
+    _limit(request, "session")
+
+
+async def refresh_rate_limit(request: Request) -> None:
+    """Refresh: each one is a call to Supabase's shared /token endpoint."""
+    _limit(request, "refresh")
 
 
 def install(app: FastAPI, config: RateLimitConfig) -> None:
@@ -594,6 +619,47 @@ _WRITES = text(
     " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
     " WHERE n.nspname = 'perennial' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
 )
+# #22's schema app (fix packet, change 5), as for perennial: the login holds
+# exactly what provisioning grants. Reads and writes on the six tables (table
+# or column level), never TRUNCATE, REFERENCES or TRIGGER; no privilege at all
+# on any other app relation (table, view, materialized view, foreign table) or
+# sequence (none exists; if one of the six gains an identity column, allow its
+# sequence like the six); EXECUTE only on app.email_is_registered(text),
+# excluded by catalog name and signature, since resolving it by name would
+# need USAGE on app; no CREATE on app; and no USAGE on Supabase's auth schema
+# (the login reaches auth.users only through that function).
+APP_TABLES = (
+    "profiles",
+    "preferences",
+    "notifications",
+    "watchlist",
+    "auth_challenges",
+    "verified_sessions",
+)
+_APP = text(
+    "SELECT (SELECT count(*) FROM pg_class c"
+    "  JOIN pg_namespace n ON n.oid = c.relnamespace"
+    "  WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
+    "  AND CASE"
+    "   WHEN c.relkind = 'S'"
+    "    THEN has_sequence_privilege(current_user, c.oid, 'USAGE,SELECT,UPDATE')"
+    "   WHEN c.relkind IN ('r', 'p') AND c.relname = ANY(CAST(:tables AS text[]))"
+    "    THEN has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER')"
+    "     OR has_any_column_privilege(current_user, c.oid, 'REFERENCES')"
+    "   ELSE has_table_privilege(current_user, c.oid,"
+    "     'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')"
+    "    OR has_any_column_privilege("
+    "     current_user, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES') END)"
+    " + (SELECT count(*) FROM pg_proc p"
+    "  JOIN pg_namespace pn ON pn.oid = p.pronamespace WHERE pn.nspname = 'app'"
+    "  AND NOT (p.proname = 'email_is_registered' AND p.pronargs = 1"
+    "   AND p.proargtypes[0] = 'text'::regtype)"
+    "  AND has_function_privilege(current_user, p.oid, 'EXECUTE')),"
+    " coalesce((SELECT has_schema_privilege(current_user, oid, 'CREATE')"
+    "  FROM pg_namespace WHERE nspname = 'app'), false),"
+    " coalesce((SELECT has_schema_privilege(current_user, oid, 'USAGE')"
+    "  FROM pg_namespace WHERE nspname = 'auth'), false)"
+)
 _OWNERSHIP = text(
     "SELECT (SELECT count(*) FROM pg_class WHERE relowner = r.oid)"
     " + (SELECT count(*) FROM pg_namespace WHERE nspowner = r.oid),"
@@ -611,9 +677,12 @@ def check_startup(engine: Engine, api_role: str) -> None:
     beyond provisioning's reads on tables: no write, TRIGGER or REFERENCES on a
     table or column, no privilege on a view, materialized view or foreign table,
     no USAGE or UPDATE on a sequence and no EXECUTE on a function; and at least
-    one table exists; 4 owns nothing and has no
-    CREATE on the schema or database. Every failure, including an error while
-    checking, raises the same StartupRefused with no role name, URL or SQL.
+    one table exists; 4 owns nothing and has no CREATE on the schema or
+    database. Where #22's schema app exists, clause 3 also allows writes only
+    on its six tables (table or column level) and clause 4 refuses CREATE on
+    app; USAGE on schema auth (Supabase) is refused. Every failure, including
+    an error while checking, raises the same StartupRefused with no role name,
+    URL or SQL.
     """
     try:
         with engine.connect() as conn:
@@ -621,6 +690,9 @@ def check_startup(engine: Engine, api_role: str) -> None:
             members = list(conn.execute(_MEMBERSHIP).scalar_one())
             tables, writable, callable_ = conn.execute(_WRITES).one()
             owned, schema_create, database_create = conn.execute(_OWNERSHIP).one()
+            app_writes, app_create, auth_usage = conn.execute(
+                _APP, {"tables": list(APP_TABLES)}
+            ).one()
             conn.rollback()
         ok = (
             same is True
@@ -632,6 +704,9 @@ def check_startup(engine: Engine, api_role: str) -> None:
             and owned == 0
             and not schema_create
             and not database_create
+            and app_writes == 0
+            and not app_create
+            and not auth_usage
         )
     except Exception:
         ok = False
@@ -701,6 +776,9 @@ __all__ = [
     "RateLimitConfig",
     "RateLimitConfigError",
     "auth_rate_limit",
+    "credential_rate_limit",
+    "refresh_rate_limit",
+    "session_rate_limit",
     "check_startup",
     "create_app",
     "install",

@@ -30,6 +30,8 @@ for _name in [n for n in os.environ if n.startswith("PG")]:
 from alembic import command  # noqa: E402
 from alembic.config import Config  # noqa: E402
 from sqlalchemy import text  # noqa: E402
+
+from src.api.account_models import metadata as account_metadata  # noqa: E402
 from src.db.config import parse_database_url  # noqa: E402
 from src.db.models import metadata  # noqa: E402
 from src.db.session import make_engine  # noqa: E402
@@ -117,7 +119,9 @@ def migrated_engine(db_url):
 @pytest.fixture
 def engine(migrated_engine):
     """A migrated database with every application table emptied."""
-    names = ", ".join(f"perennial.{t.name}" for t in metadata.sorted_tables)
+    names = ", ".join(
+        t.fullname for m in (metadata, account_metadata) for t in m.sorted_tables
+    )
     with migrated_engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
     yield migrated_engine
