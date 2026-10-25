@@ -17,6 +17,9 @@ dependencies = [
     # M5 read API; the same pins as #22 so its rebase is a lock recompile.
     "fastapi==0.143.1",
     "uvicorn==0.34.0",
+    # S1-11 market status (Q8). Keep it current: its calendars reach about a year
+    # ahead, and unscheduled closures arrive only in library releases.
+    "exchange-calendars==4.13.2",
 ]
 
 [project.optional-dependencies]
@@ -90,4 +93,9 @@ follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = ["apscheduler.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# S1-11's calendar library ships no type information.
+module = ["exchange_calendars"]
 ignore_missing_imports = true
