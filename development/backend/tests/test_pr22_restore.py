@@ -6,6 +6,7 @@ uses unique role names (MR-1). Synthetic rows only.
 """
 
 import os
+import re
 import secrets
 import subprocess
 from contextlib import contextmanager
@@ -259,7 +260,8 @@ def test_bootstrap_before_a_restore_fails_on_the_existing_schema(engine, dumped)
         provision_roles(scratch, names, "bootstrap")
         result = _restore(engine, target, dump)
     assert result.returncode != 0
-    assert 'schema "perennial" already exists' in result.stderr
+    # Option 2's bootstrap also makes app, which the dump creates first (decision 37).
+    assert re.search(r'schema "(perennial|app)" already exists', result.stderr), result.stderr[-500:]
 
 
 @pytest.mark.parametrize("unsafe", ["api_bypassrls", "group_member_of_another"])

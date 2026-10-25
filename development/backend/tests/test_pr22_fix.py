@@ -56,7 +56,8 @@ def _script():
 def _app_revision():
     """(revision, down_revision) of the migration that creates schema app."""
     for rev in _script().walk_revisions():
-        if "CREATE SCHEMA IF NOT EXISTS app" in Path(rev.path).read_text():
+        # Either form: IF NOT EXISTS, or option 2's catalog-checked CREATE (decision 37).
+        if re.search(r"CREATE SCHEMA (IF NOT EXISTS )?app\b", Path(rev.path).read_text()):
             return rev.revision, rev.down_revision
     raise AssertionError("no migration creates schema app")
 
@@ -831,8 +832,13 @@ def test_pre_login_tables_are_open_only_to_the_api_role(engine, pr22_roles):  # 
 
 def test_bad_tokens_on_every_me_route_are_401_without_private_data(engine, accounts_api):
     """RB-9 (RU-1)."""
+    from pr22_support import raise_limits
+
     client, provider, _ = accounts_api
     body, _ = register(client, provider)
+    # Adapted (AH-3, limits): 4 headers on every /me route outrun the session bucket's
+    # default burst of 30 from one client; the limit is raised, the dependency stays.
+    raise_limits(client.app, session_burst=1000)
     email = body["user"]["email"]
     me_routes = [(p, m) for p, m in _account_routes() if p.startswith("/me")]
     assert me_routes

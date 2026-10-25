@@ -35,7 +35,11 @@ REQUIRE_DATABASE_TESTS=1 .venv/bin/python -m pytest -q development/backend/tests
 `development/database/ops/provision_roles.py` uses only `OPS_DATABASE_URL` from
 the process environment, never `.env`. It runs each phase in one transaction and
 quotes role/table identifiers through psycopg. Use a dedicated database and
-dedicated group names; the script changes PUBLIC privileges in that database.
+dedicated group names; the script revokes PUBLIC's privileges on that database.
+The exception is a database with schema `auth` (Supabase): there PUBLIC keeps
+`CONNECT` and `TEMPORARY`, because the platform's own logins (Auth, the Data API,
+Storage, the pooler) connect through them, and bootstrap logs a notice that it
+left them.
 It creates three NOLOGIN groups by default:
 
 | Group | Access |
@@ -54,22 +58,47 @@ parent role membership) are rejected. Deployments must also audit login group
 membership and privileges from other roles: this tool does not rewrite external
 login accounts or repair arbitrary legacy authorization.
 
-Run bootstrap using the administrative secret, migrate using the owner identity,
-then reapply grants using the administrative secret:
+Run bootstrap using the administrative secret before every upgrade, not only the
+first, then migrate using the owner identity, then reapply grants using the
+administrative secret:
 
 ```bash
 .venv/bin/python development/database/ops/provision_roles.py --phase bootstrap
 # Use a migration login that SET ROLEs to perennial_owner for the whole migration.
 .venv/bin/alembic -c development/database/alembic.ini upgrade head
 .venv/bin/python development/database/ops/provision_roles.py --phase grants
+.venv/bin/python development/database/ops/provision_api_role.py  # schema app
 ```
 
 A third phase, `--phase roles`, is only for restores: it runs bootstrap's role
 checks and creates the group roles, and nothing else (see "Backup and restore
 logins with row-level security" below).
 
-Bootstrap reserves `perennial` for the owner and grants owner CREATE in `public`
-for Alembic's version table. Grant phase transfers the explicitly listed tables
+Bootstrap is idempotent. It creates schemas `perennial` and `app` owned by the
+owner, and the owner deliberately holds no `CREATE` on the database, so it cannot
+create schemas, publications or extensions. PostgreSQL checks that right before
+`IF NOT EXISTS`, so a migration creates a schema only when `to_regnamespace()`
+finds none: that happens only where nothing ran bootstrap (the tests, dev Compose
+and the quality gate, which migrate as a superuser). A migration that adds a schema
+must also add it to bootstrap; without that, the owner's upgrade fails with
+`permission denied for database` and rolls back. Bootstrap gives nobody anything in
+`app` and leaves an existing `app` as it is: `provision_api_role.py` owns that
+schema's ownership, grants and policies.
+
+The administrative login may be a superuser or, as on Supabase, a non-superuser
+`CREATEROLE` login that owns the database. Such a login holds only `ADMIN OPTION` on
+the roles it creates, so bootstrap grants it `SET` on the owner (never `INHERIT`): it
+can then create the owner's schemas and re-own objects to the owner, and both scripts
+make the grants on the owner's objects as the owner. After a restore the admin owns
+`perennial`, `app` and their tables; the grants phase and `provision_api_role.py`
+then give the owner `CREATE` in each schema, re-own its tables, and re-own the schema
+last, the only order such an admin can do it in. `provision_api_role.py` also makes
+the administrative login the owner of `app.email_is_registered`, which reads
+`auth.users`; for that one step it inherits the owner's privileges inside its own
+transaction and turns that off again before committing. This needs PostgreSQL 16 or
+later.
+
+Bootstrap also grants owner CREATE in `public` for Alembic's version table. Grant phase transfers the explicitly listed tables
 and their attached identity sequences to the owner, and fails if the migrated
 schema does not match the policy. Custom groups are available through `--owner`,
 `--importer`, and `--reader`. An administrator separately creates authenticated
@@ -100,6 +129,25 @@ an isolated server. The provisioning tool deliberately creates no passwords.
   Record backup storage separation, access controls and restore steps.
 - Configure supervisor, monitoring, alert delivery, on-call ownership and the
   recovery objectives below; exercise them before launch.
+
+### API clocks and the email budget (#22 auth hardening)
+
+- **Clocks:** the API host, the database and Supabase must be NTP-synced. Challenge and session times are written and compared on the database clock, and the one comparison with Supabase's clock (a recovery link's timestamp) allows 60 seconds of skew.
+- **Email budget:** `API_EMAIL_BUDGET_PER_HOUR` (default 25) stays below Supabase's project-wide "emails sent" limit (30 an hour today). The margin covers emails Supabase sends outside a challenge, such as a password-changed notice. When the project's limit is raised, raise the four `API_EMAIL_BUDGET_*` settings together.
+- **The budget can undercount.** A first send that reached Supabase but failed on its way back to the API (a timeout, a dropped response) is released and refunded as if it never left, and so is a signup whose wrong-project check fails on a misconfigured deployment. Supabase may still have sent those emails. The 5-email margin under Supabase's limit covers this; don't shrink it.
+- **For support: the per-client share.** At the default share of 3 emails an hour per client address, a user who signs up and then logs in twice within an hour has used it up. A reset requested in that hour sends nothing, behind forgot-password's uniform `200` (decision 51's trade-off). Advise waiting until the hour has passed; `API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR` is the setting.
+- **Counted refusal lines.** Budget, ceiling, share and Supabase-`429` refusals are logged at most once a minute per reason, each line carrying how many happened since the last one. The count is written only when a later refusal of that reason arrives, so the tail of a burst followed by silence is never logged. Read a quiet log as "no new refusals since the last line", not as an exact total.
+- **New functions in `perennial` or `app`.** A migration that adds a function in either schema must `REVOKE EXECUTE ON FUNCTION ... FROM PUBLIC` on it (and grant it to the API role only if the API is meant to call it). PostgreSQL grants `EXECUTE` to PUBLIC by default, and the API's startup check refuses any login that can execute a function there, so an unrevoked function stops every API login from starting. The one function the API may call is `app.email_is_registered(text)`.
+
+### The email confirm URL (`AUTH_EMAIL_REDIRECT_URL`)
+
+Signup, resend-confirmation and forgot-password emails link back to the frontend's confirm page. The API sends Supabase this URL as `redirect_to`, exactly as configured.
+
+- **What it must be:** an `https` URL whose path ends in `/auth/confirm`, with no query, fragment, user name or password. Plain `http` is allowed only for `localhost`, `127.0.0.1` or `::1` while `APP_ENV=development`. Outside development the setting is required.
+- **A path prefix is allowed** for a frontend served under a subpath. Each prefix segment must be non-empty and use only ASCII letters, digits and `-` `.` `_` `~`. The API refuses `.` and `..` segments, empty segments (`//`), percent-encoding, `;`, backslashes, spaces or control characters, a trailing slash, and anything after `confirm`.
+- **A missing or refused URL fails closed:** no email is sent. Signup and resend-confirmation answer `503`; forgot-password still answers its uniform `200` and logs `forgot_password_send_failed code=unavailable`.
+- **GitHub Pages example:** `AUTH_EMAIL_REDIRECT_URL=https://perennial-asian-boiz.github.io/PerennialFrontEnd/auth/confirm`.
+- **Supabase's redirect allowlist:** add the same URL, character for character, under Supabase **Authentication > URL Configuration > Redirect URLs**. If it isn't there, Supabase ignores `redirect_to` and sends the user to the project's **Site URL** instead, so the emails still go out but their links land on the wrong page.
 
 ## Worker and observability
 

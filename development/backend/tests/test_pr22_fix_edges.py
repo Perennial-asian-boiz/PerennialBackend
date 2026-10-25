@@ -4,7 +4,7 @@ Spec: docs/work-items/m5-pr22-fix-packet.md (FINAL at 596a68f), OPERATIONS.md an
 ADR 0001. These pin edges the first pass (test_pr22_fix.py, test_pr22_restore.py)
 did not: the column-level and TRUNCATE/REFERENCES/TRIGGER forms of the startup
 check, provisioning's refusal for an owner that can reach auth, the downgrade
-order with users present, restoring a
+order with users present, the documented migrate-as-owner path, restoring a
 backup from an older revision, Jaden's flows under the auth limit and with
 expired tokens, the lazy module-level app, and the two locks agreeing.
 
@@ -16,6 +16,7 @@ import base64
 import inspect
 import json
 import re
+import secrets
 import subprocess
 import time
 from contextlib import contextmanager
@@ -181,6 +182,85 @@ def test_a_refused_downgrade_leaves_0012_and_the_lookup_in_place(engine, pr22_ro
                 provision_api(engine, pr22_roles)
 
 
+# ── The documented deploy order (OPERATIONS.md, README:329) ─
+
+
+def _upgrade_as_the_owner_then_provision(scratch, names):
+    """`alembic upgrade head` as the owner (the migration login's session role), then
+    --phase grants and provision_api_role.py; the API ends exactly provisioned."""
+    from alembic import command
+
+    from tests.conftest import alembic_config
+
+    with scratch.connect() as conn:
+        _session_role(conn, names["owner"])
+        try:
+            command.upgrade(alembic_config(conn), "head")
+        finally:
+            _reset_role(conn)
+        assert _version(conn) == _script().get_current_head()
+    provision_roles(scratch, names, "grants")
+    provision_api(scratch, names)
+    with scratch.connect() as conn:
+        assert conn.execute(text(
+            "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'app'"
+        )).scalar() == names["owner"]
+    assert _app_privileges(scratch, names["api"]) == EXPECTED_APP
+
+
+def _deployed_at_0010(engine, scratch, names):
+    """Main's deployment today: bootstrapped and granted by today's code (so no
+    schema app), migrated to 0010."""
+    from alembic import command
+
+    from tests.conftest import alembic_config
+
+    provision_roles(scratch, names, "bootstrap")
+    with scratch.connect() as conn:
+        command.upgrade(alembic_config(conn), "0010")  # however 0001-0010 were applied
+        conn.commit()
+    provision_roles(scratch, names, "grants")
+    with scratch.begin() as conn:  # newer provisioning makes an (empty) app; today's doesn't
+        conn.execute(text("DROP SCHEMA IF EXISTS app"))
+
+
+def test_mo2_a_deployment_at_0010_rebootstraps_then_upgrades_as_the_owner(engine):
+    """MO-2 (decision 37, option 2): re-running bootstrap, then upgrade head as the
+    owner, then the grants, gives MO-1's end state."""
+    names = role_names("rd")
+    try:
+        with _database(engine) as (_, scratch):
+            _deployed_at_0010(engine, scratch, names)
+            provision_roles(scratch, names, "bootstrap")  # before every upgrade
+            _upgrade_as_the_owner_then_provision(scratch, names)
+    finally:
+        drop_roles(engine, names.values())
+
+
+def test_mo2_without_rebootstrap_the_owners_upgrade_fails_and_stays_at_0010(engine):
+    """MO-2: skip the bootstrap and the upgrade fails at 0011, in one transaction."""
+    from alembic import command
+
+    from tests.conftest import alembic_config
+
+    names = role_names("rd")
+    try:
+        with _database(engine) as (_, scratch):
+            _deployed_at_0010(engine, scratch, names)
+            with scratch.connect() as conn:
+                _session_role(conn, names["owner"])
+                try:
+                    with pytest.raises(DBAPIError) as caught:
+                        command.upgrade(alembic_config(conn), "head")
+                finally:
+                    _reset_role(conn)
+                assert caught.value.orig.sqlstate == "42501"  # permission denied
+                assert _version(conn) == "0010"
+                assert conn.execute(text("SELECT to_regnamespace('app')")).scalar() is None
+    finally:
+        drop_roles(engine, names.values())
+
+
 # ── RB-13: a backup from an older revision ───────────────
 
 
@@ -236,8 +316,9 @@ def test_an_older_backup_fails_closed_in_the_documented_restore_order(engine, ol
                 with pytest.raises(Exception):
                     provision_roles(scratch, names, "grants")
                     provision_api(scratch, names)
-                with scratch.connect() as conn:
-                    assert conn.execute(text("SELECT to_regnamespace('app')")).scalar() is None
+                with scratch.connect() as conn:  # option 2's provisioning may leave app empty
+                    assert conn.execute(text("SELECT count(*) FROM pg_class"
+                                             " WHERE relnamespace = to_regnamespace('app')")).scalar() == 0
             finally:
                 _release(scratch, names)
     finally:
@@ -653,3 +734,155 @@ def test_the_drill_passes_every_group_name_to_provision_api_role(
             "importer": names["importer"], "reader": names["reader"]}
     finally:
         drop_roles(engine, names.values())
+
+
+# ── RB-6, completed: a write through any object in app ───
+# As R1's RA-15 follow-up (test_read_api_write_objects.py): _APP counts tables
+# (r, p) only. Already refused by #22's check, so not repeated here: TRUNCATE,
+# REFERENCES and TRIGGER on app tables (test_startup_refuses_truncate_...).
+
+
+@pytest.fixture
+def app_write_objects(engine):
+    """A standalone sequence, an auto-updatable view over app.profiles and a foreign
+    table, all in app and outside the six; made by the superuser test login."""
+    suffix = secrets.token_hex(4)
+    objects = {"sequence": f"app.rb_seq_{suffix}", "view": f"app.rb_view_{suffix}",
+               "foreign": f"app.rb_foreign_{suffix}"}
+    wrapper = f"rb_fdw_{suffix}"
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE SEQUENCE {objects['sequence']}"))
+        conn.execute(text(  # the view's owner bypasses RLS: its writes reach every row
+            f"CREATE VIEW {objects['view']} AS SELECT id, email, full_name FROM app.profiles"))
+        conn.execute(text(f"CREATE FOREIGN DATA WRAPPER {wrapper}"))  # no handler needed
+        conn.execute(text(f"CREATE SERVER {wrapper}_server FOREIGN DATA WRAPPER {wrapper}"))
+        conn.execute(text(
+            f"CREATE FOREIGN TABLE {objects['foreign']} (id bigint) SERVER {wrapper}_server"))
+    try:
+        yield objects
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text(f"DROP VIEW IF EXISTS {objects['view']}"))
+            conn.execute(text(f"DROP SEQUENCE IF EXISTS {objects['sequence']}"))
+            conn.execute(text(f"DROP FOREIGN DATA WRAPPER IF EXISTS {wrapper} CASCADE"))
+
+
+APP_OBJECT_WRITES = {
+    "sequence_update": "GRANT UPDATE ON SEQUENCE {sequence} TO {login}",  # setval
+    "sequence_usage": "GRANT USAGE ON SEQUENCE {sequence} TO {login}",  # nextval
+    "view_update": "GRANT UPDATE ON {view} TO {login}",
+    "view_column_update": "GRANT UPDATE (email) ON {view} TO {login}",
+    "foreign_table_insert": "GRANT INSERT ON {foreign} TO {login}",
+}
+
+
+@pytest.mark.parametrize("case", sorted(APP_OBJECT_WRITES))
+def test_startup_refuses_a_write_through_any_app_object_outside_the_six(
+    engine, pr22_roles, monkeypatch, caplog, app_write_objects, case  # noqa: F811
+):
+    grant = APP_OBJECT_WRITES[case]
+    for key, name in app_write_objects.items():
+        grant = grant.replace("{" + key + "}", name)
+    refused = _refused(engine, pr22_roles, monkeypatch, caplog, grants=[grant])
+    reference = _refused(engine, pr22_roles, monkeypatch, caplog, options="BYPASSRLS")
+    assert refused == reference
+
+
+def test_app_objects_alone_do_not_refuse_startup(
+    engine, pr22_roles, monkeypatch, app_write_objects  # noqa: F811
+):
+    """The control: the objects exist and the login holds nothing on them; a correctly
+    provisioned login still starts. (It used to grant SELECT on the sequence too; the
+    final rule set refuses any privilege on an app relation outside the six.)"""
+    from fastapi.testclient import TestClient
+
+    with integrated_app(engine, pr22_roles, monkeypatch) as (app, _, _), TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+
+
+# ── RB-6 / RA-15, the final rule set (both reviewers) ────
+# The API login holds exactly what provisioning grants, on the objects it grants: no
+# privilege at all on an app relation outside the six, or on a view, materialized
+# view or foreign table in perennial; no EXECUTE on a perennial or app function but
+# app.email_is_registered (pg_catalog and other schemas are out of scope); no
+# REFERENCES on perennial.
+
+
+@pytest.fixture
+def owner_objects(engine):
+    """Superuser-owned objects, in app outside the six and in perennial."""
+    suffix = secrets.token_hex(4)
+    o = {"app_view": f"app.rb_view_{suffix}", "app_matview": f"app.rb_matview_{suffix}",
+         "app_foreign": f"app.rb_foreign_{suffix}", "app_sequence": f"app.rb_seq_{suffix}",
+         "app_table": f"app.rb_table_{suffix}", "app_function": f"app.rb_function_{suffix}()",
+         "perennial_view": f"perennial.rb_view_{suffix}",
+         "perennial_function": f"perennial.rb_function_{suffix}()",
+         "public_function": f"public.rb_function_{suffix}()"}
+    wrapper = f"rb_fdw_{suffix}"
+    with engine.begin() as conn:
+        conn.execute(text(f"CREATE VIEW {o['app_view']} AS SELECT id, email FROM app.profiles"))
+        conn.execute(text(f"CREATE MATERIALIZED VIEW {o['app_matview']} AS SELECT id FROM app.profiles"))
+        conn.execute(text(f"CREATE FOREIGN DATA WRAPPER {wrapper}"))
+        conn.execute(text(f"CREATE SERVER {wrapper}_server FOREIGN DATA WRAPPER {wrapper}"))
+        conn.execute(text(f"CREATE FOREIGN TABLE {o['app_foreign']} (id bigint) SERVER {wrapper}_server"))
+        conn.execute(text(f"CREATE SEQUENCE {o['app_sequence']}"))
+        conn.execute(text(f"CREATE TABLE {o['app_table']} (id int)"))
+        conn.execute(text(f"CREATE VIEW {o['perennial_view']} AS SELECT id, source FROM perennial.source_batches"))
+        for name in ("app_function", "perennial_function", "public_function"):
+            conn.execute(text(f"CREATE FUNCTION {o[name]} RETURNS int LANGUAGE sql AS 'SELECT 1'"))
+        for name in ("app_function", "perennial_function"):
+            conn.execute(text(f"REVOKE EXECUTE ON FUNCTION {o[name]} FROM PUBLIC"))
+    try:
+        yield o
+    finally:
+        with engine.begin() as conn:
+            for name in ("app_view", "perennial_view"):
+                conn.execute(text(f"DROP VIEW IF EXISTS {o[name]}"))
+            conn.execute(text(f"DROP MATERIALIZED VIEW IF EXISTS {o['app_matview']}"))
+            conn.execute(text(f"DROP FOREIGN DATA WRAPPER IF EXISTS {wrapper} CASCADE"))
+            conn.execute(text(f"DROP SEQUENCE IF EXISTS {o['app_sequence']}"))
+            conn.execute(text(f"DROP TABLE IF EXISTS {o['app_table']}"))
+            for name in ("app_function", "perennial_function", "public_function"):
+                conn.execute(text(f"DROP FUNCTION IF EXISTS {o[name]}"))
+
+
+OWNER_PATHS = {
+    "app_view_select": "GRANT SELECT ON {app_view} TO {login}",
+    "app_matview_select": "GRANT SELECT ON {app_matview} TO {login}",
+    "app_foreign_table_select": "GRANT SELECT ON {app_foreign} TO {login}",
+    "app_sequence_select": "GRANT SELECT ON SEQUENCE {app_sequence} TO {login}",
+    "app_other_table_select": "GRANT SELECT ON {app_table} TO {login}",
+    "app_other_table_column_select": "GRANT SELECT (id) ON {app_table} TO {login}",
+    "app_function_execute": "GRANT EXECUTE ON FUNCTION {app_function} TO {login}",
+    "app_function_execute_through_public": "GRANT EXECUTE ON FUNCTION {app_function} TO PUBLIC",
+    "perennial_view_select": "GRANT SELECT ON {perennial_view} TO {login}",
+    "perennial_function_execute": "GRANT EXECUTE ON FUNCTION {perennial_function} TO {login}",
+    "perennial_table_references": "GRANT REFERENCES ON perennial.securities TO {login}",
+    "perennial_column_references": "GRANT REFERENCES (id) ON perennial.securities TO {login}",
+}
+
+
+@pytest.mark.parametrize("case", sorted(OWNER_PATHS))
+def test_startup_refuses_a_path_through_another_owner(
+    engine, pr22_roles, monkeypatch, caplog, owner_objects, case  # noqa: F811
+):
+    grant = OWNER_PATHS[case]
+    for key, name in owner_objects.items():
+        grant = grant.replace("{" + key + "}", name)
+    refused = _refused(engine, pr22_roles, monkeypatch, caplog, grants=[grant])
+    reference = _refused(engine, pr22_roles, monkeypatch, caplog, options="BYPASSRLS")
+    assert refused == reference
+
+
+def test_owner_objects_alone_and_a_function_elsewhere_do_not_refuse_startup(
+    engine, pr22_roles, monkeypatch, owner_objects  # noqa: F811
+):
+    """Guards: the objects exist and the login holds nothing on them, and it can EXECUTE
+    a function in public (PUBLIC's default), outside the rule's scope. Provisioning's own
+    EXECUTE on app.email_is_registered is test_pr22_fix.py's guard."""
+    from fastapi.testclient import TestClient
+
+    with integrated_app(engine, pr22_roles, monkeypatch) as (app, _, _), TestClient(app) as client:
+        with app.state.engine.connect() as conn:
+            assert conn.execute(text(f"SELECT {owner_objects['public_function'][:-2]}()")).scalar() == 1
+        assert client.get("/health").status_code == 200

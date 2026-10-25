@@ -299,7 +299,12 @@ def test_five_failed_attempts_persist_and_block_even_correct_code(api):
 
 
 def test_resend_enforces_sixty_second_cooldown_and_hourly_limit(api):
+    from pr22_support import raise_limits
+
     client, provider, engine = api
+    # Adapted (AH-3): 60 resends from one client outrun the credential bucket's
+    # default burst of 10, so this test raises the limit; the dependency stays.
+    raise_limits(client.app, credential_burst=1000)
     provider.signup("one@example.com", "Password123", "One")
     provider.users["one@example.com"]["email_confirmed_at"] = "2026-10-18T00:00:00Z"
     challenge = client.post(

@@ -1,6 +1,22 @@
-"""Supabase Auth endpoints and account data served exclusively through FastAPI."""
+"""Supabase Auth endpoints and account data served exclusively through FastAPI.
+
+Hardened for #22 (docs/work-items/m5-pr22-auth-hardening-packet.md, Part 1):
+- J2: no connection, transaction or lock is held across a provider call. Each
+  email-sending route reserves (a short transaction under the email lock),
+  calls Supabase with nothing checked out, then finishes (another short
+  transaction that re-reads state and never revives what a concurrent request
+  consumed).
+- J1: challenges supersede and cap only their own flow; no recovery email is
+  sent over an open login.
+- J3: revoke takes the same email lock as verify-otp.
+- J6: one email normalization, strip() then lower().
+- J7: every challenge and session time is the database clock.
+- AH-9: an app-wide email budget, with ceilings for the flows strangers
+  control and a per-client share, under one advisory lock.
+"""
 
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -10,33 +26,60 @@ from functools import lru_cache
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import delete, insert, select, text, update
+from sqlalchemy import delete, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import Engine
 
 from src.api import account_models as tables
-from src.api.read import APIError, auth_rate_limit
-from src.api.supabase_auth import AuthProviderError, SupabaseAuth
+from src.api.read import (
+    APIError,
+    auth_rate_limit,
+    client_key_of,
+    credential_rate_limit,
+    limiter_of,
+    refresh_rate_limit,
+    session_rate_limit,
+)
+from src.api.supabase_auth import CLOCK_SKEW_SECONDS, AuthProviderError, SupabaseAuth
 from src.db import models
 from src.db.session import make_engine
 from src.ingestion.schemas import _TICKER
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 OTP_MINUTES = 15
+CHALLENGE_MAX_MINUTES = 60  # J7: no resend extends a challenge past this
+RECOVERY_SESSION_MINUTES = 15  # J7: a reset session's local lifetime
 RESEND_COOLDOWN_SECONDS = 60
 MAX_ATTEMPTS = 5
-MAX_EMAILS_PER_HOUR = 60
+MAX_EMAILS_PER_HOUR = 60  # per email, per flow (login, signup)
+MAX_RECOVERY_EMAILS_PER_HOUR = 5  # J1: Supabase's shared per-user send timer
+# AH-9g: the app-wide email budget's advisory lock, distinct from the other
+# fixed keys (sources 170010+, backup 170097, pipeline 170098, publication
+# 170099, Congress history 170100).
+EMAIL_BUDGET_LOCK = 170101
 PASSWORD_REQUIREMENTS_MESSAGE = (
     "Use 8–200 characters, including an uppercase letter, a lowercase letter, "
     "and a number."
 )
+START_AGAIN = "Verification expired or invalid. Please start again."
+SEND_REFUSED = "We can't send a code right now. Please try again in a few minutes."
+RECOVERY_EXPIRED = "This reset session has expired. Request a new reset link."
+challenges = tables.auth_challenges
 
 
 def now():
+    """The app's clock, for callers and tests. No challenge or session decision
+    uses it: those times are the database's (J7)."""
     return datetime.now(timezone.utc)
+
+
+def normalize_email(email):
+    """J6: the one email normalization. Case folding would map ß to ss, another mailbox."""
+    return email.strip().lower()
 
 
 def digest(value):
@@ -73,8 +116,8 @@ class EmailRequest(BaseModel):
 
     @field_validator("email")
     @classmethod
-    def normalize_email(cls, value):
-        value = value.strip().casefold()
+    def normalized(cls, value):
+        value = normalize_email(value)
         if not re.fullmatch(r"[^\s@<>(),;]+@[^\s@<>(),;]+\.[^\s@<>(),;]+", value):
             raise ValueError("Email is not valid")
         return value
@@ -248,67 +291,82 @@ def user_connection(engine, user_id):
 
 
 def lock_email(connection, email):
+    """The per-email advisory lock: the only key for every flow and revoke (J3)."""
     connection.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"perennial-auth:{email}"},
+        {"key": f"perennial-auth:{normalize_email(email)}"},
     )
 
 
-def check_email_limit(connection, email):
-    rows = (
-        connection.execute(
-            select(tables.auth_challenges).where(
-                tables.auth_challenges.c.email == email,
-                tables.auth_challenges.c.last_sent_at > now() - timedelta(hours=1),
-            )
+def check_email_limit(connection, email, flow):
+    """J1: this email's sends in this flow over the last hour, on the database clock."""
+    sent = connection.execute(
+        select(func.coalesce(func.sum(challenges.c.send_count), 0)).where(
+            challenges.c.email == email,
+            challenges.c.flow == flow,
+            challenges.c.last_sent_at > func.now() - timedelta(hours=1),
         )
-        .mappings()
-        .all()
-    )
-    if sum(row.send_count for row in rows) >= MAX_EMAILS_PER_HOUR:
+    ).scalar_one()
+    cap = MAX_RECOVERY_EMAILS_PER_HOUR if flow == "recovery" else MAX_EMAILS_PER_HOUR
+    if sent >= cap:
         raise HTTPException(
             429, "Too many verification emails. Please try again later."
         )
 
 
-def check_resend_cooldown(row):
-    if row.last_sent_at is None:
-        return
-    elapsed = int((now() - row.last_sent_at).total_seconds())
-    remaining = RESEND_COOLDOWN_SECONDS - elapsed
-    if remaining > 0:
-        raise HTTPException(
-            429,
-            f"Please wait {remaining} seconds before requesting another code.",
-            headers={"Retry-After": str(remaining)},
-        )
+class SendRefused(Exception):
+    """The app-wide email budget, a ceiling or the client's share refused a send."""
 
 
-def email_is_registered(connection, email):
-    return connection.execute(
-        text("SELECT app.email_is_registered(:email)"), {"email": email}
-    ).scalar_one()
+def send_refused():
+    return HTTPException(429, SEND_REFUSED, headers={"Retry-After": "60"})
 
 
-def start_challenge(connection, email, flow):
-    token = secrets.token_urlsafe(32)
+def reserve_email(connection, request, flow):
+    """AH-9: take the budget lock after the email lock, count the last hour's
+    sends (every worker shares the table), then charge the client's share last,
+    only when a send is about to happen. Returns the client key charged."""
+    limiter = limiter_of(request)
+    config = limiter.config
     connection.execute(
-        update(tables.auth_challenges)
-        .where(
-            tables.auth_challenges.c.email == email,
-            tables.auth_challenges.c.consumed_at.is_(None),
-        )
-        .values(consumed_at=now())
+        text("SELECT pg_advisory_xact_lock(:key)"), {"key": EMAIL_BUDGET_LOCK}
     )
-    connection.execute(
-        insert(tables.auth_challenges).values(
-            token_hash=digest(token),
-            email=email,
-            flow=flow,
-            last_sent_at=now(),
-            expires_at=now() + timedelta(minutes=OTP_MINUTES),
+    counts = dict(
+        connection.execute(
+            select(challenges.c.flow, func.sum(challenges.c.send_count))
+            .where(challenges.c.last_sent_at > func.now() - timedelta(hours=1))
+            .group_by(challenges.c.flow)
         )
+        .tuples()
+        .all()
     )
+    ceiling = {
+        "recovery": config.email_budget_recovery_per_hour,
+        "signup": config.email_budget_signup_per_hour,
+    }.get(flow)
+    reason = None
+    if sum(counts.values()) >= config.email_budget_per_hour:
+        reason = "total"
+    elif ceiling is not None and counts.get(flow, 0) >= ceiling:
+        reason = "ceiling"
+    else:
+        key = client_key_of(request)
+        if limiter.check("email", key) is None:
+            return key
+        reason = "share"
+    limiter.count_event(f"email_send_refused reason={reason}")
+    raise SendRefused()
+
+
+def provider_refused(request, error):
+    """AH-9e: Supabase's own 429 on an email-sending call may be project-wide."""
+    if error.status != 429:
+        return False
+    limiter_of(request).count_event("email_send_refused reason=provider")
+    return True
+
+
+def challenge_response(token, flow):
     return ChallengeResponse(
         challenge_id=token,
         flow=flow,
@@ -317,35 +375,125 @@ def start_challenge(connection, email, flow):
     )
 
 
+def first_send(engine, request, email, flow, send, *, check=None, confirm=None):
+    """J2's reserve, call, finish for a new challenge; returns its token, or None
+    when check() says to send nothing.
+
+    A failed send deletes the reserved row (so it never counts against a cap
+    or the budget) and refunds the client's share, then re-raises. Success
+    consumes only this flow's older open challenges (J1): a slower request never
+    consumes a newer one.
+    """
+    with engine.begin() as connection:
+        lock_email(connection, email)
+        if check is not None and not check(connection):
+            return None
+        check_email_limit(connection, email, flow)
+        key = reserve_email(connection, request, flow)
+        token = secrets.token_urlsafe(32)
+        connection.execute(
+            insert(challenges).values(
+                token_hash=digest(token),
+                email=email,
+                flow=flow,
+                expires_at=func.now() + timedelta(minutes=OTP_MINUTES),
+            )
+        )
+
+    def release():
+        with engine.begin() as connection:
+            lock_email(connection, email)
+            connection.execute(
+                delete(challenges).where(challenges.c.token_hash == digest(token))
+            )
+        limiter_of(request).refund("email", key)
+
+    try:
+        send()
+    except Exception:
+        release()
+        raise
+    with engine.begin() as connection:
+        lock_email(connection, email)
+        confirmed = confirm is None or confirm(connection)
+        if confirmed:
+            created = (
+                select(challenges.c.created_at)
+                .where(challenges.c.token_hash == digest(token))
+                .scalar_subquery()
+            )
+            connection.execute(
+                update(challenges)
+                .where(
+                    challenges.c.email == email,
+                    challenges.c.flow == flow,
+                    challenges.c.consumed_at.is_(None),
+                    challenges.c.token_hash != digest(token),
+                    challenges.c.created_at < created,
+                )
+                .values(consumed_at=func.now())
+            )
+    if not confirmed:
+        release()
+        raise AuthProviderError()
+    return token
+
+
+def email_is_registered(connection, email):
+    return connection.execute(
+        text("SELECT app.email_is_registered(:email)"), {"email": email}
+    ).scalar_one()
+
+
 def pending_challenge(connection, payload):
+    """The challenge under the email lock, with its times read on the database clock."""
     lock_email(connection, payload.email)
     row = (
         connection.execute(
-            select(tables.auth_challenges)
-            .where(
-                tables.auth_challenges.c.token_hash == digest(payload.challenge_id),
-                tables.auth_challenges.c.email == payload.email,
+            select(
+                challenges,
+                (challenges.c.expires_at > func.now()).label("live"),
+                func.extract("epoch", func.now() - challenges.c.last_sent_at).label(
+                    "elapsed"
+                ),
+                (
+                    func.least(
+                        func.now() + timedelta(minutes=OTP_MINUTES),
+                        challenges.c.created_at
+                        + timedelta(minutes=CHALLENGE_MAX_MINUTES),
+                    )
+                    > func.now()
+                ).label("extendable"),
             )
-            .with_for_update()
+            .where(
+                challenges.c.token_hash == digest(payload.challenge_id),
+                challenges.c.email == payload.email,
+            )
+            .with_for_update(of=challenges)
         )
         .mappings()
         .first()
     )
-    if (
-        row is None
-        or row.consumed_at
-        or row.expires_at <= now()
-        or row.attempts >= MAX_ATTEMPTS
-    ):
-        raise HTTPException(400, "Verification expired or invalid. Please start again.")
+    if row is None or row.consumed_at or not row.live or row.attempts >= MAX_ATTEMPTS:
+        raise HTTPException(400, START_AGAIN)
     return row
+
+
+def check_resend_cooldown(row):
+    remaining = RESEND_COOLDOWN_SECONDS - int(row.elapsed)
+    if remaining > 0:
+        raise HTTPException(
+            429,
+            f"Please wait {remaining} seconds before requesting another code.",
+            headers={"Retry-After": str(remaining)},
+        )
 
 
 def user_from_identity(identity):
     metadata = identity.get("user_metadata") or {}
     return UserResponse(
         id=identity["id"],
-        email=identity["email"],
+        email=normalize_email(identity["email"]),
         full_name=str(metadata.get("full_name") or "")[:200],
     )
 
@@ -363,7 +511,7 @@ def sync_profile(connection, identity):
             set_={
                 "email": user.email,
                 "full_name": user.full_name,
-                "updated_at": now(),
+                "updated_at": func.now(),
             },
         )
     )
@@ -379,13 +527,20 @@ def sync_profile(connection, identity):
 def authenticated_session(token, engine, provider):
     identity, session_id = provider.identity(token)
     user_id = UUID(identity["id"])
+    sessions = tables.verified_sessions
     with user_connection(engine, user_id) as connection:
         session = (
             connection.execute(
-                select(tables.verified_sessions).where(
-                    tables.verified_sessions.c.session_id == session_id,
-                    tables.verified_sessions.c.user_id == user_id,
-                    tables.verified_sessions.c.revoked_at.is_(None),
+                select(
+                    sessions.c.recovery_only,
+                    (
+                        sessions.c.created_at
+                        < func.now() - timedelta(minutes=RECOVERY_SESSION_MINUTES)
+                    ).label("aged"),
+                ).where(
+                    sessions.c.session_id == session_id,
+                    sessions.c.user_id == user_id,
+                    sessions.c.revoked_at.is_(None),
                 )
             )
             .mappings()
@@ -400,6 +555,8 @@ def authenticated_session(token, engine, provider):
         )
     if session is None or profile is None:
         raise HTTPException(401, "Complete email verification or sign in again.")
+    if session.recovery_only and session.aged:  # J7: reset sessions are short-lived
+        raise HTTPException(401, RECOVERY_EXPIRED)
     return Principal(
         **dict(profile),
         session_id=session_id,
@@ -452,46 +609,63 @@ def token_response(body, user, flow="login"):
         raise AuthProviderError() from None
 
 
-# The auth bucket comes first on both email-lookup routes (an enumeration
-# oracle), before any other dependency or validation touches the database.
+# Every route's first dependency is its rate limit (AH-3a). auth_rate_limit
+# covers the two email-lookup routes, an enumeration oracle.
 @router.post(
     "/auth/signup",
     response_model=ChallengeResponse,
     status_code=201,
     dependencies=[Depends(auth_rate_limit)],
 )
-def signup(payload: SignupRequest, engine: EngineDep, provider: ProviderDep):
-    with engine.begin() as connection:
-        lock_email(connection, payload.email)
+def signup(
+    payload: SignupRequest, request: Request, engine: EngineDep, provider: ProviderDep
+):
+    def check(connection):
         if email_is_registered(connection, payload.email):
             raise HTTPException(
                 409, "This email is already registered. Please sign in instead."
             )
-        check_email_limit(connection, payload.email)
-        provider.signup(payload.email, payload.password, payload.full_name)
-        if not email_is_registered(connection, payload.email):
+        return True
+
+    try:
+        token = first_send(
+            engine,
+            request,
+            payload.email,
+            "signup",
+            lambda: provider.signup(payload.email, payload.password, payload.full_name),
+            check=check,
             # Detect wrong-project configuration or a malformed provider success.
-            raise AuthProviderError()
-        return start_challenge(connection, payload.email, "signup")
+            confirm=lambda connection: email_is_registered(connection, payload.email),
+        )
+    except SendRefused:
+        raise send_refused() from None
+    except AuthProviderError as error:
+        if provider_refused(request, error):
+            raise send_refused() from None
+        raise
+    return challenge_response(token, "signup")
 
 
-@router.post("/auth/confirm-email")
+@router.post("/auth/confirm-email", dependencies=[Depends(credential_rate_limit)])
 def confirm_email(
     payload: ConfirmEmailRequest, engine: EngineDep, provider: ProviderDep
 ):
     # The emailed link has already been consumed by Supabase's /verify endpoint.
     # Validate its JWT, sync only the profile, and never approve an app login.
     identity, _session_id = provider.identity(payload.access_token)
+    email = normalize_email(identity["email"])
     with engine.begin() as connection:
+        lock_email(connection, email)
         sync_profile(connection, identity)
         connection.execute(
-            update(tables.auth_challenges)
+            update(challenges)
             .where(
-                tables.auth_challenges.c.email == identity["email"].casefold(),
-                tables.auth_challenges.c.flow == "signup",
-                tables.auth_challenges.c.consumed_at.is_(None),
+                challenges.c.email == email,
+                challenges.c.flow == "signup",
+                challenges.c.consumed_at.is_(None),
             )
-            .values(consumed_at=now())
+            .values(consumed_at=func.now())
         )
     try:
         provider.logout(payload.access_token, scope="local")
@@ -500,23 +674,38 @@ def confirm_email(
     return {"email_confirmed": True}
 
 
-@router.post("/auth/login", response_model=ChallengeResponse)
-def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
-    with engine.begin() as connection:
-        lock_email(connection, payload.email)
-        flow = "login"
-        try:
-            provider.check_password(payload.email, payload.password)
-        except AuthProviderError as error:
-            if error.code == "email_not_confirmed":
-                raise HTTPException(
-                    403,
-                    "Your account hasn’t been confirmed yet. Open the confirmation link sent to your email, then sign in.",
-                ) from None
-            raise
-        check_email_limit(connection, payload.email)
-        provider.send_code(payload.email, flow)
-        return start_challenge(connection, payload.email, flow)
+@router.post(
+    "/auth/login",
+    response_model=ChallengeResponse,
+    dependencies=[Depends(credential_rate_limit)],
+)
+def login(
+    payload: LoginRequest, request: Request, engine: EngineDep, provider: ProviderDep
+):
+    try:
+        provider.check_password(payload.email, payload.password)
+    except AuthProviderError as error:
+        if error.code == "email_not_confirmed":
+            raise HTTPException(
+                403,
+                "Your account hasn’t been confirmed yet. Open the confirmation link sent to your email, then sign in.",
+            ) from None
+        raise
+    try:
+        token = first_send(
+            engine,
+            request,
+            payload.email,
+            "login",
+            lambda: provider.send_code(payload.email, "login"),
+        )
+    except SendRefused:
+        raise send_refused() from None
+    except AuthProviderError as error:
+        if provider_refused(request, error):
+            raise send_refused() from None
+        raise
+    return challenge_response(token, "login")
 
 
 @router.post(
@@ -524,28 +713,52 @@ def login(payload: LoginRequest, engine: EngineDep, provider: ProviderDep):
     response_model=PasswordResetRequestResponse,
     dependencies=[Depends(auth_rate_limit)],
 )
-def forgot_password(payload: EmailRequest, engine: EngineDep, provider: ProviderDep):
-    with engine.begin() as connection:
-        lock_email(connection, payload.email)
-        if email_is_registered(connection, payload.email):
-            try:
-                check_email_limit(connection, payload.email)
-                provider.send_code(payload.email, "recovery")
-            except HTTPException as error:
-                if error.status_code != 429:
-                    raise
-                # Keep rate-limit outcomes indistinguishable from unknown emails.
-                return PasswordResetRequestResponse()
-            except AuthProviderError as error:
-                if error.status != 429:
-                    raise
-                # Provider email limits must not reveal whether an account exists.
-                return PasswordResetRequestResponse()
-            start_challenge(connection, payload.email, "recovery")
+def forgot_password(
+    payload: EmailRequest, request: Request, engine: EngineDep, provider: ProviderDep
+):
+    """Every outcome but a validation error is the same 200 (the oracle fix)."""
+
+    def check(connection):
+        if not email_is_registered(connection, payload.email):
+            return False
+        # J1: whoever opened a login knows the password; never overwrite its code.
+        open_login = connection.execute(
+            select(challenges.c.token_hash).where(
+                challenges.c.email == payload.email,
+                challenges.c.flow == "login",
+                challenges.c.consumed_at.is_(None),
+                challenges.c.expires_at > func.now(),
+            )
+        ).first()
+        return open_login is None
+
+    try:
+        first_send(
+            engine,
+            request,
+            payload.email,
+            "recovery",
+            lambda: provider.send_code(payload.email, "recovery"),
+            check=check,
+        )
+    except HTTPException as error:
+        if error.status_code != 429:
+            raise
+        # Keep rate-limit outcomes indistinguishable from unknown emails.
+    except SendRefused:
+        pass
+    except AuthProviderError as error:
+        # Provider failures must not reveal whether an account exists either.
+        if not provider_refused(request, error):
+            limiter_of(request).log_event(
+                "forgot_password_send_failed code=%s", error.code
+            )
     return PasswordResetRequestResponse()
 
 
-@router.post("/auth/accept-recovery-link")
+@router.post(
+    "/auth/accept-recovery-link", dependencies=[Depends(credential_rate_limit)]
+)
 def accept_recovery_link(
     payload: RecoveryLinkRequest, engine: EngineDep, provider: ProviderDep
 ):
@@ -557,19 +770,22 @@ def accept_recovery_link(
         if error.status == 401:
             raise HTTPException(400, "This reset link is invalid or expired.") from None
         raise
-    email = identity["email"].casefold()
+    email = normalize_email(identity["email"])
     with engine.begin() as connection:
         lock_email(connection, email)
         challenge = (
             connection.execute(
-                select(tables.auth_challenges)
-                .where(
-                    tables.auth_challenges.c.email == email,
-                    tables.auth_challenges.c.flow == "recovery",
-                    tables.auth_challenges.c.consumed_at.is_(None),
-                    tables.auth_challenges.c.expires_at > now(),
+                select(
+                    challenges.c.token_hash,
+                    func.extract("epoch", challenges.c.last_sent_at).label("sent_at"),
                 )
-                .order_by(tables.auth_challenges.c.created_at.desc())
+                .where(
+                    challenges.c.email == email,
+                    challenges.c.flow == "recovery",
+                    challenges.c.consumed_at.is_(None),
+                    challenges.c.expires_at > func.now(),
+                )
+                .order_by(challenges.c.created_at.desc())
                 .with_for_update()
             )
             .mappings()
@@ -577,7 +793,8 @@ def accept_recovery_link(
         )
         if (
             challenge is None
-            or recovery_at < challenge.last_sent_at.timestamp() - 60
+            # Supabase's clock against the database's, one named tolerance (J7).
+            or recovery_at < float(challenge.sent_at) - CLOCK_SKEW_SECONDS
             or connection.execute(
                 select(tables.verified_sessions.c.session_id).where(
                     tables.verified_sessions.c.session_id == session_id
@@ -592,58 +809,93 @@ def accept_recovery_link(
             )
         )
         connection.execute(
-            update(tables.auth_challenges)
-            .where(tables.auth_challenges.c.token_hash == challenge.token_hash)
-            .values(consumed_at=now())
+            update(challenges)
+            .where(challenges.c.token_hash == challenge.token_hash)
+            .values(consumed_at=func.now())
         )
     return {"recovery_ready": True}
 
 
-@router.post("/auth/resend-otp", response_model=ChallengeResponse)
-def resend_otp(payload: ChallengeRequest, engine: EngineDep, provider: ProviderDep):
+def resend(engine, request, payload, flow, wrong_flow, send):
+    """Reserve under the lock, then send. A failed send still counts and restarts
+    the cooldown, which is conservative. No resend outlives J7's ceiling."""
     with engine.begin() as connection:
         row = pending_challenge(connection, payload)
-        if row.flow != "login":
-            raise HTTPException(400, "Request a new email link to continue.")
+        if row.flow != flow:
+            raise HTTPException(400, wrong_flow)
         check_resend_cooldown(row)
-        check_email_limit(connection, payload.email)
-        provider.send_code(payload.email, row.flow)
+        if not row.extendable:
+            raise HTTPException(400, START_AGAIN)
+        check_email_limit(connection, payload.email, flow)
+        try:
+            reserve_email(connection, request, flow)
+        except SendRefused:
+            raise send_refused() from None
         connection.execute(
-            update(tables.auth_challenges)
-            .where(tables.auth_challenges.c.token_hash == row.token_hash)
+            update(challenges)
+            .where(challenges.c.token_hash == row.token_hash)
             .values(
-                last_sent_at=now(),
-                send_count=row.send_count + 1,
-                expires_at=now() + timedelta(minutes=OTP_MINUTES),
+                last_sent_at=func.now(),
+                send_count=challenges.c.send_count + 1,
+                expires_at=func.least(
+                    func.now() + timedelta(minutes=OTP_MINUTES),
+                    challenges.c.created_at + timedelta(minutes=CHALLENGE_MAX_MINUTES),
+                ),
             )
         )
+    try:
+        send()
+    except AuthProviderError as error:
+        if provider_refused(request, error):
+            raise send_refused() from None
+        raise
+
+
+@router.post(
+    "/auth/resend-otp",
+    response_model=ChallengeResponse,
+    dependencies=[Depends(credential_rate_limit)],
+)
+def resend_otp(
+    payload: ChallengeRequest,
+    request: Request,
+    engine: EngineDep,
+    provider: ProviderDep,
+):
+    resend(
+        engine,
+        request,
+        payload,
+        "login",
+        "Request a new email link to continue.",
+        lambda: provider.send_code(payload.email, "login"),
+    )
     return ChallengeResponse(
         challenge_id=payload.challenge_id,
-        flow=row.flow,
+        flow="login",
         resend_after_seconds=RESEND_COOLDOWN_SECONDS,
     )
 
 
-@router.post("/auth/resend-confirmation", response_model=ChallengeResponse)
+@router.post(
+    "/auth/resend-confirmation",
+    response_model=ChallengeResponse,
+    dependencies=[Depends(credential_rate_limit)],
+)
 def resend_confirmation(
-    payload: ChallengeRequest, engine: EngineDep, provider: ProviderDep
+    payload: ChallengeRequest,
+    request: Request,
+    engine: EngineDep,
+    provider: ProviderDep,
 ):
-    with engine.begin() as connection:
-        row = pending_challenge(connection, payload)
-        if row.flow != "signup":
-            raise HTTPException(400, "An email confirmation request is required.")
-        check_resend_cooldown(row)
-        check_email_limit(connection, payload.email)
-        provider.send_code(payload.email, "signup")
-        connection.execute(
-            update(tables.auth_challenges)
-            .where(tables.auth_challenges.c.token_hash == row.token_hash)
-            .values(
-                last_sent_at=now(),
-                send_count=row.send_count + 1,
-                expires_at=now() + timedelta(minutes=OTP_MINUTES),
-            )
-        )
+    resend(
+        engine,
+        request,
+        payload,
+        "signup",
+        "An email confirmation request is required.",
+        lambda: provider.send_code(payload.email, "signup"),
+    )
     return ChallengeResponse(
         challenge_id=payload.challenge_id,
         flow="signup",
@@ -652,46 +904,116 @@ def resend_confirmation(
     )
 
 
-@router.post("/auth/verify-otp", response_model=AuthResponse)
+@router.post(
+    "/auth/verify-otp",
+    response_model=AuthResponse,
+    dependencies=[Depends(credential_rate_limit)],
+)
 def verify_otp(payload: VerifyRequest, engine: EngineDep, provider: ProviderDep):
+    # Reserve: one attempt, counted before the provider sees the code (AH-2d).
     with engine.begin() as connection:
         row = pending_challenge(connection, payload)
         if row.flow != "login":
             raise HTTPException(400, "Use the email link to continue.")
-        try:
-            body = provider.verify_code(payload.email, payload.code, row.flow)
-        except AuthProviderError as error:
-            if error.status == 401:
-                connection.execute(
-                    update(tables.auth_challenges)
-                    .where(tables.auth_challenges.c.token_hash == row.token_hash)
-                    .values(attempts=row.attempts + 1)
-                )
-                connection.commit()
-                raise HTTPException(400, "Invalid verification code.") from None
-            raise
-        identity, session_id = provider.identity(body.get("access_token"))
-        if identity.get("email", "").casefold() != row.email:
-            raise HTTPException(400, "Invalid verification code.")
-        user = sync_profile(connection, identity)
-        # A native Supabase password/OTP token alone cannot bypass this approval.
-        connection.execute(
-            insert(tables.verified_sessions).values(
-                session_id=session_id,
-                user_id=user.id,
-                recovery_only=False,
+        reserved = connection.execute(
+            update(challenges)
+            .where(
+                challenges.c.token_hash == row.token_hash,
+                challenges.c.attempts < MAX_ATTEMPTS,
             )
-        )
+            .values(attempts=challenges.c.attempts + 1)
+            .returning(challenges.c.token_hash)
+        ).first()
+        if reserved is None:
+            raise HTTPException(400, START_AGAIN)
+
+    def give_back(connection):
+        # Attempts count wrong codes only: any other outcome returns its attempt.
         connection.execute(
-            update(tables.auth_challenges)
-            .where(tables.auth_challenges.c.token_hash == row.token_hash)
-            .values(consumed_at=now())
+            update(challenges)
+            .where(challenges.c.token_hash == row.token_hash)
+            .values(attempts=func.greatest(challenges.c.attempts - 1, 0))
         )
-        result = token_response(body, user, row.flow)
-    return result
+
+    def returned():
+        with engine.begin() as connection:
+            lock_email(connection, payload.email)
+            give_back(connection)
+
+    def discard(body):
+        """Best effort, with no connection held: a Supabase session this route
+        won't approve is logged out locally, never left usable."""
+        token = body.get("access_token") if isinstance(body, dict) else None
+        if not isinstance(token, str):
+            return
+        try:
+            provider.logout(token, scope="local")
+        except AuthProviderError:
+            pass
+
+    try:
+        body = provider.verify_code(payload.email, payload.code, row.flow)
+    except AuthProviderError as error:
+        if error.status == 401:  # a wrong code: its attempt stays counted
+            raise HTTPException(400, "Invalid verification code.") from None
+        returned()
+        raise
+    try:
+        if not isinstance(body, dict):
+            raise AuthProviderError()
+        identity, session_id = provider.identity(body.get("access_token"))
+        token_response(body, user_from_identity(identity))  # well-formed first
+    except AuthProviderError:
+        returned()
+        discard(body)
+        raise
+    if normalize_email(identity.get("email", "")) != row.email:
+        discard(body)
+        raise HTTPException(400, "Invalid verification code.")
+    # Finish: re-read under the lock; a revoke or a concurrent winner may have
+    # consumed the challenge meanwhile (J3), and then this login loses cleanly.
+    with engine.begin() as connection:
+        lock_email(connection, payload.email)
+        current = (
+            connection.execute(
+                select(
+                    challenges.c.consumed_at,
+                    (challenges.c.expires_at > func.now()).label("live"),
+                )
+                .where(challenges.c.token_hash == row.token_hash)
+                .with_for_update()
+            )
+            .mappings()
+            .first()
+        )
+        lost = current is None or current.consumed_at is not None or not current.live
+        if not lost:
+            user = sync_profile(connection, identity)
+            # A native Supabase password/OTP token alone cannot bypass this approval.
+            connection.execute(
+                insert(tables.verified_sessions).values(
+                    session_id=session_id,
+                    user_id=user.id,
+                    recovery_only=False,
+                )
+            )
+            connection.execute(
+                update(challenges)
+                .where(challenges.c.token_hash == row.token_hash)
+                .values(consumed_at=func.now())
+            )
+            give_back(connection)
+    if lost:
+        discard(body)
+        raise HTTPException(400, START_AGAIN)
+    return token_response(body, user, row.flow)
 
 
-@router.post("/auth/refresh", response_model=AuthResponse)
+@router.post(
+    "/auth/refresh",
+    response_model=AuthResponse,
+    dependencies=[Depends(refresh_rate_limit)],
+)
 def refresh(payload: RefreshRequest, engine: EngineDep, provider: ProviderDep):
     body = provider.refresh(payload.refresh_token)
     user = authenticated_session(body.get("access_token"), engine, provider)
@@ -703,20 +1025,24 @@ def refresh(payload: RefreshRequest, engine: EngineDep, provider: ProviderDep):
 
 
 def revoke(user, engine, provider):
+    email = normalize_email(user.email)
     with engine.begin() as connection:
+        # J3: verify-otp's lock, so a concurrent verify either sees its challenge
+        # consumed here or has its new session revoked here.
+        lock_email(connection, email)
         connection.execute(
             update(tables.verified_sessions)
             .where(tables.verified_sessions.c.user_id == user.id)
-            .values(revoked_at=now())
+            .values(revoked_at=func.now())
         )
         # A pre-change password challenge must not restore a revoked session.
         connection.execute(
-            update(tables.auth_challenges)
+            update(challenges)
             .where(
-                tables.auth_challenges.c.email == user.email,
-                tables.auth_challenges.c.consumed_at.is_(None),
+                challenges.c.email == email,
+                challenges.c.consumed_at.is_(None),
             )
-            .values(consumed_at=now())
+            .values(consumed_at=func.now())
         )
     try:
         provider.logout(user.access_token)
@@ -725,7 +1051,9 @@ def revoke(user, engine, provider):
         pass
 
 
-@router.post("/auth/logout", status_code=204)
+@router.post(
+    "/auth/logout", status_code=204, dependencies=[Depends(session_rate_limit)]
+)
 def logout(
     user: Annotated[Principal, Depends(get_verified_session)],
     engine: EngineDep,
@@ -735,12 +1063,18 @@ def logout(
     return Response(status_code=204)
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get(
+    "/me", response_model=UserResponse, dependencies=[Depends(session_rate_limit)]
+)
 def me(user: UserDep):
     return user
 
 
-@router.get("/me/preferences", response_model=Preferences)
+@router.get(
+    "/me/preferences",
+    response_model=Preferences,
+    dependencies=[Depends(session_rate_limit)],
+)
 def get_preferences(user: UserDep, engine: EngineDep):
     with user_connection(engine, user.id) as connection:
         row = (
@@ -755,7 +1089,11 @@ def get_preferences(user: UserDep, engine: EngineDep):
     return Preferences(**dict(row)) if row else Preferences()
 
 
-@router.put("/me/preferences", response_model=Preferences)
+@router.put(
+    "/me/preferences",
+    response_model=Preferences,
+    dependencies=[Depends(session_rate_limit)],
+)
 def save_preferences(payload: Preferences, user: UserDep, engine: EngineDep):
     with user_connection(engine, user.id) as connection:
         statement = pg_insert(tables.preferences).values(
@@ -764,18 +1102,22 @@ def save_preferences(payload: Preferences, user: UserDep, engine: EngineDep):
         connection.execute(
             statement.on_conflict_do_update(
                 index_elements=["user_id"],
-                set_={**payload.model_dump(), "updated_at": now()},
+                set_={**payload.model_dump(), "updated_at": func.now()},
             )
         )
         connection.execute(
             update(tables.profiles)
             .where(tables.profiles.c.id == user.id)
-            .values(onboarding_completed=True, updated_at=now())
+            .values(onboarding_completed=True, updated_at=func.now())
         )
     return payload
 
 
-@router.get("/me/notifications", response_model=Notifications)
+@router.get(
+    "/me/notifications",
+    response_model=Notifications,
+    dependencies=[Depends(session_rate_limit)],
+)
 def get_notifications(user: UserDep, engine: EngineDep):
     with user_connection(engine, user.id) as connection:
         row = (
@@ -790,7 +1132,11 @@ def get_notifications(user: UserDep, engine: EngineDep):
     return Notifications(**dict(row)) if row else Notifications()
 
 
-@router.put("/me/notifications", response_model=Notifications)
+@router.put(
+    "/me/notifications",
+    response_model=Notifications,
+    dependencies=[Depends(session_rate_limit)],
+)
 def save_notifications(payload: Notifications, user: UserDep, engine: EngineDep):
     with user_connection(engine, user.id) as connection:
         statement = pg_insert(tables.notifications).values(
@@ -799,13 +1145,13 @@ def save_notifications(payload: Notifications, user: UserDep, engine: EngineDep)
         connection.execute(
             statement.on_conflict_do_update(
                 index_elements=["user_id"],
-                set_={**payload.model_dump(), "updated_at": now()},
+                set_={**payload.model_dump(), "updated_at": func.now()},
             )
         )
     return payload
 
 
-@router.put("/me/password")
+@router.put("/me/password", dependencies=[Depends(credential_rate_limit)])
 def change_password(
     payload: ChangePassword, user: UserDep, engine: EngineDep, provider: ProviderDep
 ):
@@ -819,7 +1165,7 @@ def change_password(
     return {"message": "Password changed successfully"}
 
 
-@router.post("/auth/reset-password")
+@router.post("/auth/reset-password", dependencies=[Depends(credential_rate_limit)])
 def reset_password(
     payload: NewPassword,
     user: Annotated[Principal, Depends(get_verified_session)],
@@ -843,7 +1189,11 @@ def security_id(connection, ticker):
     ).scalar_one_or_none()
 
 
-@router.get("/me/watchlist", response_model=list[WatchlistItem])
+@router.get(
+    "/me/watchlist",
+    response_model=list[WatchlistItem],
+    dependencies=[Depends(session_rate_limit)],
+)
 def get_watchlist(user: UserDep, engine: EngineDep):
     with user_connection(engine, user.id) as connection:
         rows = (
@@ -864,7 +1214,12 @@ def get_watchlist(user: UserDep, engine: EngineDep):
     return [WatchlistItem(ticker=symbol) for symbol in rows]
 
 
-@router.post("/me/watchlist", response_model=WatchlistItem, status_code=201)
+@router.post(
+    "/me/watchlist",
+    response_model=WatchlistItem,
+    status_code=201,
+    dependencies=[Depends(session_rate_limit)],
+)
 def add_watchlist(payload: WatchlistItem, user: UserDep, engine: EngineDep):
     with user_connection(engine, user.id) as connection:
         found = security_id(connection, payload.ticker)
@@ -878,7 +1233,11 @@ def add_watchlist(payload: WatchlistItem, user: UserDep, engine: EngineDep):
     return payload
 
 
-@router.delete("/me/watchlist/{ticker}", status_code=204)
+@router.delete(
+    "/me/watchlist/{ticker}",
+    status_code=204,
+    dependencies=[Depends(session_rate_limit)],
+)
 def remove_watchlist(ticker: str, user: UserDep, engine: EngineDep):
     wanted = ticker.strip().upper()
     if not _TICKER.fullmatch(wanted):
