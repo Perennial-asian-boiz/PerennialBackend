@@ -29,9 +29,12 @@ Ctrl+C reaches every script (they save their partial results) and the runner wai
 them to exit.
 
 Run (from backend/, or anywhere):
-    python -m src.services.sentiment.run_sentiment
-    python -m src.services.sentiment.run_sentiment --days 3 --time 30
-    python src/services/sentiment/run_sentiment.py --time 45
+    python -m src.services.sentiment.run_sentiment (default)
+    python -m development.backend.src.services.sentiment.sentiment_manager --days 2 --time 7 (quick test)
+
+NOTE:
+ - make sure tickers.json is in the sentiment directory
+ - before running ensure fresh reddit_cookies and youtube_cookies
 """
 
 import argparse
