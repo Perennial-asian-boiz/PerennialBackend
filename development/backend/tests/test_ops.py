@@ -145,6 +145,27 @@ def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
                                                       "privilege": priv}).scalar() is allowed
             assert not conn.execute(text("SELECT has_column_privilege(:role,'perennial.securities',"
                                          "'company_profile_id','UPDATE')"), {"role": importer}).scalar()
+            # S1-12 F1: the summary job may UPDATE exactly these seven columns of
+            # company_profiles, listed here (not read from SUMMARY_COLUMNS) so a widened
+            # grant fails; no other column, no INSERT on any, no table-level UPDATE.
+            summary_columns = {"summary", "summary_grade", "summary_status", "summary_source_name",
+                               "summary_source_url", "summary_as_of", "description_digest"}
+            columns = set(conn.execute(text(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_schema='perennial' AND table_name='company_profiles'")).scalars())
+            assert summary_columns < columns
+            column_privilege = "SELECT has_column_privilege(:role,'perennial.company_profiles',:column,:privilege)"
+            for column in sorted(columns):
+                for role, priv, allowed in (
+                    (importer, "UPDATE", column in summary_columns),
+                    (importer, "INSERT", False),
+                    (reader, "UPDATE", False),
+                ):
+                    assert conn.execute(text(column_privilege), {
+                        "role": role, "column": column, "privilege": priv,
+                    }).scalar() is allowed, (role == importer and "importer" or "reader", column, priv)
+            from provision_roles import SUMMARY_COLUMNS
+            assert set(SUMMARY_COLUMNS) == summary_columns
         with engine.begin() as conn:
             conn.execute(text(f'SET LOCAL ROLE "{owner}"'))
             conn.execute(text("CREATE TABLE perennial.future_table (id bigint GENERATED ALWAYS AS IDENTITY)"))

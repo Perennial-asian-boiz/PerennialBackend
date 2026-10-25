@@ -114,7 +114,7 @@ def login(engine, groups, *, options="", members=("api",), database=None, connec
     `connect` grants CONNECT directly: provisioning gives it only to the group
     roles, which a NOINHERIT login does not inherit.
     """
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     name = f"ra_login_{secrets.token_hex(5)}"
     password = f"synthetic-{secrets.token_hex(8)}"  # hex only, so safe to inline in DDL
@@ -826,7 +826,7 @@ def scratch_database(engine):
     The schema exists, so only the empty-table rule can refuse it, not an error
     from looking up a missing schema.
     """
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     name = f"perennial_test_ra_{secrets.token_hex(4)}"
     admin = pinned_engine(engine.url, isolation_level="AUTOCOMMIT")
@@ -903,7 +903,7 @@ def test_a_correctly_shaped_login_starts(engine, groups):
 @pytest.mark.db
 def test_request_transactions_are_read_only_per_transaction(engine):
     from src.api.read import read_transaction
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     writer = pinned_engine(engine.url, workload="api", pool_size=1, max_overflow=0)
     try:

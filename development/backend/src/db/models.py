@@ -145,6 +145,14 @@ company_profiles = Table(
         "description_digest IS NULL OR description_digest ~ '^[0-9a-f]{64}$'",
         name="description_digest_sha256",
     ),
+    # An ok summary is served, so every part of it must be stored (0013).
+    CheckConstraint(
+        "summary_status IS DISTINCT FROM 'ok' OR (summary IS NOT NULL"
+        " AND summary_grade IS NOT NULL AND summary_source_name IS NOT NULL"
+        " AND summary_source_url IS NOT NULL AND summary_as_of IS NOT NULL"
+        " AND description_digest IS NOT NULL)",
+        name="summary_ok_complete",
+    ),
 )
 
 securities = Table(

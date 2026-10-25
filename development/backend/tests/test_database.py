@@ -19,7 +19,7 @@ from src.db.queries import latest_rows, latest_successful_batch_id, latest_succe
 from src.ingestion import importer
 from src.ingestion.files import read_fetcher_file
 from src.ingestion.importer import CollectionOutcome, import_collection, prune_failed_diagnostics
-from tests.conftest import alembic_config
+from conftest import alembic_config
 
 pytestmark = pytest.mark.db
 

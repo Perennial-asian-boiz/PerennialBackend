@@ -26,9 +26,13 @@ entry points to the generated locks.
 On Python 3.12, install `pip-tools==7.6.2`, then run:
 
 ```sh
-python -m piptools compile --generate-hashes -o requirements.lock pyproject.toml
+python -m piptools compile --generate-hashes --allow-unsafe -o requirements.lock pyproject.toml
 python -m piptools compile --generate-hashes --allow-unsafe --extra dev -o requirements-dev.lock pyproject.toml
 ```
+
+The runtime lock also uses `--allow-unsafe` (since S1-12): textstat requires
+setuptools, so the runtime lock must pin it, with hashes, to install with
+`--require-hashes`.
 
 Review both diffs and rerun the synthetic suite and dependency audit before
 committing an update. Regeneration is platform sensitive; CI verifies the

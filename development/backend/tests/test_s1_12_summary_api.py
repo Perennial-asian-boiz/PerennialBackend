@@ -135,7 +135,9 @@ def test_status_takes_only_its_values(engine, column, value):
     )
     with engine.begin() as conn:
         for good in {
-            "summary_status": ("ok", "unavailable", None),
+            # A lone "ok" is refused since 0013 (every part is required:
+            # test_status_ok_requires_every_stored_part covers it).
+            "summary_status": ("unavailable", None),
         }[column]:
             conn.execute(
                 text(
