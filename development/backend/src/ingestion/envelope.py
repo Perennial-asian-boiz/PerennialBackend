@@ -47,7 +47,13 @@ ENVELOPE_KEYS = {
         "tickers_with_buys",
         "unsupported_tickers",
     ),
-    "short_interest": ("schema_version", "source", "fetched_at", "total_records"),
+    "short_interest": (
+        "schema_version",
+        "source",
+        "fetched_at",
+        "total_records",
+        "unsupported_tickers",
+    ),
     # GDELT: missing timeline days are coverage gaps ("THEME:YYYY-MM-DD"), never
     # zero rows; lists keep the first MAX_LIST_ITEMS, the count is exact.
     "gdelt_theme_volume": (

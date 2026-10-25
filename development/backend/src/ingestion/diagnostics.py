@@ -101,6 +101,7 @@ _COUNT_KEYS = (
     "house_reports_downloaded",
     "house_stock_rows_skipped",
     "house_trades_dated_after_disclosure",
+    "not_found",  # short interest: tickers Nasdaq answered 404 for (no record)
 )
 
 _OWN_ERROR_TYPES = {"not_an_object", "duplicate_security", "conflicting_exchange"}
