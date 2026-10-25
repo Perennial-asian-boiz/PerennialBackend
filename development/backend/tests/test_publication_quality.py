@@ -4,12 +4,26 @@ import json
 from datetime import date, datetime, timezone
 
 import pytest
+from sqlalchemy import select
 
+from src.db import models
 from src.ingestion.importer import CollectionOutcome, import_collection
 from src.pipeline.lifecycle import begin_run
 from src.pipeline.publication import PublicationError, current, publish, replay
 from src.settings import QualityThreshold
 from test_pipeline import caps, inputs
+
+
+def events(engine, publication_id):
+    with engine.connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute(
+                select(models.publication_events)
+                .where(models.publication_events.c.publication_id == publication_id)
+                .order_by(models.publication_events.c.id)
+            ).mappings()
+        ]
 
 
 def test_publication_failure_code_is_in_safe_diagnostic_vocabulary():
@@ -97,11 +111,12 @@ def test_first_publication_records_no_baseline_and_override_is_audited(
     first = publish(engine, runs, caps(engine, batches))
     first_publication = current(engine)
     assert first_publication["id"] == first
+    [first_event] = events(engine, first)
+    assert first_event["kind"] == "quality_passed"
+    assert first_event["actor"] is None and first_event["reason"] is None
     assert all(
         record["status"] == "no_baseline"
-        for record in first_publication["ranking_config"]["quality_audit"][
-            "sources"
-        ].values()
+        for record in first_event["checks"]["sources"].values()
     )
 
     insider = json.loads(fixture_path("trades_insider.json").read_text())[
@@ -134,15 +149,18 @@ def test_first_publication_records_no_baseline_and_override_is_audited(
         observations,
         override_reason="synthetic source correction",
         override_actor="synthetic-operator",
+        override_checks=["insider_trades:row_count"],
     )
     saved = current(engine)
     assert saved["id"] == second
-    audit = saved["ranking_config"]["quality_audit"]["override"]
-    assert audit == {
-        "actor": "synthetic-operator",
-        "reason": "synthetic source correction",
-        "checks": ["insider_trades:row_count"],
-    }
+    [event] = events(engine, second)
+    assert (event["kind"], event["actor"], event["reason"]) == (
+        "quality_override",
+        "synthetic-operator",
+        "synthetic source correction",
+    )
+    assert event["checks"]["failed"] == ["insider_trades:row_count"]
+    assert event["checks"]["overridden"] == ["insider_trades:row_count"]
     assert replay(engine, first) == first_publication["output"]
     assert replay(engine, second) == saved["output"]
 
@@ -152,7 +170,7 @@ def test_fixture_imports_are_not_a_live_publication_baseline(engine, fixture_pat
     inputs(engine, fixture_path, mode="fixture")
     runs, batches = inputs(engine, fixture_path)
     publication_id = publish(engine, runs, caps(engine, batches))
-    audit = current(engine)["ranking_config"]["quality_audit"]["sources"]
+    audit = events(engine, publication_id)[0]["checks"]["sources"]
     assert current(engine)["id"] == publication_id
     assert all(item["status"] == "no_baseline" for item in audit.values())
 
@@ -202,13 +220,12 @@ def test_cli_publish_reports_quality_code_and_records_operator(
                 "synthetic correction",
                 "--actor",
                 "synthetic-operator",
+                "--override-check",
+                "insider_trades:row_count",
             ]
         )
         == 0
     )
     published = json.loads(capsys.readouterr().out)["publication_id"]
     assert current(engine)["id"] == published
-    assert (
-        current(engine)["ranking_config"]["quality_audit"]["override"]["actor"]
-        == "synthetic-operator"
-    )
+    assert events(engine, published)[0]["actor"] == "synthetic-operator"

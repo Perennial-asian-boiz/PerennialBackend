@@ -36,16 +36,12 @@ def run_migrations_online() -> None:
     except DatabaseConfigError as exc:
         raise SystemExit(f"error: {exc}") from None
     except Exception as exc:
-        raise SystemExit(
-            f"error: database engine could not be created: {describe_exception(exc)}"
-        ) from None
+        raise SystemExit(f"error: database engine could not be created: {describe_exception(exc)}") from None
     try:
         try:
             conn = engine.connect()
         except Exception as exc:
-            raise SystemExit(
-                f"error: could not connect to the database: {describe_exception(exc)}"
-            ) from None
+            raise SystemExit(f"error: could not connect to the database: {describe_exception(exc)}") from None
         with conn:
             _run(conn)
     finally:
@@ -57,9 +53,7 @@ def _run(connection) -> None:
         connection=connection,
         target_metadata=migration_metadata,
         include_schemas=True,
-        include_name=lambda name, type_, parent: (
-            type_ != "schema" or name in {SCHEMA, "app"}
-        ),
+        include_name=lambda name, type_, parent: type_ != "schema" or name in {SCHEMA, "app"},
         compare_type=True,
     )
     with context.begin_transaction():
@@ -70,7 +64,5 @@ def _run(connection) -> None:
 
 
 if context.is_offline_mode():
-    raise SystemExit(
-        "Offline (--sql) migrations are not supported; connect to a database."
-    )
+    raise SystemExit("Offline (--sql) migrations are not supported; connect to a database.")
 run_migrations_online()

@@ -17,7 +17,8 @@ page, ticker) as completed or failed. Policy:
     partial results. A unit whose data would be dropped by such a swallowed
     error fails instead.
   * A collection that completed every unit with zero records is a successful
-    empty result (e.g. no insider buys in the window).
+    empty result (e.g. no insider buys in the window), except short interest:
+    an entirely empty Nasdaq universe fails with empty_short_interest.
   * Insider and short-interest plans use explicit upstream={trades, holdings}
     rows from pinned database batches. Only callers omitting upstream use the
     legacy bounded file fallback. Malformed supplied rows or missing/malformed
@@ -35,9 +36,13 @@ page, ticker) as completed or failed. Policy:
   * Failure details are unit names and fixed codes. URLs, query strings (the
     FMP key travels in one) and exception messages are never recorded or printed.
 
-Congress: any parsed trade without an ISO transaction date fails the
-collection (parse_error) before fmp.filter_recent, which would otherwise drop
-it silently. filter_recent's two-year window itself is kept as is.
+Congress: the free FMP plan serves only page 0 (20 rows) per chamber, so a
+run reads at most settings.fmp_max_pages pages (default 1) and a full final
+page ends the chamber instead of failing. Stored history accumulates across
+runs and possible gaps are detected there (src/pipeline/congress_history.py).
+Trades of every age are stored (D13); the 2-year window is applied in ranking.
+Any parsed trade without an ISO transaction date fails the collection
+(parse_error).
 
 The production database scheduler calls this COLLECTORS interface through
 src.pipeline.runner. The legacy JSON scheduler and fetchers' file run() entry
@@ -61,6 +66,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
+from src.ingestion.adapters import (
+    ArkAdapter,
+    Collector,
+    FmpAdapter,
+    InsiderAdapter,
+    ShortInterestAdapter,
+)
 from src.ingestion.files import read_json_bounded
 from src.ingestion.importer import CollectionOutcome
 from src.services.consensus_watchlist.paths import PACKAGE_DIR
@@ -325,6 +337,17 @@ def _single_iso_date(values: List[Any]) -> Optional[date]:
     return date.fromisoformat(values[0])
 
 
+def _latest_iso_date(values: List[Any]) -> Optional[date]:
+    """Latest retained content date; empty or incomplete dates stay unknown.
+
+    Never substitute collection time: the date participates in batch identity.
+    Mixed settlement dates use the latest, retaining each row's own date.
+    """
+    if not values or not all(_is_iso_date(value) for value in values):
+        return None
+    return max(date.fromisoformat(value) for value in values)
+
+
 def _read_upstream(
     source: str, data_dir: Path
 ) -> Tuple[Optional[UpstreamRows], Optional[CollectionOutcome]]:
@@ -385,8 +408,10 @@ def _upstream_row_ok(key: str, row: Any) -> bool:
     )
 
 
-def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]:
-    """Same selection as insider.load_congress_tickers / load_ark_tickers / run()."""
+def _insider_plan(
+    insider: InsiderAdapter, upstream: UpstreamRows
+) -> List[Tuple[str, str]]:
+    """Same selection as insider.legacy_load_congress_tickers / legacy_load_ark_tickers / legacy_run()."""
     purchases = [
         t["ticker"]
         for t in upstream["trades"]
@@ -405,8 +430,8 @@ def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]
     ]
 
 
-def _short_interest_plan(si: Any, upstream: UpstreamRows) -> List[str]:
-    """Same universe as short_interest.get_candidate_tickers()."""
+def _short_interest_plan(si: ShortInterestAdapter, upstream: UpstreamRows) -> List[str]:
+    """Same universe as short_interest.legacy_get_candidate_tickers()."""
     tickers = {
         si.normalize_ticker(r["ticker"])
         for r in upstream["trades"] + upstream["holdings"]
@@ -445,7 +470,7 @@ def collect_ark(
     session: Optional[requests.Session] = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> CollectionOutcome:
-    ark = _fetcher("ark")
+    ark: ArkAdapter = _fetcher("ark")
     session = session or requests.Session()
     tracker = _Tracker("ARK funds", planned=len(ark.ARK_FUNDS))
     all_raw: Dict[str, List[Dict[str, Any]]] = {}
@@ -496,6 +521,8 @@ def collect_ark(
 
 # ── Congress (FMP) ───────────────────────────────────────
 
+FREE_PLAN_PAGES = 1  # the free plan answers deeper pages with HTTP 402
+
 
 def _string_fields_ok(item: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
     return all(item.get(k) is None or isinstance(item.get(k), str) for k in keys)
@@ -522,8 +549,10 @@ def collect_congress(
     sleep: Callable[[float], None] = time.sleep,
     *,
     settings: Optional[Settings] = None,
+    max_pages: Optional[int] = None,
 ) -> CollectionOutcome:
-    fmp = _fetcher("fmp")
+    fmp: FmpAdapter = _fetcher("fmp")
+    key: Optional[str]
     if api_key is not None:
         key = api_key
     elif settings is not None and settings.fmp_api_key is not None:
@@ -534,16 +563,28 @@ def collect_congress(
         return CollectionOutcome.failure(
             "congress_trades", "live", "missing_credential"
         )
-    page_limit = settings.fmp_max_pages if settings is not None else fmp.MAX_PAGES
+    if max_pages is not None:
+        page_limit = max_pages
+    elif settings is not None:
+        page_limit = settings.fmp_max_pages
+    else:
+        page_limit = FREE_PLAN_PAGES
     session = session or requests.Session()
-    # Initially one request per chamber. Full pages discover further required
-    # units; terminated pagination is not unattempted work.
-    page_counts = {"senate_pages_fetched": 0, "house_pages_fetched": 0}
+    # Initially one request per chamber. Full pages discover further units up
+    # to page_limit; a full final page is the end of what this run can see.
+    page_counts = {
+        "senate_pages_fetched": 0,
+        "house_pages_fetched": 0,
+        "senate_rows_served": 0,
+        "house_rows_served": 0,
+        "fmp_calls": 0,
+    }
     tracker = _Tracker("Congress requests", planned=2, extra_counts=page_counts)
     raw_fmp: List[Dict[str, Any]] = []
     for chamber in ("senate", "house"):
         for page in range(page_limit):
             unit = f"{chamber} page {page}"
+            page_counts["fmp_calls"] += 1
             resp = _get_json(
                 session,
                 f"{fmp.BASE_URL}/{chamber}-latest",
@@ -563,24 +604,20 @@ def collect_congress(
                 tracker.fail(unit, "malformed_response")
                 return tracker.outcome("congress_trades", [])
             page_counts[f"{chamber}_pages_fetched"] += 1
-            if len(items) == 20 and page == page_limit - 1:
-                tracker.fail(unit, "pagination_exhausted")
-                return tracker.outcome("congress_trades", [])
+            page_counts[f"{chamber}_rows_served"] += len(items)
             tracker.ok()
             for item in items:
                 item["_chamber"] = chamber.capitalize()
             raw_fmp.extend(items)
-            if len(items) < 20:
+            if len(items) < 20 or page == page_limit - 1:
                 break
             if tracker.planned is not None:
                 tracker.planned += 1
     try:
         trades = fmp.parse_trades(raw_fmp)
-        # filter_recent silently drops rows whose date does not parse, so a
-        # malformed required date must fail the collection before it runs.
         if not all(_is_iso_date(t.get("transaction_date")) for t in trades):
             return tracker.parse_failure("congress_trades")
-        trades = fmp.filter_recent(fmp.deduplicate_proven_repeats(trades), years=2)
+        trades = fmp.deduplicate_proven_repeats(trades)
     except (TypeError, ValueError, AttributeError, KeyError):
         return tracker.parse_failure("congress_trades")
     envelope = {
@@ -594,6 +631,7 @@ def collect_congress(
         trades,
         envelope=envelope,
         coverage={"complete": True, "scope": "recent_window"},
+        source_as_of=_latest_iso_date([t.get("disclosure_date") for t in trades]),
     )
 
 
@@ -649,7 +687,7 @@ def collect_insider(
     settings: Optional[Settings] = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; None retains the legacy file fallback."""
-    insider = _fetcher("insider")
+    insider: InsiderAdapter = _fetcher("insider")
     upstream, failure = _resolve_upstream(
         "insider_trades", insider.LOCAL_DATA_DIR, upstream
     )
@@ -698,10 +736,6 @@ def collect_insider(
             tracker.fail(ticker, "malformed_response")
             break
         else:
-            # insider.py returns (buys, error_code, error_detail). Its detail
-            # can contain provider data; only the fixed code crosses this
-            # boundary. A parser failure leaves the ticker unknown. Records
-            # keep the planned ticker, not the provider symbol.
             parsed_buys, parse_code, _parse_detail = insider.parse_finnhub_buys(
                 ticker, resp.data, bucket
             )
@@ -724,6 +758,10 @@ def collect_insider(
         "insider_trades",
         buys,
         envelope=envelope,
+        # Coverage through the exact UTC date sent in every request, not the
+        # newest buy in a changing universe. Pinned by the importer in batch
+        # identity; same content on a later query day intentionally differs.
+        source_as_of=date.fromisoformat(today),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 
@@ -768,7 +806,7 @@ def collect_short_interest(
     upstream: Any = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; supplied data never reads files."""
-    si = _fetcher("short_interest")
+    si: ShortInterestAdapter = _fetcher("short_interest")
     upstream, failure = _resolve_upstream("short_interest", si.LOCAL_DATA_DIR, upstream)
     if failure:
         return failure
@@ -807,6 +845,13 @@ def collect_short_interest(
                 records.append(record)
                 tracker.ok()
         sleep(si.REQUEST_DELAY)
+    if not records and not tracker.failure_count:
+        return CollectionOutcome.failure(
+            "short_interest",
+            "live",
+            "empty_short_interest",
+            diagnostics=tracker.diagnostics(),
+        )
     records.sort(key=lambda r: r["ticker"])
     envelope = {
         "schema_version": "1.0",
@@ -818,11 +863,12 @@ def collect_short_interest(
         "short_interest",
         records,
         envelope=envelope,
+        source_as_of=_latest_iso_date([r.get("settlement_date") for r in records]),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 
 
-COLLECTORS: Dict[str, Callable[..., CollectionOutcome]] = {
+COLLECTORS: Dict[str, Collector] = {
     "congress_trades": collect_congress,
     "ark_holdings": collect_ark,
     "insider_trades": collect_insider,

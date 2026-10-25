@@ -1,24 +1,31 @@
 """FastAPI is the only application-data gateway; Supabase owns authentication."""
 
+import logging
 import os
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
+from src.api import read
 from src.api.accounts import get_engine, router
 from src.api.dashboard import DashboardResponse, dashboard_response_from_publication
 from src.api.dashboard_fixture import temporary_dashboard_response
+from src.api.read import StartupRefused, check_startup
 from src.api.supabase_auth import AuthProviderError
 from src.db import models
 from src.services.consensus_watchlist.paths import ENV_PATH
+from src.utils.logger import configure_logging
 
 load_dotenv(ENV_PATH)
+logger = logging.getLogger(__name__)
 
 
 def cors_origins() -> list[str]:
@@ -36,18 +43,63 @@ def cors_origins() -> list[str]:
     return origins
 
 
-app = FastAPI(title="Perennial API", version="0.2.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins(),
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
-)
-app.include_router(router)
+def create_app(*, api_role: str = "perennial_api") -> FastAPI:
+    """The integrated app: #22's account routes and R1's reads under /v1.
+
+    One ``api``-workload engine from API_DATABASE_URL serves both routers
+    (required: there is no DATABASE_URL fallback). Startup logs JSON and runs
+    R1's login check, extended to schema app; rate limiting and the only proxy
+    middleware come from ``read.install`` with the API_* settings.
+    """
+    engine = get_engine()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        configure_logging()
+        try:
+            check_startup(app.state.engine, app.state.api_role)
+        except StartupRefused as refused:
+            logger.error("%s", refused)  # fixed text: no login, URL or driver text
+            raise
+        yield
+
+    app = FastAPI(title="Perennial API", version="0.2.0", lifespan=lifespan)
+    app.state.engine = engine
+    app.state.api_role = api_role
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins(),
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+        expose_headers=["Retry-After"],  # a 429's hint, readable cross-origin
+    )
+    app.include_router(router, prefix="/v1")  # decision 17
+    app.include_router(read.router)  # already carries /v1
+    read.install(app, read.RateLimitConfig.from_environ(os.environ))
+    app.add_exception_handler(AuthProviderError, provider_error)
+    app.add_exception_handler(RequestValidationError, invalid_input)
+    app.add_exception_handler(read.APIError, api_error)
+    app.middleware("http")(private_responses)
+    app.get("/health")(health)
+    # Public and on the API pool in publication mode: the read bucket, as /v1.
+    app.get(
+        "/api/watchlist",
+        response_model=DashboardResponse,
+        dependencies=[Depends(read.rate_limit)],
+    )(dashboard_watchlist)
+    return app
 
 
-@app.exception_handler(AuthProviderError)
-async def provider_error(_request: Request, error: AuthProviderError):
+def __getattr__(name: str) -> FastAPI:
+    # `uvicorn src.api.app:app` (and python -m src.api) builds the app on first
+    # use, so importing this module needs no API_DATABASE_URL.
+    if name == "app":
+        return create_app()
+    raise AttributeError(name)
+
+
+async def provider_error(_request: Request, error: Exception) -> Response:
+    assert isinstance(error, AuthProviderError)
     return JSONResponse(
         status_code=error.status,
         content={
@@ -58,8 +110,16 @@ async def provider_error(_request: Request, error: AuthProviderError):
     )
 
 
-@app.exception_handler(RequestValidationError)
-async def invalid_input(_request: Request, error: RequestValidationError):
+async def api_error(_request: Request, error: Exception) -> Response:
+    # R1's fixed {"detail", "code"} errors: its reads and unknown_security.
+    assert isinstance(error, read.APIError)
+    return read.CanonicalJSONResponse(
+        {"detail": error.detail, "code": error.code}, status_code=error.status
+    )
+
+
+async def invalid_input(_request: Request, error: Exception) -> Response:
+    assert isinstance(error, RequestValidationError)
     # Pydantic's default details include rejected input (including passwords).
     # Inspect only location/type and return our own messages, never input/msg/ctx.
     fields = {}
@@ -97,21 +157,20 @@ async def invalid_input(_request: Request, error: RequestValidationError):
     )
 
 
-@app.middleware("http")
-async def private_responses(request: Request, call_next):
+async def private_responses(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
     response = await call_next(request)
-    if request.url.path.startswith(("/auth/", "/me")):
+    if request.url.path.startswith(("/v1/auth/", "/v1/me")):
         response.headers["Cache-Control"] = "no-store"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 
-@app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.get("/api/watchlist", response_model=DashboardResponse)
 def dashboard_watchlist(
     engine: Annotated[Engine, Depends(get_engine)],
 ) -> DashboardResponse:
@@ -123,7 +182,7 @@ def dashboard_watchlist(
     )
     if os.getenv("DASHBOARD_DATA_MODE", default_mode).casefold() == "fixture":
         return temporary_dashboard_response()
-    with engine.begin() as connection:
+    with read.read_transaction(engine) as connection:
         publication = (
             connection.execute(
                 select(models.publications)
@@ -137,4 +196,6 @@ def dashboard_watchlist(
             .mappings()
             .first()
         )
-    return dashboard_response_from_publication(publication)
+    return dashboard_response_from_publication(
+        dict(publication) if publication is not None else None
+    )
