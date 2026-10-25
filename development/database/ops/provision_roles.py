@@ -47,6 +47,9 @@ API_COLUMNS = {
                          "summary_source_name", "summary_source_url", "summary_as_of"),
     "publication_events": ("id", "publication_id", "kind", "checks", "created_at"),
 }
+# What the S1-12 summary job (importer) may write on company_profiles.
+SUMMARY_COLUMNS = ("summary", "summary_grade", "summary_status", "summary_source_name",
+                   "summary_source_url", "summary_as_of", "description_digest")
 SUPABASE_API_ROLES = ("anon", "authenticated", "service_role")
 SHARED_DATABASE_NOTICE = ("Schema auth exists, so this is a shared (Supabase) database: PUBLIC keeps CONNECT and "
                           "TEMPORARY, which the platform's own logins connect through")
@@ -200,6 +203,10 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
             elif table == "securities":
                 conn.execute(sql.SQL("GRANT UPDATE (exchange, currency) ON TABLE {} TO {}")
                              .format(ident, sql.Identifier(importer)))
+            elif table == "company_profiles":
+                # S1-12: the summary job stores its outcome; the rest of a profile is owner-reviewed.
+                conn.execute(sql.SQL("GRANT UPDATE ({}) ON TABLE {} TO {}").format(
+                    sql.SQL(", ").join(sql.Identifier(c) for c in SUMMARY_COLUMNS), ident, sql.Identifier(importer)))
             sequences = conn.execute(
                 "SELECT pg_get_serial_sequence(%s, attname) FROM pg_attribute "
                 "WHERE attrelid=%s::regclass AND attidentity <> '' AND NOT attisdropped",

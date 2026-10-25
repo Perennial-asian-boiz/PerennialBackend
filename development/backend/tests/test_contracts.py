@@ -74,7 +74,7 @@ def test_config_accepts_plain_scheme_and_env_file(tmp_path):
     ("postgresql+psycopg://u:p@127.0.0.1:55439/perennial_test?port=5432", False),
 ])
 def test_test_database_guard(raw, ok):
-    from tests.conftest import check_test_server_url
+    from conftest import check_test_server_url
 
     url = parse_database_url(raw)
     if ok:
@@ -354,7 +354,7 @@ def test_file_mode_requires_attestation(fixture_path, tmp_path):
 def test_pinned_engine_overrides_pg_environment(monkeypatch):
     from sqlalchemy import event
 
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     assert not [n for n in os.environ if n.startswith("PG")]  # scrubbed at conftest import
     monkeypatch.setenv("PGHOSTADDR", "192.0.2.123")  # documentation address; never contacted

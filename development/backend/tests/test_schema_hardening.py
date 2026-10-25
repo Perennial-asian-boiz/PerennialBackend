@@ -5,7 +5,7 @@ from sqlalchemy import CheckConstraint, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from src.db.models import metadata
-from tests.conftest import alembic_config
+from conftest import alembic_config
 
 pytestmark = pytest.mark.db
 

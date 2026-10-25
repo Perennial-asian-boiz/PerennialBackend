@@ -378,8 +378,8 @@ def test_merged_file_still_imports_and_feeds_consensus(fmp, hc, monkeypatch, tmp
 @pytest.fixture
 def clerk_http(hc, monkeypatch, tmp_path):
     """House Clerk index with one e-filed and one scanned recent PTR, via collectors' session."""
-    from tests.test_collectors import FakeResponse as HttpResponse
-    from tests.test_collectors import FakeSession as HttpSession
+    from test_collectors import FakeResponse as HttpResponse
+    from test_collectors import FakeSession as HttpSession
 
     recent = (date.today() - timedelta(days=10)).strftime("%m/%d/%Y")
     index = index_zip([index_row("20000001", recent), index_row("8000002", recent)])
@@ -444,7 +444,7 @@ def test_collector_fails_on_partly_parsed_report_instead_of_dropping_trades(
     ("20000001.pdf", "house report 20000001"),
 ])
 def test_collector_fails_fast_on_a_failed_clerk_request(clerk_http, unit_suffix, unit_name):
-    from tests.test_collectors import FakeResponse as HttpResponse
+    from test_collectors import FakeResponse as HttpResponse
 
     make_session, routes = clerk_http
     routes[unit_suffix] = HttpResponse(status=403, body={})
@@ -456,7 +456,7 @@ def test_collector_fails_fast_on_a_failed_clerk_request(clerk_http, unit_suffix,
 
 
 def test_collector_adds_fmp_senate_when_enabled(clerk_http):
-    from tests.test_collectors import FakeResponse as HttpResponse
+    from test_collectors import FakeResponse as HttpResponse
 
     make_session, routes = clerk_http
     routes["senate-latest"] = HttpResponse(body=[{
@@ -477,7 +477,7 @@ def test_collector_adds_fmp_senate_when_enabled(clerk_http):
 def test_collector_settings_choose_the_sources(clerk_http):
     """Defaults: House from the Clerk, Senate from FMP's single free page."""
     from src.settings import Settings
-    from tests.test_collectors import FakeResponse as HttpResponse
+    from test_collectors import FakeResponse as HttpResponse
 
     make_session, routes = clerk_http
     routes["senate-latest"] = HttpResponse(body=[])

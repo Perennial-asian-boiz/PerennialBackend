@@ -20,6 +20,10 @@ dependencies = [
     # S1-11 market status (Q8). Keep it current: its calendars reach about a year
     # ahead, and unscheduled closures arrive only in library releases.
     "exchange-calendars==4.13.2",
+    # S1-12 summary readability at ingestion (CS-2). Exact: the grade formulas
+    # have shifted between versions. 0.7.8 is the newest release whose syllable
+    # data ships in a package (cmudict); 0.7.9+ download nltk's corpus at runtime.
+    "textstat==0.7.8",
 ]
 
 [project.optional-dependencies]
@@ -114,6 +118,11 @@ follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = ["apscheduler.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# S1-12's readability library ships no type information.
+module = ["textstat"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

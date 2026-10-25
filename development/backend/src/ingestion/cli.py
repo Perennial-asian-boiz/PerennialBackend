@@ -5,6 +5,7 @@ Command line for imports and inspection. Run from development/backend:
     python -m src.ingestion.cli import-file ark_holdings ../database/local_data/ark_holdings.json --attest-complete
     python -m src.ingestion.cli fetch ark_holdings
     python -m src.ingestion.cli latest ark_holdings --limit 5
+    python -m src.ingestion.cli summaries   # S1-12, manual only (OPERATIONS.md)
 
 Exit codes: 0 succeeded, 1 import recorded as failed or unhealthy report,
 2 command/configuration/database failure. Earlier pipeline stages may already
@@ -100,6 +101,10 @@ def _parser() -> argparse.ArgumentParser:
         "recover-stale", help="mark workers with expired heartbeats abandoned"
     )
     recover.add_argument("--minutes", type=int, default=10)
+    sub.add_parser(
+        "summaries",
+        help="S1-12: store company summaries for the consensus list (manual, staging)",
+    )
     return parser
 
 
@@ -114,6 +119,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         publication_id=getattr(args, "publication_id", None),
     ):
         return _execute(args)
+
+
+def _summaries(engine: Any, settings: Any) -> int:
+    """S1-12 (decision 76): run by hand, never scheduled. Counts only on stdout."""
+    from src.ingestion.company_summaries import summarize
+    from src.ingestion.fmp_descriptions import FmpProfileDescriptions
+
+    key = settings.fmp_api_key.get_secret_value() if settings.fmp_api_key else ""
+    if not key.strip() or key.lower().startswith("your_"):
+        emit({"error_code": "missing_credential"})  # before any request
+        return 1
+    result = summarize(engine, FmpProfileDescriptions(key))
+    if not result.succeeded:
+        emit({"error_code": result.error_code})
+        return 1
+    emit(
+        {
+            "members": result.members,
+            "with_summary": result.with_summary,
+            "unavailable": result.unavailable,
+        }
+    )
+    return 0
 
 
 def _execute(args: argparse.Namespace) -> int:
@@ -234,6 +262,8 @@ def _execute(args: argparse.Namespace) -> int:
             report = health(engine, settings=settings)
             emit(report)
             return 0 if report["healthy"] else 1
+        if args.command == "summaries":
+            return _summaries(engine, settings)
         if args.command == "recover-stale":
             from datetime import timedelta
 
