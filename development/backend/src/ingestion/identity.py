@@ -39,6 +39,9 @@ SOURCE_PROVIDERS = {
     "short_interest": "NASDAQ",
 }
 PROVIDERS = frozenset({*SOURCE_PROVIDERS.values()})
+# Sources whose adapters return results under the canonical symbols they were
+# given (M4 market caps): no provider namespace, so only canonical tickers match.
+CANONICAL_ONLY_SOURCES = frozenset({"market_caps"})
 
 UNRESOLVED = "unresolved"
 INACTIVE = "inactive_security"
@@ -56,14 +59,15 @@ def resolve_tickers(
 ) -> Tuple[Dict[str, int], List[Tuple[str, str]]]:
     """
     Map each normalized ticker to a security id: the source's provider alias
-    first, then the canonical ticker. Returns (ids, failures), where failures
-    are (ticker, code) pairs in ticker order.
+    first, then the canonical ticker (only the canonical ticker for
+    CANONICAL_ONLY_SOURCES). Returns (ids, failures), where failures are
+    (ticker, code) pairs in ticker order.
     """
-    provider = SOURCE_PROVIDERS[source]
+    provider = None if source in CANONICAL_ONLY_SOURCES else SOURCE_PROVIDERS[source]
     wanted = sorted(set(tickers))
     if not wanted:
         return {}, []
-    values = {provider_alias(provider, t): t for t in wanted}
+    values = {provider_alias(provider, t): t for t in wanted} if provider else {}
     rows = conn.execute(
         select(
             security_identifiers.c.value,
@@ -80,7 +84,8 @@ def resolve_tickers(
     ids: Dict[str, int] = {}
     failures: List[Tuple[str, str]] = []
     for ticker in wanted:
-        hit = found.get(provider_alias(provider, ticker)) or found.get(ticker)
+        alias = found.get(provider_alias(provider, ticker)) if provider else None
+        hit = alias or found.get(ticker)
         if hit is None:
             failures.append((ticker, UNRESOLVED))
         elif not hit[1]:

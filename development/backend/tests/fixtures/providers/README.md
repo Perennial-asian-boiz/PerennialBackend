@@ -4,6 +4,11 @@ These payloads are hand-authored, fictitious examples, not captured responses.
 FMP fields follow `_FMP_KEYS` / `_string_fields_ok`, ARK follows `_ark_fund_ok`,
 and Nasdaq follows `_short_interest_kind` in `src/ingestion/collectors.py`.
 Finnhub follows `parse_finnhub_buys` in the insider fetcher, anticipating PR #18.
+`market_caps/quotes.json` is not a provider response: it is the provider-neutral
+fixture adapter's input (`FixtureMarketCapAdapter`, M4 MC-A). Each quote maps a
+canonical symbol to `MarketCapQuote` fields, with values as decimal strings. It
+covers every candidate in the pipeline and demo fixtures. `observed_at` is null
+so demo runs never age out.
 No SecuritiesDB or retired Senate Stock Watcher contract is introduced.
 
 From the repository root:

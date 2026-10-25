@@ -688,6 +688,108 @@ def test_provisioning_refuses_when_a_supabase_api_role_can_reach_perennial(
         _drop_roles(engine, supabase)
 
 
+ALEMBIC_PRIVILEGES = "SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN"
+
+
+def _restored_alembic_version(conn, default_grantees=()):
+    """Recreate public.alembic_version the way a --no-owner --no-acl restore does:
+    created by the admin login, so the admin's default privileges for public apply
+    (Supabase's: GRANT ALL ON TABLES TO anon, authenticated, service_role)."""
+    version = conn.execute(text("SELECT version_num FROM public.alembic_version")).scalar()
+    if default_grantees:
+        conn.execute(text(
+            "ALTER DEFAULT PRIVILEGES FOR ROLE CURRENT_USER IN SCHEMA public GRANT ALL ON TABLES TO "
+            + ", ".join(f'"{r}"' for r in default_grantees)))
+    conn.execute(text("DROP TABLE public.alembic_version"))
+    conn.execute(text("CREATE TABLE public.alembic_version (version_num varchar(32) NOT NULL,"
+                      " CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"))
+    conn.execute(text("INSERT INTO public.alembic_version VALUES (:v)"), {"v": version})
+    return version
+
+
+def _alembic_holders(conn, names):
+    """The given roles that hold any privilege on public.alembic_version, by the
+    privilege functions and by its ACL entries directly."""
+    by_function = [
+        name for name in names
+        if conn.execute(text("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :r)"),
+                        {"r": name}).scalar()
+        and conn.execute(text(
+            "SELECT has_table_privilege(:r, 'public.alembic_version', :p)"
+            " OR has_any_column_privilege(:r, 'public.alembic_version', 'SELECT,INSERT,UPDATE,REFERENCES')"),
+            {"r": name, "p": ALEMBIC_PRIVILEGES}).scalar()
+    ]
+    by_acl = conn.execute(text(
+        "SELECT DISTINCT r.rolname FROM pg_class c, aclexplode(c.relacl) a"
+        " JOIN pg_roles r ON r.oid = a.grantee"
+        " WHERE c.oid = 'public.alembic_version'::regclass AND r.rolname = ANY(:n)"),
+        {"n": list(names)}).scalars().all()
+    return sorted(set(by_function) | set(by_acl))
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("present", ["all_three", "only_anon"])
+def test_grants_strip_supabase_default_privileges_from_a_restored_alembic_version(
+    engine, groups, present
+):
+    """Ops's finding on the Supabase image: a restore as the admin recreates
+    alembic_version under Supabase's default ACL, so anon, authenticated and
+    service_role get arwdDxtm on it, and the Data API serves public. After grants,
+    none of them may hold any privilege on it, whichever of them exist."""
+    sys.path.insert(0, str(OPS))
+    from provision_roles import provision
+
+    suffix = secrets.token_hex(5)
+    supabase = tuple(f"ra_{r}_{suffix}" for r in ("anon", "authenticated", "service_role"))
+    existing = supabase if present == "all_three" else supabase[:1]
+    roles = tuple(groups[r] for r in ("owner", "importer", "reader", "api"))
+    try:
+        with engine.connect() as conn:  # rolled back: the session's table is untouched
+            for name in existing:
+                conn.execute(text(f'CREATE ROLE "{name}" NOLOGIN'))
+            version = _restored_alembic_version(conn, existing)
+            assert _alembic_holders(conn, existing) == sorted(existing)  # the exposure is real
+            provision(conn.connection.driver_connection, roles, phase="grants",
+                      supabase_roles=supabase)
+            assert _alembic_holders(conn, supabase) == []
+            assert conn.execute(text(
+                "SELECT pg_get_userbyid(relowner) FROM pg_class"
+                " WHERE oid = 'public.alembic_version'::regclass")).scalar() == roles[0]
+            assert conn.execute(text("SELECT version_num FROM public.alembic_version")).scalar() == version
+            conn.rollback()
+    finally:
+        _drop_roles(engine, supabase)
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("supabase_roles", ["default_names", "unique_absent_names"])
+def test_grants_on_a_restored_alembic_version_succeed_without_supabase_roles(
+    engine, groups, supabase_roles
+):
+    """A plain database has no Supabase API roles; grants still re-own the
+    restored table and finish, and leave PUBLIC and our groups without access."""
+    sys.path.insert(0, str(OPS))
+    from provision_roles import SUPABASE_API_ROLES, provision
+
+    names = (SUPABASE_API_ROLES if supabase_roles == "default_names"
+             else tuple(f"ra_absent_{r}_{secrets.token_hex(5)}" for r in ("anon", "authenticated")))
+    roles = tuple(groups[r] for r in ("owner", "importer", "reader", "api"))
+    with engine.connect() as conn:
+        assert not conn.execute(text("SELECT count(*) FROM pg_roles WHERE rolname = ANY(:n)"),
+                                {"n": list(names)}).scalar(), "a stand-in name exists here"
+        _restored_alembic_version(conn)
+        conn.execute(text("GRANT SELECT ON public.alembic_version TO PUBLIC"))
+        provision(conn.connection.driver_connection, roles, phase="grants", supabase_roles=names)
+        assert conn.execute(text(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class"
+            " WHERE oid = 'public.alembic_version'::regclass")).scalar() == roles[0]
+        assert _alembic_holders(conn, roles[1:]) == []
+        assert not conn.execute(text(
+            "SELECT EXISTS (SELECT 1 FROM pg_class c, aclexplode(c.relacl) a"
+            " WHERE c.oid = 'public.alembic_version'::regclass AND a.grantee = 0)")).scalar()
+        conn.rollback()
+
+
 # ── RA-15: startup refusal ───────────────────────────────
 
 
