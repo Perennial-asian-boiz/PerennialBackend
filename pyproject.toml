@@ -13,9 +13,13 @@ dependencies = [
     "alembic==1.20.0",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
+    "pypdf==6.21.2",
     # M5 read API; the same pins as #22 so its rebase is a lock recompile.
     "fastapi==0.143.1",
     "uvicorn==0.34.0",
+    # S1-11 market status (Q8). Keep it current: its calendars reach about a year
+    # ahead, and unscheduled closures arrive only in library releases.
+    "exchange-calendars==4.13.2",
 ]
 
 [project.optional-dependencies]
@@ -43,8 +47,8 @@ include = [
     "development/backend/tests/test_pr22_auth_hardening.py",
     "development/backend/tests/test_pr22_auth_hardening_edges.py",
     "development/backend/tests/test_pr22_confirm_prefix.py",
-    "development/database/migrations/versions/20261018_0011_supabase_accounts.py",
-    "development/database/migrations/versions/20261018_0012_registration_email_check.py",
+    "development/database/migrations/versions/20261018_0013_supabase_accounts.py",
+    "development/database/migrations/versions/20261018_0014_registration_email_check.py",
 ]
 
 [tool.ruff.lint]
@@ -86,6 +90,7 @@ files = [
     "development/backend/src/api/app.py",
     "development/backend/src/api/dashboard.py",
     "development/backend/src/api/dashboard_fixture.py",
+    "development/backend/src/api/market_status.py",
     "development/backend/src/api/rate_limit.py",
     "development/backend/src/api/read.py",
 ]
@@ -109,4 +114,9 @@ follow_imports = "silent"
 
 [[tool.mypy.overrides]]
 module = ["apscheduler.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# S1-11's calendar library ships no type information.
+module = ["exchange_calendars"]
 ignore_missing_imports = true

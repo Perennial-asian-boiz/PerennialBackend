@@ -35,18 +35,28 @@ MUTABLE += ("gdelt_theme_days", "gdelt_spike_checks")
 # Profiles are reviewed seed data written by the owner; the pipeline only reads them.
 IMMUTABLE += ("security_identifiers",)
 REFERENCE = ("company_profiles",)
+# M4 market caps through the ingestion contract: batch rows and publication pins.
+IMMUTABLE += ("market_caps", "publication_market_cap_rows")
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # M5 read API (perennial_api): published data only, never raw source tables,
 # runs or operator text. Two grants are column-level, so code selects columns.
 API_TABLES = ("publications", "current_publication", "securities", "security_identifiers")
 API_COLUMNS = {
-    "company_profiles": ("id", "sector", "industry"),
+    # S1-12: the stored summary it serves; never summary_grade or description_digest.
+    "company_profiles": ("id", "sector", "industry", "summary", "summary_status",
+                         "summary_source_name", "summary_source_url", "summary_as_of"),
     "publication_events": ("id", "publication_id", "kind", "checks", "created_at"),
 }
 SUPABASE_API_ROLES = ("anon", "authenticated", "service_role")
 SHARED_DATABASE_NOTICE = ("Schema auth exists, so this is a shared (Supabase) database: PUBLIC keeps CONNECT and "
                           "TEMPORARY, which the platform's own logins connect through")
 log = logging.getLogger(__name__)
+
+
+def _present_roles(conn, names):
+    """The given role names that exist on this server, in order."""
+    return [r for r in names
+            if conn.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (r,)).fetchone()]
 
 
 def _refuse_supabase_exposure(conn, supabase_roles):
@@ -56,8 +66,7 @@ def _refuse_supabase_exposure(conn, supabase_roles):
     does not cover named roles, so this is asserted rather than assumed. Names
     that do not exist on this server (local and CI) are skipped.
     """
-    present = [r for r in supabase_roles
-               if conn.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (r,)).fetchone()]
+    present = _present_roles(conn, supabase_roles)
     if not present or not conn.execute("SELECT to_regnamespace('perennial')").fetchone()[0]:
         return
     exposed = conn.execute(
@@ -166,10 +175,10 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
     if conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()[0]:
         _give_to_owner(conn, owner, "TABLE", sql.Identifier("public", "alembic_version"),
                        relation_owner, ("public", "alembic_version"))
+    groups = sql.SQL(", ").join(sql.Identifier(r) for r in (importer, reader, api))
     with _as_owner(conn, owner):
         for table in TABLES:
             ident = sql.Identifier("perennial", table)
-            groups = sql.SQL(", ").join(sql.Identifier(r) for r in (importer, reader, api))
             conn.execute(sql.SQL("REVOKE ALL ON TABLE {} FROM PUBLIC, {}").format(ident, groups))
             columns = [sql.Identifier(r[0]) for r in conn.execute(
                 "SELECT column_name FROM information_schema.columns WHERE table_schema='perennial' AND table_name=%s",
@@ -207,6 +216,12 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
         if conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()[0]:
             conn.execute(sql.SQL("REVOKE ALL ON TABLE public.alembic_version FROM PUBLIC, {}, {}, {}")
                          .format(sql.Identifier(importer), sql.Identifier(reader), sql.Identifier(api)))
+            # A restore as the admin recreates it under the admin's default ACL in public;
+            # on Supabase that grants the Data API roles ALL, a write path to the migration pointer.
+            present = _present_roles(conn, supabase_roles)
+            if present:
+                conn.execute(sql.SQL("REVOKE ALL ON TABLE public.alembic_version FROM {}")
+                             .format(sql.SQL(", ").join(sql.Identifier(r) for r in present)))
 
 
 @contextmanager

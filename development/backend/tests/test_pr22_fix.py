@@ -77,20 +77,34 @@ def as_role(engine, role, subject=None):
 # ── RB-2: migrations ─────────────────────────────────────
 
 
+# #22's own app migrations, found by content rather than number (they're
+# renumbered as main's migrations land below them): every migration that touches
+# schema app. Main's perennial migrations never do.
+APP_SCHEMA = re.compile(r"\bapp\.|CREATE SCHEMA (IF NOT EXISTS )?app\b|schema=['\"]app['\"]")
+
+
+def _app_migrations(revisions):
+    return [r for r in revisions if APP_SCHEMA.search(Path(r.path).read_text())]
+
+
 def test_one_head_numbered_revisions_and_the_ruff_include(engine):
-    """RB-2a (also a gate at #22's final merge)."""
+    """RB-2a (also a gate at #22's final merge): #22's app migrations are
+    format-checked. Narrowed by the coordinator (2026-10-25) from "every migration
+    after 0010", so a merged main migration (market caps' 0011) isn't reformatted."""
     script = _script()
     assert len(script.get_heads()) == 1
     revisions = list(script.walk_revisions())
     assert all(re.fullmatch(r"\d{4}", r.revision) for r in revisions)
     app_rev, down = _app_revision()
     assert app_rev > "0010" and down is not None
+    app_migrations = _app_migrations(revisions)
+    assert app_rev in {r.revision for r in app_migrations}
+    assert all(r.revision >= app_rev for r in app_migrations), "an app migration before schema app"
     pyproject = (REPO / "pyproject.toml").read_text()
-    for rev in revisions:
-        if rev.revision > "0010":
-            name = Path(rev.path).name
-            assert name in pyproject, f"{name} is not format-checked"
-            assert re.fullmatch(r"\d{8}_\d{4}_[a-z0-9_]+\.py", name)
+    for rev in app_migrations:
+        name = Path(rev.path).name
+        assert name in pyproject, f"{name} is not format-checked"
+        assert re.fullmatch(r"\d{8}_\d{4}_[a-z0-9_]+\.py", name)
 
 
 def test_no_migration_creates_tables_in_perennial_beyond_the_models(engine):
@@ -343,11 +357,13 @@ def test_read_routes_use_the_read_only_helper_once_in_the_integrated_app(
     with integrated_app(engine, pr22_roles, monkeypatch) as (app, _, _), TestClient(app) as c:
         monkeypatch.setattr(read, "read_transaction", recording)
         read_paths = [p for p in v1_routes(app) if not p.startswith(("/v1/auth", "/v1/me"))]
-        assert sorted(read_paths) == ["/v1/securities/{symbol}", "/v1/watchlist"]
+        assert sorted(read_paths) == [
+            "/v1/market-status", "/v1/securities/{symbol}", "/v1/watchlist"]
         for path in read_paths:
             calls.clear()
             assert c.get(path.replace("{symbol}", "ZZAA")).status_code == 200
-            assert len(calls) == 1, path
+            # Every database read uses the helper once; S1-11's market status uses no database.
+            assert len(calls) == (0 if path == "/v1/market-status" else 1), path
 
 
 def _call(app, path, **kwargs):

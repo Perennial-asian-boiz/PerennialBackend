@@ -19,6 +19,7 @@ Design: docs/work-items/m5-read-api-design-note.md. Schemas: docs/technical-spec
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from datetime import timezone
@@ -32,6 +33,7 @@ from sqlalchemy.engine import Connection, Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from src.api import market_status
 from src.api.rate_limit import (
     Kind,
     RateLimitConfig,
@@ -114,6 +116,19 @@ class WatchlistResponse(BaseModel):
     watchlist: dict[str, Any] = Field(description="publications.output, verbatim")
 
 
+class SummarySource(BaseModel):
+    name: str = Field(description="Who published the description")
+    url: str = Field(description="An https link to that description")
+
+
+class Summary(BaseModel):
+    text: str = Field(
+        description="2 to 4 sentences, verbatim from the source's description"
+    )
+    source: SummarySource
+    as_of: str = Field(description="When it was stored: ISO 8601, UTC")
+
+
 class Security(BaseModel):
     id: int
     symbol: str
@@ -125,6 +140,9 @@ class Security(BaseModel):
     is_active: bool
     sector: str | None
     industry: str | None
+    summary: Summary | None = Field(
+        description="A brief company summary (S1-12), or null when there is none"
+    )
 
 
 class SecurityCurrent(BaseModel):
@@ -138,6 +156,59 @@ class SecurityResponse(BaseModel):
     api_version: str = Field(examples=[API_VERSION])
     security: Security
     current: SecurityCurrent
+
+
+class MarketStatusResponse(BaseModel):
+    exchange: str = Field(description="XNYS: the New York Stock Exchange calendar")
+    is_open: bool = Field(description="True during regular hours only")
+    session: str = Field(description="regular or closed")
+    label: str = Field(description="Market Open or Market Closed")
+    note: str = Field(description="The regular hours, and that extended hours exist")
+    as_of: str = Field(description="When this was computed: ISO 8601, UTC")
+    next_open: str = Field(
+        description="The next session's open: ISO 8601, America/New_York offset"
+    )
+    next_close: str = Field(
+        description="While open, today's close; while closed, the next session's"
+        " close: ISO 8601, America/New_York offset"
+    )
+    early_close: bool = Field(
+        description="True when the session next_close belongs to closes early"
+    )
+
+
+MARKET_STATUS_EXAMPLES = {
+    "open": {
+        "summary": "Open (a Monday, 10:00 a.m. ET)",
+        "value": {
+            "exchange": "XNYS",
+            "is_open": True,
+            "session": "regular",
+            "label": "Market Open",
+            "note": "Regular hours, 9:30 a.m.–4:00 p.m. ET."
+            " Some brokers allow extended-hours trading.",
+            "as_of": "2026-10-26T14:00:00Z",
+            "next_close": "2026-10-26T16:00:00-04:00",
+            "next_open": "2026-10-27T09:30:00-04:00",
+            "early_close": False,
+        },
+    },
+    "closed": {
+        "summary": "Closed (a Saturday)",
+        "value": {
+            "exchange": "XNYS",
+            "is_open": False,
+            "session": "closed",
+            "label": "Market Closed",
+            "note": "Regular hours, 9:30 a.m.–4:00 p.m. ET."
+            " Some brokers allow extended-hours trading.",
+            "as_of": "2026-10-31T16:00:00Z",
+            "next_open": "2026-11-02T09:30:00-05:00",
+            "next_close": "2026-11-02T16:00:00-05:00",
+            "early_close": False,
+        },
+    },
+}
 
 
 class ErrorBody(BaseModel):
@@ -239,6 +310,33 @@ def _envelope(conn: Connection, publication_id: int) -> tuple[dict[str, Any], An
     return meta, output
 
 
+# https with a host only, as migration 0012's CHECK has it (CS-5).
+_HTTPS_URL = re.compile(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?([/?#][^\s]*)?")
+
+
+def _summary(found: Any) -> dict[str, Any] | None:
+    """S1-12 CS-5: the stored excerpt and its source, or None.
+
+    None unless the status is ok and every part is stored. A URL that isn't https
+    is served as None too, although the database already refuses one.
+    """
+    url = found.summary_source_url
+    if (
+        found.summary_status != "ok"
+        or not found.summary
+        or not found.summary_source_name
+        or found.summary_as_of is None
+        or not isinstance(url, str)
+        or not _HTTPS_URL.fullmatch(url)
+    ):
+        return None
+    return {
+        "text": found.summary,
+        "source": {"name": found.summary_source_name, "url": url},
+        "as_of": found.summary_as_of.astimezone(timezone.utc).isoformat(),
+    }
+
+
 def _security(conn: Connection, symbol: str) -> Any:
     """Resolve a ticker through security_identifiers (BRK-B finds BRK.B)."""
     s, ids, p = m.securities, m.security_identifiers, m.company_profiles
@@ -254,6 +352,11 @@ def _security(conn: Connection, symbol: str) -> Any:
             s.c.is_active,
             p.c.sector,
             p.c.industry,
+            p.c.summary,
+            p.c.summary_status,
+            p.c.summary_source_name,
+            p.c.summary_source_url,
+            p.c.summary_as_of,
         )
         .select_from(
             ids.join(s, s.c.id == ids.c.security_id).outerjoin(
@@ -447,9 +550,26 @@ def get_security(symbol: str, request: Request) -> Response:
         "is_active": bool(found.is_active),
         "sector": found.sector,
         "industry": found.industry,
+        "summary": _summary(found),
     }
     body = {"api_version": API_VERSION, "security": security, "current": current}
     return CanonicalJSONResponse(body, headers={"Cache-Control": "no-cache"})
+
+
+@router.get(
+    "/market-status",
+    response_model=MarketStatusResponse,
+    responses={
+        200: {"content": {"application/json": {"examples": MARKET_STATUS_EXAMPLES}}}
+    },
+)
+def get_market_status() -> Response:
+    """Whether the US stock market is in regular hours, and its next open and
+    close (S1-11). No database; cached until at most the next transition."""
+    body, max_age = market_status.status(market_status.now())
+    return CanonicalJSONResponse(
+        body, headers={"Cache-Control": f"public, max-age={max_age}"}
+    )
 
 
 # ── startup refusal (RA-15) ──────────────────────────────

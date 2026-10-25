@@ -68,8 +68,72 @@ A security by ticker or alias, with its entry in the current publication.
 | `is_active` | boolean | false for a retired security |
 | `sector` | string or null | from the reviewed company profile |
 | `industry` | string or null | from the reviewed company profile |
+| `summary` | object or null | a brief company summary (S1-12); see below. Always present |
 
 The profile's `legal_name`, `cik` and other columns are never served.
+
+### The `summary` object
+
+A short excerpt of a published company description, stored at ingestion. The API reads only stored columns: no provider, model or network call happens at request time.
+
+```json
+"summary": {
+  "text": "Synthetic Widgets makes small parts for home tools. It sells them to stores in many states.",
+  "source": {"name": "Synthetic Filings", "url": "https://filings.example.com/zzsw/profile"},
+  "as_of": "2026-10-20T12:00:00+00:00"
+}
+```
+
+- **`text`:** 2 to 4 sentences, verbatim from the source's description. There's no rewritten summary (Bryan declined Q9). Show it with "Source: <name>", linked to `source.url`.
+- **`source.url`** is always `https` with a host. A summary whose stored URL is anything else is served as `null` (the database already refuses one).
+- **`as_of`:** when the summary was stored, ISO 8601 in UTC (`+00:00`), like the publication's `created_at`.
+- **`"summary": null`** when the security has no company profile, no stored summary, or its summary status is `unavailable`. Show "Summary not available".
+- The route has no `ETag` (`Cache-Control: no-cache`). If one is ever added, it must cover `as_of`.
+- The profile's readability grade and description digest are never served.
+
+## `GET /v1/market-status`
+
+Whether the US stock market (the NYSE calendar, `XNYS`) is in regular hours, and its next open and close (S1-11). It's public, touches no database and takes no input: query parameters and headers don't change the answer. Unlike the other routes, its body has no `api_version`.
+
+Open (a Monday, 10:00 a.m. ET):
+
+```json
+{
+  "exchange": "XNYS",
+  "is_open": true,
+  "session": "regular",
+  "label": "Market Open",
+  "note": "Regular hours, 9:30 a.m.–4:00 p.m. ET. Some brokers allow extended-hours trading.",
+  "as_of": "2026-10-26T14:00:00Z",
+  "next_close": "2026-10-26T16:00:00-04:00",
+  "next_open": "2026-10-27T09:30:00-04:00",
+  "early_close": false
+}
+```
+
+Closed (a Saturday):
+
+```json
+{
+  "exchange": "XNYS",
+  "is_open": false,
+  "session": "closed",
+  "label": "Market Closed",
+  "note": "Regular hours, 9:30 a.m.–4:00 p.m. ET. Some brokers allow extended-hours trading.",
+  "as_of": "2026-10-31T16:00:00Z",
+  "next_open": "2026-11-02T09:30:00-05:00",
+  "next_close": "2026-11-02T16:00:00-05:00",
+  "early_close": false
+}
+```
+
+- **Open** means regular hours only, from the session's open (inclusive) to its close (exclusive). `session` is `regular` or `closed`, and `label` is exactly `Market Open` or `Market Closed`.
+- **`next_open` and `next_close` are never null.** While open, `next_close` is today's close and `next_open` is the next session's open. While closed, `next_open` is the next session's open and `next_close` is that same session's close.
+- **`early_close`** describes the session `next_close` belongs to. When it's true, `note` reads "Regular hours, 9:30 a.m.–1:00 p.m. ET (early close). Some brokers allow extended-hours trading.", with the closing time from the calendar.
+- **Times:** ISO 8601. `next_open` and `next_close` carry the America/New_York offset (`-04:00` or `-05:00`), and `as_of` is UTC with whole seconds. The process time zone has no effect.
+- **Holidays and early closes** come from the `exchange_calendars` library, never from a hand-kept list. Its calendars reach about a year ahead, and unscheduled closures arrive only in library releases, so keep its pin current.
+- **Caching:** `Cache-Control: public, max-age=N`, where N is the whole seconds until the next open or close, at most 15 and at least 1. A cached answer never spans a transition, so a client polling every 30 seconds sees a change within 45.
+- **Errors:** only `429 rate_limited`, from the `read` bucket.
 
 ## Rate limiting
 

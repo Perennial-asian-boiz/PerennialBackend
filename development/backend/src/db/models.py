@@ -50,9 +50,12 @@ SUBJECTLESS_SOURCES: tuple[str, ...] = (
     "gdelt_theme_articles",
     "gdelt_spike_results",  # derived from gdelt_theme_volume (collection_mode derived)
 )
-# The closed source vocabulary (CHECKs, CLI, locks). Append only: lifecycle lock
-# keys are derived from each source's position.
-SOURCES = WATCHLIST_SOURCES + SUBJECTLESS_SOURCES
+# Sources a publication pins row by row (publication_market_cap_rows), not by
+# one batch in publication_sources. Not watchlist sources (M4 MC-A).
+PINNED_ROW_SOURCES: tuple[str, ...] = ("market_caps",)
+# The closed source vocabulary (CHECKs, CLI, locks). Append only; lifecycle lock
+# keys are explicit per source (SOURCE_LOCK_KEYS).
+SOURCES = WATCHLIST_SOURCES + SUBJECTLESS_SOURCES + PINNED_ROW_SOURCES
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live", "derived")
 PUBLICATION_EVENT_KINDS = ("quality_passed", "quality_override", "degraded", "rollback")
@@ -105,10 +108,42 @@ company_profiles = Table(
             name="fk_company_profiles_insider_reporting_security_id_securities",
         ),
     ),
+    # S1-12: the stored excerpt, its source, and the SHA-256 of the description it
+    # came from. The description itself is never stored (migration 0012).
+    Column("summary", Text),
+    Column("summary_grade", Numeric(5, 2)),
+    Column("summary_status", String(16)),
+    Column("summary_source_name", String(128)),
+    Column("summary_source_url", Text),
+    Column("summary_as_of", DateTime(timezone=True)),
+    Column("description_digest", String(64)),
     UniqueConstraint("cik"),
     CheckConstraint("cik IS NULL OR cik ~ '^[0-9]{10}$'", name="cik_format"),
     CheckConstraint(
         "legal_name IS NULL OR btrim(legal_name) <> ''", name="legal_name_not_blank"
+    ),
+    CheckConstraint(
+        "summary IS NULL OR (btrim(summary) <> '' AND char_length(summary) <= 4000)",
+        name="summary_not_blank",
+    ),
+    CheckConstraint(
+        "summary_status IS NULL OR summary_status IN ('ok', 'unavailable')",
+        name="summary_status",
+    ),
+    CheckConstraint(
+        "summary_source_name IS NULL OR btrim(summary_source_name) <> ''",
+        name="summary_source_name_not_blank",
+    ),
+    # https with a host only: the API never serves another scheme (CS-5).
+    CheckConstraint(
+        "summary_source_url IS NULL OR (char_length(summary_source_url) <= 2048"
+        " AND summary_source_url"
+        " ~ '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?([/?#][^[:space:]]*)?$')",
+        name="summary_source_url_https",
+    ),
+    CheckConstraint(
+        "description_digest IS NULL OR description_digest ~ '^[0-9a-f]{64}$'",
+        name="description_digest_sha256",
     ),
 )
 
@@ -426,6 +461,30 @@ gdelt_spike_results = Table(
     CheckConstraint("observed_baseline_days >= 0", name="observed_baseline_days"),
 )
 
+# M4 market caps through the ingestion contract (MC-A): one row per security
+# per batch, from one provider adapter. retrieved_at is the run's collected_at.
+market_caps = Table(
+    "market_caps",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("value", Numeric(24, 2)),  # NULL: the provider returned no value
+    Column("currency", String(3), nullable=False),
+    # In the row, not only the envelope: the envelope is not part of batch identity.
+    Column("provider", String(32), nullable=False),
+    Column("issuer_level", Boolean, nullable=False),  # never summed across classes
+    Column("observed_at", DateTime(timezone=True)),
+    Column("sector", String(64)),
+    Column("industry", String(128)),
+    UniqueConstraint("batch_id", "security_id"),
+    UniqueConstraint("id", "batch_id", "security_id"),  # target of the pin FK
+    CheckConstraint("value IS NULL OR value > 0", name="positive_value"),
+    CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency"),
+    CheckConstraint("provider ~ '^[a-z0-9_]{1,32}$'", name="provider"),
+)
+Index("ix_market_caps_security_id", market_caps.c.security_id)
+
 SOURCE_TABLES = {
     "congress_trades": congress_trades,
     "ark_holdings": ark_holdings,
@@ -434,6 +493,7 @@ SOURCE_TABLES = {
     "gdelt_theme_volume": gdelt_theme_volume,
     "gdelt_theme_articles": gdelt_theme_articles,
     "gdelt_spike_results": gdelt_spike_results,
+    "market_caps": market_caps,
 }
 
 # These tables make collection lineage and publication explicit. Historical
@@ -577,6 +637,66 @@ publication_market_caps = Table(
             f"{SCHEMA}.market_cap_observations.security_id",
         ],
     ),
+)
+
+# The exact market_caps row a publication used for each candidate (M4 MC-A).
+# Every candidate gets a pin; all-NULL lineage means it was unavailable. The
+# run records which retrieval made the row eligible: a reused batch can belong
+# to several runs.
+publication_market_cap_rows = Table(
+    "publication_market_cap_rows",
+    metadata,
+    Column(
+        "publication_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.publications.id"),
+        primary_key=True,
+    ),
+    Column(
+        "security_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.securities.id"),
+        primary_key=True,
+    ),
+    Column("source", String(32), nullable=False),
+    Column("run_id", BigInteger),
+    Column("batch_id", BigInteger),
+    Column("market_cap_id", BigInteger),
+    ForeignKeyConstraint(
+        ["run_id", "batch_id", "source"],
+        [
+            f"{SCHEMA}.ingestion_runs.id",
+            f"{SCHEMA}.ingestion_runs.batch_id",
+            f"{SCHEMA}.ingestion_runs.source",
+        ],
+    ),
+    ForeignKeyConstraint(
+        ["market_cap_id", "batch_id", "security_id"],
+        [
+            f"{SCHEMA}.market_caps.id",
+            f"{SCHEMA}.market_caps.batch_id",
+            f"{SCHEMA}.market_caps.security_id",
+        ],
+    ),
+    CheckConstraint("source = 'market_caps'", name="source"),
+    # The composite FKs only apply when every column is set.
+    CheckConstraint(
+        "(run_id IS NULL AND batch_id IS NULL AND market_cap_id IS NULL) OR "
+        "(run_id IS NOT NULL AND batch_id IS NOT NULL AND market_cap_id IS NOT NULL)",
+        name="lineage_all_or_none",
+    ),
+)
+Index(
+    "ix_publication_market_cap_rows_run_batch_source",
+    publication_market_cap_rows.c.run_id,
+    publication_market_cap_rows.c.batch_id,
+    publication_market_cap_rows.c.source,
+)
+Index(
+    "ix_publication_market_cap_rows_market_cap_batch_security",
+    publication_market_cap_rows.c.market_cap_id,
+    publication_market_cap_rows.c.batch_id,
+    publication_market_cap_rows.c.security_id,
 )
 
 current_publication = Table(

@@ -124,7 +124,17 @@ def engine(migrated_engine):
     )
     with migrated_engine.begin() as conn:
         conn.execute(text(f"TRUNCATE {names} RESTART IDENTITY CASCADE"))
-    return migrated_engine
+    yield migrated_engine
+    # M4 MCB-4b, after every test: no publication pins market caps both ways.
+    with migrated_engine.connect() as conn:
+        both = conn.execute(text(
+            "SELECT to_regclass('perennial.publication_market_cap_rows') IS NOT NULL"
+            " AND to_regclass('perennial.publication_market_caps') IS NOT NULL"
+        )).scalar() and conn.execute(text(
+            "SELECT count(*) FROM perennial.publication_market_caps l"
+            " JOIN perennial.publication_market_cap_rows r USING (publication_id)"
+        )).scalar()
+    assert not both, "a publication has pins in both market-cap pin tables"
 
 
 @pytest.fixture

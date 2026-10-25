@@ -703,6 +703,7 @@ def test_legacy_fmp_run_matches_fab7188_golden_and_buy_count(
     _freeze_golden_time(fmp, monkeypatch, legacy_golden)
     monkeypatch.setattr(fmp, "FMP_API_KEY", "synthetic-golden-key")
     monkeypatch.setattr(fmp, "LOCAL_DATA_DIR", tmp_path)
+    monkeypatch.setattr(fmp, "INCLUDE_HOUSE_CLERK", False)  # golden is FMP-only
     inputs = legacy_golden["inputs"]
     monkeypatch.setattr(
         fmp, "legacy_fetch_chamber_trades", lambda c: copy.deepcopy(inputs["fmp_" + c])
