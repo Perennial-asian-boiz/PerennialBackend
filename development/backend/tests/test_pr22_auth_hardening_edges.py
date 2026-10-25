@@ -12,7 +12,7 @@ import threading
 import pytest
 from sqlalchemy import text
 
-from test_pr22_auth_hardening import (  # noqa: F401  (pr22_roles: pytest fixture)
+from test_pr22_auth_hardening import (  # noqa: F401  (api, pr22_roles: fixtures)
     EMAIL,
     ROOMY,
     SEND_REFUSED,
@@ -20,6 +20,7 @@ from test_pr22_auth_hardening import (  # noqa: F401  (pr22_roles: pytest fixtur
     UNIFORM,
     WAIT,
     age_challenge,
+    api,
     assert_send_refused,
     blocking,
     budget,
@@ -86,6 +87,66 @@ def test_a_logout_during_an_in_flight_login_leaves_its_code_unusable(roomy, engi
     assert pending[1], "the in-flight login didn't finish"
     assert verify(client, pending[1][0]).status_code == 400
     assert all(s.revoked_at is not None for s in sessions(engine, body["user"]["id"]))
+
+
+def _another_address(provider, monkeypatch):
+    def hook(token):  # Supabase's identity for this session names someone else
+        provider.tokens[token] = {**provider.tokens[token], "email": "other@example.com"}
+
+    provider.hooks["identity"] = hook
+    return 400, {"detail": "Invalid verification code."}, 1  # the counted 400
+
+
+def _identity_refused(provider, monkeypatch):
+    from src.api.supabase_auth import AuthProviderError
+
+    def hook(token):
+        raise AuthProviderError(401)
+
+    provider.hooks["identity"] = hook
+    error = AuthProviderError(401)
+    return error.status, {"detail": error.message, "code": error.code, "field_errors": {}}, 0
+
+
+def _malformed_body(provider, monkeypatch):
+    from src.api.supabase_auth import AuthProviderError
+
+    real = provider.verify_code
+    monkeypatch.setattr(provider, "verify_code",  # a session, but no refresh token
+                        lambda *a, **k: {"access_token": real(*a, **k)["access_token"]})
+    error = AuthProviderError()
+    return error.status, {"detail": error.message, "code": error.code, "field_errors": {}}, 0
+
+
+@pytest.mark.parametrize("logout_fails", [False, True], ids=["logout_ok", "logout_fails"])
+@pytest.mark.parametrize("refusal", [_another_address, _identity_refused, _malformed_body],
+                         ids=["email_mismatch", "identity_refused", "malformed_body"])
+def test_a_session_supabase_issued_for_a_refused_verify_gets_one_local_logout(
+    api, engine, monkeypatch, refusal, logout_fails  # noqa: F811
+):
+    """Supabase accepted the code, so a session exists there; verify-otp refuses it
+    anyway. Like the lost-race path, it logs that session out once, locally and with
+    no connection held, and answers exactly as before whether or not that works."""
+    from src.api.supabase_auth import AuthProviderError
+
+    client, provider, _ = api
+    confirmed_user(provider)
+    challenge_id = login(client)
+    status, detail, attempts = refusal(provider, monkeypatch)
+    if logout_fails:
+
+        def unavailable(*args, **kwargs):
+            raise AuthProviderError(503)
+
+        provider.hooks["logout"] = unavailable
+    response = verify(client, challenge_id)
+    assert (response.status_code, response.json()) == (status, detail)
+    assert [r.attempts for r in challenges(engine, EMAIL)] == [attempts]
+    assert sessions(engine, provider.users[EMAIL]["id"]) == []
+    issued = provider.named("verify_code")[-1].result["access_token"]
+    logouts = [(c.args[0] == issued, c.kwargs.get("scope"), c.checked_out)
+               for c in provider.named("logout")]
+    assert logouts == [(True, "local", 0)], logouts
 
 
 PROXY = ("10.0.0.1", 4000)

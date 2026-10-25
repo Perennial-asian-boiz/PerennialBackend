@@ -1401,12 +1401,21 @@ def test_ah9c_two_app_instances_on_one_database_share_one_budget(
 def test_ah9c_one_short_concurrent_requests_send_exactly_one_email(
     engine, pr22_roles, monkeypatch  # noqa: F811
 ):
+    from src.api import accounts
+
     with budgeted(engine, pr22_roles, monkeypatch, total=5, recovery=2, signup=2, share=1) as (
         _, provider, app
     ):
         seed_challenge(engine, "login", email="earlier@example.com", send_count=4, consumed=True)
         emails = users(provider, 5)
-        provider.hooks["send_code"] = lambda *a, **k: time.sleep(0.2)  # widen the race
+        real = accounts.reserve_email
+
+        def held_open(*args, **kwargs):  # force the race: hold count-to-insert open
+            key = real(*args, **kwargs)
+            time.sleep(0.3)
+            return key
+
+        monkeypatch.setattr(accounts, "reserve_email", held_open)
         threads = [run(post_login, peer(app, n + 1), email) for n, email in enumerate(emails)]
         for thread, _ in threads:
             thread.join(WAIT * 2)
