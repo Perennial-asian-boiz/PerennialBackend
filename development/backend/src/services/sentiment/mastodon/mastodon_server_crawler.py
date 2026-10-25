@@ -209,8 +209,25 @@ def write_json_atomic(path, results):
     os.replace(tmp, path)  # never leaves a half-written file
 
 
+def quiet_network_errors(loop, context):
+    """Asyncio exception handler that drops network errors nobody is waiting for.
+
+    aiohttp resolves DNS in a shielded task. When the request that needed it is
+    cancelled first (timeout, or the TIME_LIMIT shutdown), the lookup still finishes,
+    and for a dead domain it fails with socket.gaierror. Nothing retrieves that
+    error, so asyncio would print a full traceback ("exception in shielded future")
+    for every dead domain. Those failures are expected while crawling. Anything else
+    still goes to the default handler.
+    """
+    exc = context.get("exception")
+    if isinstance(exc, (OSError, aiohttp.ClientError, asyncio.TimeoutError)):
+        return   # socket.gaierror is an OSError
+    loop.default_exception_handler(context)
+
+
 async def main():
     loop = asyncio.get_running_loop()
+    loop.set_exception_handler(quiet_network_errors)
     deadline = loop.time() + TIME_LIMIT if TIME_LIMIT else None
 
     connector = aiohttp.TCPConnector(
