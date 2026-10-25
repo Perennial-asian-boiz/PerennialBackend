@@ -52,9 +52,13 @@ def test_watchlist_lock_keys_are_pinned(engine):
 
     for offset, source in enumerate(WATCHLIST):
         with source_lock(engine, source), engine.connect() as conn:
+            # Advisory locks belong to a database. Count only this session's own, so a
+            # seat holding the same key in its database on a shared server can't count.
             held = conn.execute(
                 text(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                    "AND database = (SELECT oid FROM pg_database"
+                    " WHERE datname = current_database()) "
                     "AND ((classid::bigint << 32) | objid::bigint) = :key"
                 ),
                 {"key": 170010 + offset},

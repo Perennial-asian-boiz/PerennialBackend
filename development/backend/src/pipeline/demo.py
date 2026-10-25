@@ -233,6 +233,10 @@ def demo_settings(database_url: str) -> Any:
         database_url=SecretStr(database_url),
         fmp_api_key=SecretStr(PLACEHOLDER_KEY),
         finnhub_api_key=SecretStr(PLACEHOLDER_KEY),
+        # The replay serves recorded FMP pages for both chambers; the House
+        # Clerk has no fixture and would write a local report cache.
+        congress_house_source="fmp",
+        congress_include_fmp_senate=True,
     )
 
 
