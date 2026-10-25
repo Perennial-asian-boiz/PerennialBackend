@@ -49,6 +49,12 @@ SHARED_DATABASE_NOTICE = ("Schema auth exists, so this is a shared (Supabase) da
 log = logging.getLogger(__name__)
 
 
+def _present_roles(conn, names):
+    """The given role names that exist on this server, in order."""
+    return [r for r in names
+            if conn.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (r,)).fetchone()]
+
+
 def _refuse_supabase_exposure(conn, supabase_roles):
     """Fail before any change if a Supabase API role can reach schema perennial.
 
@@ -56,8 +62,7 @@ def _refuse_supabase_exposure(conn, supabase_roles):
     does not cover named roles, so this is asserted rather than assumed. Names
     that do not exist on this server (local and CI) are skipped.
     """
-    present = [r for r in supabase_roles
-               if conn.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (r,)).fetchone()]
+    present = _present_roles(conn, supabase_roles)
     if not present or not conn.execute("SELECT to_regnamespace('perennial')").fetchone()[0]:
         return
     exposed = conn.execute(
@@ -200,6 +205,12 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
         if conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()[0]:
             conn.execute(sql.SQL("REVOKE ALL ON TABLE public.alembic_version FROM PUBLIC, {}, {}, {}")
                          .format(sql.Identifier(importer), sql.Identifier(reader), sql.Identifier(api)))
+            # A restore as the admin recreates it under the admin's default ACL in public;
+            # on Supabase that grants the Data API roles ALL, a write path to the migration pointer.
+            present = _present_roles(conn, supabase_roles)
+            if present:
+                conn.execute(sql.SQL("REVOKE ALL ON TABLE public.alembic_version FROM {}")
+                             .format(sql.SQL(", ").join(sql.Identifier(r) for r in present)))
 
 
 @contextmanager
