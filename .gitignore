@@ -51,3 +51,22 @@ data/
 /.codex/plugins/
 # Also ignore a project-local venv selected through a symlink.
 .venv
+
+tickers.json
+
+# blue sky files
+bluesky_sentiments.json
+cursor.txt
+
+#mastodon data files
+mastodon_posts.json
+mastodon_servers.json
+mastodon_ticker_posts.json
+mastodon_item_scores.jsonl
+mastodon_ticker_sentiment.json
+
+/output
+/credentials
+
+*_cookies.txt
+*_sentiments.json
