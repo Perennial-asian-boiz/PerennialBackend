@@ -22,6 +22,9 @@ from test_collectors import FakeResponse, FakeSession
 
 KEY = "synthetic-fmp-key-0123456789"
 PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
+# Decision 78 (a): the source link is FMP's public home page for every symbol
+# (the per-company page only loads after logging in to FMP).
+HOME_URL = "https://financialmodelingprep.com/"
 DESCRIPTION = (
     "Synthetic Widgets makes small tools for homes.  It sells them in shops.\n"
     "Its staff work in one town."
@@ -114,13 +117,16 @@ def test_the_description_is_returned_verbatim():
     assert found.text == raw  # summarizing is the job's, not the adapter's
 
 
-def test_the_source_url_is_https_with_a_host_and_never_holds_the_key():
-    descriptions, _ = adapter(ok(profile()))
-    url = descriptions.fetch("ZZAA").url
+@pytest.mark.parametrize("symbol", ["ZZAA", "BRK.B", "ZZ-B"])
+def test_the_source_url_is_fmps_home_page_for_every_symbol(symbol):
+    descriptions, _ = adapter(ok(profile(symbol)))
+    url = descriptions.fetch(symbol).url
+    assert url == HOME_URL  # decision 78 (a)
     parts = urlsplit(url)
     assert parts.scheme == "https" and parts.hostname
     assert STORABLE_URL.fullmatch(url) and len(url) <= 2048
     assert "apikey" not in url.lower() and KEY not in url
+    assert symbol not in url and "%" not in url
 
 
 @pytest.mark.parametrize(
@@ -271,6 +277,7 @@ def test_the_job_stores_an_fmp_excerpt_with_the_safe_url(engine):
         )
     assert row["summary_status"] == "ok"
     assert row["summary_source_name"] == "Financial Modeling Prep"
+    assert row["summary_source_url"] == HOME_URL
     assert (
         "apikey" not in row["summary_source_url"].lower()
         and KEY not in row["summary_source_url"]
