@@ -514,8 +514,9 @@ def test_market_cap_tables_are_append_only_for_the_importer(engine):
 
     assert {"market_caps", "publication_market_cap_rows"} <= set(IMMUTABLE)
     suffix = secrets.token_hex(6)
-    roles = tuple(f"ops_test_{r}_{suffix}" for r in ("owner", "importer", "reader"))
-    owner, importer, reader = roles
+    # M5 R1: provisioning manages four groups, the API role last.
+    roles = tuple(f"ops_test_{r}_{suffix}" for r in ("owner", "importer", "reader", "api"))
+    owner, importer, reader, api = roles
     try:
         with engine.begin() as conn:
             raw = conn.connection.driver_connection
@@ -536,6 +537,8 @@ def test_market_cap_tables_are_append_only_for_the_importer(engine):
                     (reader, "UPDATE", False),
                     (reader, "DELETE", False),
                     (reader, "TRUNCATE", False),
+                    (api, "SELECT", False),  # never published data
+                    (api, "INSERT", False),
                 ):
                     got = conn.execute(
                         query,
