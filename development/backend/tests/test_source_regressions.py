@@ -9,7 +9,7 @@ import requests
 
 from src.ingestion import collectors
 from src.ingestion.schemas import ShortInterestRecord
-from tests.test_collectors import (
+from test_collectors import (
     NO_SLEEP,
     FakeResponse,
     FakeSession,

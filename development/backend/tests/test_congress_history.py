@@ -610,7 +610,7 @@ def _populate(engine, fixture_path, state):
 
 
 def _ark(engine):
-    from tests.conftest import FIXTURES
+    from conftest import FIXTURES
 
     rows = json.loads((FIXTURES / "ark_holdings.json").read_text())["holdings"]
     run = begin_run(engine, "ark_holdings", "live")
@@ -625,7 +625,7 @@ def _ark(engine):
 @pytest.mark.parametrize("state", ["watermark", "history", "gap", "dependency"])
 def test_downgrade_refuses_while_history_state_exists(engine, fixture_path, state):
     from alembic import command
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     pub = _populate(engine, fixture_path, state)
     stored = current(engine)["output"] if pub else None
@@ -652,7 +652,7 @@ def test_downgrade_refuses_while_history_state_exists(engine, fixture_path, stat
 
 def test_downgrade_still_works_without_history(engine):
     from alembic import command
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     with engine.connect() as conn:
         head = _version(conn)

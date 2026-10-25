@@ -46,7 +46,7 @@ def group_roles(names):
 @contextmanager
 def scratch(engine):
     """A fresh database and four unique role names; both are dropped afterwards."""
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     suffix = secrets.token_hex(5)
     names = {r: f"rd_{r}_{suffix}" for r in ("owner", "importer", "reader", "api")}
@@ -94,7 +94,7 @@ def migrate(target, revision="head", *, owner=None, down=False):
     test login or, with `owner`, as the owner's session role."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     with target.connect() as conn:
         if owner:
@@ -121,7 +121,7 @@ def head():
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
-    from tests.conftest import ALEMBIC_INI
+    from conftest import ALEMBIC_INI
 
     return ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
 
@@ -167,7 +167,7 @@ def supabase_style_admin(engine, target, names):
     """An administrative login shaped like Supabase's postgres: LOGIN, NOSUPERUSER,
     CREATEROLE and BYPASSRLS, owning the database. Added to `names`, so scratch()
     drops it last, after the database and the group roles."""
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     names["admin"] = f"rd_admin_{secrets.token_hex(5)}"
     password = f"synthetic-{secrets.token_hex(8)}"  # hex only, safe to inline in DDL
@@ -237,7 +237,7 @@ def _outsider_connects(engine, target, names):
     service logins (authenticator, supabase_auth_admin, ...) do."""
     from sqlalchemy.exc import OperationalError
 
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     names["outsider"] = f"rd_outsider_{secrets.token_hex(5)}"
     password = f"synthetic-{secrets.token_hex(8)}"

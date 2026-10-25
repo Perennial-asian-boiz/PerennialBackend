@@ -98,7 +98,7 @@ def test_a_perennial_schema_holding_only_a_view_is_refused(
 ):
     """The "at least one table exists" rule counts tables (r, p) only, so widening
     the writable predicate must not let a view stand in for the schema's tables."""
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     scratch = pinned_engine(engine.url.set(database=scratch_database))
     try:

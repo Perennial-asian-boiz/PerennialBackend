@@ -351,7 +351,7 @@ def _revisions():
     """(head, MIGRATION, PREVIOUS), checking the pins against the script directory."""
     from alembic.config import Config
     from alembic.script import ScriptDirectory
-    from tests.conftest import ALEMBIC_INI
+    from conftest import ALEMBIC_INI
 
     script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
     assert script.get_revision(MIGRATION).down_revision == PREVIOUS
@@ -362,7 +362,7 @@ def _revisions():
 def _at_migration(conn):
     """Downgrade the session database to MIGRATION (nothing to do while it's head)."""
     from alembic import command
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     command.downgrade(alembic_config(conn), MIGRATION)
     conn.commit()
@@ -385,7 +385,7 @@ def _schema(conn):
 @pytest.fixture
 def scratch_database(migrated_engine):
     """An empty database on the test server, dropped afterwards."""
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     url = migrated_engine.url
     name = f"perennial_test_mc_{secrets.token_hex(4)}"
@@ -409,7 +409,7 @@ def test_downgrade_restores_the_previous_schema_exactly_and_upgrades_again(
     from alembic import command
     from alembic.autogenerate import compare_metadata
     from alembic.migration import MigrationContext
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     head, migration, previous = _revisions()
     with scratch_database.connect() as conn:
@@ -482,7 +482,7 @@ def _populate(engine, state):
 @pytest.mark.parametrize("state", ["failed_run", "batch", "pin"])
 def test_downgrade_refuses_while_market_caps_state_exists(engine, state):
     from alembic import command
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     with engine.connect() as conn:
         require_market_caps(conn)
@@ -501,7 +501,7 @@ def test_downgrade_refuses_while_market_caps_state_exists(engine, state):
 def _refused_downgrade(engine, state, migration, previous):
     """With market_caps state present, MIGRATION -> PREVIOUS refuses atomically."""
     from alembic import command
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     _populate(engine, state)
     with engine.connect() as conn:

@@ -25,7 +25,7 @@ from src.ingestion.identity import (
     request_symbol,
     resolve_tickers,
 )
-from tests.conftest import alembic_config
+from conftest import alembic_config
 
 pytestmark = pytest.mark.db
 
