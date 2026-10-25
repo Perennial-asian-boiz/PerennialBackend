@@ -66,6 +66,7 @@ def test_ranking_config_holds_ranking_inputs_only(engine, fixture_path):
     saved = current(engine)
     assert set(saved["ranking_config"]) == {
         "market_cap_threshold",
+        "max_congress_candidates",
         "source_as_of",
         "freshness_seconds",
         "congress_window_years",  # ranking input: the D13 window over history

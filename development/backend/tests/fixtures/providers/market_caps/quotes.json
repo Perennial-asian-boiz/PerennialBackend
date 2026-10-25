@@ -1,0 +1,52 @@
+{
+  "quotes": {
+    "ZZAA": {
+      "value": "25000000000.00",
+      "currency": "USD",
+      "issuer_level": true,
+      "observed_at": null,
+      "sector": "Technology",
+      "industry": "Software - Infrastructure"
+    },
+    "ZZB.B": {
+      "value": "640000000000.00",
+      "currency": "USD",
+      "issuer_level": true,
+      "observed_at": null,
+      "sector": "Financial Services",
+      "industry": "Insurance - Diversified"
+    },
+    "ZZBB": {
+      "value": "4800000000.00",
+      "currency": "USD",
+      "issuer_level": true,
+      "observed_at": null,
+      "sector": "Healthcare",
+      "industry": "Biotechnology"
+    },
+    "ZZCC": {
+      "value": "12500000000.50",
+      "currency": "USD",
+      "issuer_level": true,
+      "observed_at": null,
+      "sector": "Energy",
+      "industry": "Oil & Gas Integrated"
+    },
+    "ZZDD": {
+      "value": "9999999999.99",
+      "currency": "USD",
+      "issuer_level": true,
+      "observed_at": null,
+      "sector": null,
+      "industry": null
+    },
+    "ZZEE": {
+      "value": "310000000.00",
+      "currency": "USD",
+      "issuer_level": true,
+      "observed_at": null,
+      "sector": "Industrials",
+      "industry": "Aerospace & Defense"
+    }
+  }
+}
