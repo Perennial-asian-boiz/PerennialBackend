@@ -48,7 +48,7 @@ def _script():
     from alembic.config import Config
     from alembic.script import ScriptDirectory
 
-    from tests.conftest import ALEMBIC_INI
+    from conftest import ALEMBIC_INI
 
     return ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
 
@@ -126,7 +126,7 @@ def test_round_trip_has_no_drift_including_schema_app(engine):
 
     from src.api.account_models import metadata as account_metadata
     from src.db.models import metadata
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     merged = MetaData()
     for registry in (metadata, account_metadata):
@@ -156,7 +156,7 @@ def test_downgrade_as_the_owner_refuses_while_profiles_exist(engine, pr22_roles)
     """RB-2d: run as the NOBYPASSRLS owner, which sees 0 rows under FORCE RLS."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     owner = pr22_roles["owner"]
     app_rev, down = _app_revision()
@@ -187,7 +187,7 @@ def test_downgrade_as_the_owner_succeeds_on_an_empty_database(engine, pr22_roles
     """RB-2d / RB-2c: an empty app downgrades as the owner."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     app_rev, down = _app_revision()
     with engine.connect() as conn:
@@ -802,7 +802,7 @@ def test_the_subject_never_carries_over_to_the_next_transaction(engine, pr22_rol
     """RB-8d, on one pooled connection as the API login."""
     from src.api import accounts
     from test_read_api import login
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     with login(engine, pr22_roles) as (api_engine, _, _):
         one = pinned_engine(api_engine.url, pool_size=1, max_overflow=0)

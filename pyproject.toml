@@ -51,8 +51,8 @@ include = [
     "development/backend/tests/test_pr22_auth_hardening.py",
     "development/backend/tests/test_pr22_auth_hardening_edges.py",
     "development/backend/tests/test_pr22_confirm_prefix.py",
-    "development/database/migrations/versions/20261018_0013_supabase_accounts.py",
-    "development/database/migrations/versions/20261018_0014_registration_email_check.py",
+    "development/database/migrations/versions/20261018_0014_supabase_accounts.py",
+    "development/database/migrations/versions/20261018_0015_registration_email_check.py",
 ]
 
 [tool.ruff.lint]

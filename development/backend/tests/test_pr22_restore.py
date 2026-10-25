@@ -160,7 +160,7 @@ def _pg_args(engine, database):
 @contextmanager
 def _database(engine, name=None):
     """A scratch database on the test server; yields (name, engine)."""
-    from tests.conftest import pinned_engine
+    from conftest import pinned_engine
 
     name = name or f"perennial_test_rb_{secrets.token_hex(4)}"
     admin = pinned_engine(engine.url, isolation_level="AUTOCOMMIT")
@@ -179,7 +179,7 @@ def _database(engine, name=None):
 def _migrate(scratch):
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     with scratch.connect() as conn:
         command.upgrade(alembic_config(conn), "head")

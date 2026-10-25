@@ -155,7 +155,7 @@ def test_a_refused_downgrade_leaves_0012_and_the_lookup_in_place(engine, pr22_ro
     nothing is repaired before the checks."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     _, down = _app_revision()
     with engine.begin() as conn:  # superuser: populate past RLS
@@ -190,7 +190,7 @@ def _upgrade_as_the_owner_then_provision(scratch, names):
     --phase grants and provision_api_role.py; the API ends exactly provisioned."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     with scratch.connect() as conn:
         _session_role(conn, names["owner"])
@@ -214,7 +214,7 @@ def _deployed_before_the_app_migrations(engine, scratch, names):
     down_revision. Looked up, not hard-coded: it moves as main's migrations land."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     provision_roles(scratch, names, "bootstrap")
     with scratch.connect() as conn:
@@ -247,7 +247,7 @@ def test_mo2_without_rebootstrap_the_owners_upgrade_fails_and_stays_before_the_a
     transaction, leaving the database at the app migration's down_revision."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     names = role_names("rd")
     try:
@@ -288,7 +288,7 @@ def older_dump(engine, tmp_path, request):
     revision: 0009 has fewer perennial tables, 0010 is main's head before #22."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     dump = tmp_path / f"{request.param}.dump"
     with _database(engine) as (source, scratch):
@@ -339,7 +339,7 @@ def test_an_older_backup_restores_with_upgrade_head_as_the_admin_before_grants(
     the target ends exactly provisioned."""
     from alembic import command
 
-    from tests.conftest import alembic_config
+    from conftest import alembic_config
 
     names = role_names("rr")
     try:
