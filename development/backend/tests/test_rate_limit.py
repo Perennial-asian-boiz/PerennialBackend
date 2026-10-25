@@ -433,9 +433,9 @@ def test_invalid_limits_and_proxy_entries_refuse_at_startup_with_one_fixed_error
 # ── RL-12: docs and the OpenAPI snapshot ─────────────────
 
 
-def test_both_read_routes_document_429():
+def test_every_read_route_documents_429():
     paths = _v1_openapi(_router_app())["paths"]
-    for path in ("/v1/watchlist", "/v1/securities/{symbol}"):
+    for path in ("/v1/watchlist", "/v1/securities/{symbol}", "/v1/market-status"):
         assert "429" in paths[path]["get"]["responses"], path
 
 
