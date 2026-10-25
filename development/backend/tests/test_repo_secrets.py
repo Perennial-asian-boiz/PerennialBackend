@@ -17,6 +17,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 import pytest
 
@@ -37,7 +38,11 @@ JWT_FIXTURES: dict[str, str] = {}
 # What an .env.example may put where a credential goes: your_fmp_key_here, or an
 # upper-case stand-in such as ENCODED_PASSWORD or [YOUR-PASSWORD] (letters only).
 PLACEHOLDER = re.compile(r"your_[a-z0-9_]+_here|\[?[A-Z]+(?:[_-][A-Z]+)*\]?|<[^<>]+>")
-CREDENTIAL_NAME = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD)$")
+# A credential by its name, numbered forms (KEY_2) included: a setting such as
+# FMP_API_KEY or DB_PASS, or a URL query parameter such as apikey or token.
+CREDENTIAL_NAME = re.compile(
+    r"(KEY|TOKEN|SECRET|PASSWORD|_PASS|PWD|CREDENTIALS?)(_?\d+)?$"
+)
 LOOPBACK = {"localhost", "127.0.0.1", "[::1]"}
 
 
@@ -78,27 +83,40 @@ def _url_password(value):
     return userinfo.split(":", 1)[1], host
 
 
+def _credential(name):
+    return bool(CREDENTIAL_NAME.search(name.upper().replace("-", "_")))
+
+
+def _query_credentials(value):
+    """Values of a URL's credential-named query parameters (FMP's ?apikey=...)."""
+    query = value.partition("?")[2].partition("#")[0]
+    return [v for k, v in parse_qsl(query, keep_blank_values=True) if _credential(k)]
+
+
 def env_example_problems(text):
     """(line, setting) for each credential an .env.example gives a real value:
-    a credential-named setting that isn't empty or a placeholder, or a URL whose
-    password isn't one (a loopback URL's development login is allowed)."""
+    a credential-named setting that isn't empty or a placeholder, a URL whose
+    password isn't one (a loopback URL's development login is allowed), or a URL
+    query parameter named like a credential that isn't empty or a placeholder."""
     problems = []
     for number, line in enumerate(text.splitlines(), 1):
-        setting = re.match(r"\s*(?:#\s*)?([A-Z][A-Z0-9_]*)=(.*)$", line)
+        setting = re.match(r"\s*(?:#\s*)?(?:export\s+)?([A-Z][A-Z0-9_]*)=(.*)$", line)
         if not setting:
             continue
         name, value = setting.group(1), setting.group(2).strip().strip("\"'")
         if "://" in value:
             login = _url_password(value)
-            if (
+            real_login = (
                 login
                 and login[1] not in LOOPBACK
                 and not PLACEHOLDER.fullmatch(login[0])
-            ):
+            )
+            real_query = any(
+                v and not PLACEHOLDER.fullmatch(v) for v in _query_credentials(value)
+            )
+            if real_login or real_query:
                 problems.append((number, name))
-        elif (
-            value and CREDENTIAL_NAME.search(name) and not PLACEHOLDER.fullmatch(value)
-        ):
+        elif value and _credential(name) and not PLACEHOLDER.fullmatch(value):
             problems.append((number, name))
     return problems
 
@@ -311,6 +329,60 @@ def test_a_real_looking_value_in_an_env_example_is_refused(line):
     name = re.match(r"\s*(?:#\s*)?([A-Z0-9_]+)=", line).group(1)
     number = len(GOOD_EXAMPLE.splitlines()) + 1
     assert env_example_problems(GOOD_EXAMPLE + line + "\n") == [(number, name)]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "FMP_URL=https://financialmodelingprep.com/api/v3/quote/ZZAA?apikey=abc123def456",
+        "FMP_URL=https://provider.example.com/v3?symbol=ZZAA&api_key=Synthetic9Key",
+        "FEED_URL=https://feed.example.com/rss?api-key=Synthetic9Key",
+        "WEBHOOK_URL=https://hooks.example.com/in?token=Synthetic9Token#frag",
+        "# SIGNER_URL=https://signer.example.com/?client_secret=Synthetic9Secret",
+        "DB_URL=postgresql://localhost/dev?password=Synthetic9Password",
+        "DB_PASS=Synthetic9Password",
+        "MAIL_PWD=Synthetic9Password",
+        "GOOGLE_CREDENTIALS=Synthetic9Credentials",
+        "FMP_API_KEY_2=abc123def456",
+        "FINNHUB_API_KEY2=abc123def456",
+        "export FINNHUB_API_KEY=abc123def456",
+        "# export YOUTUBE_API_KEY=AIzaSyntheticSentinelValue",
+    ],
+    ids=[
+        "fmp_apikey_query",
+        "api_key_query",
+        "hyphenated_query",
+        "token_query",
+        "commented_secret_query",
+        "loopback_query_password",
+        "pass",
+        "pwd",
+        "credentials",
+        "numbered_key",
+        "numbered_key_no_underscore",
+        "export",
+        "commented_export",
+    ],
+)
+def test_t1_t3_a_credential_in_a_query_a_new_name_form_or_an_export_is_refused(line):
+    name = re.match(r"\s*(?:#\s*)?(?:export\s+)?([A-Z0-9_]+)=", line).group(1)
+    number = len(GOOD_EXAMPLE.splitlines()) + 1
+    assert env_example_problems(GOOD_EXAMPLE + line + "\n") == [(number, name)]
+
+
+def test_t1_t3_placeholders_and_ordinary_names_stay_fine():
+    example = """\
+FMP_URL=https://financialmodelingprep.com/api/v3/quote?apikey=your_fmp_key_here
+FEED_URL=https://feed.example.com/rss?api_key=&format=json
+FMP_URL_2=https://financialmodelingprep.com/api/v3/quote?apikey=FMP_API_KEY
+SEARCH_URL=https://search.example.com/?q=keyword&sort_by=date&page=2
+export FMP_API_KEY=your_fmp_key_here
+DB_PASS=
+FMP_API_KEY_2=
+RLS_BYPASS=true
+PASSWORD_MIN_LENGTH_HINT=see docs
+"""
+    assert env_example_problems(example) == []
 
 
 def test_ipv6_loopback_development_logins_are_fine():
