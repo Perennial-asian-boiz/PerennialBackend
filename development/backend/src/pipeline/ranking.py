@@ -12,19 +12,74 @@ from typing import Any, Mapping, Sequence, cast
 
 # v3 ranks accumulated Congress history (2-year window) instead of one batch;
 # the scoring itself is unchanged from v2.
-VERSION = "watchlist-v3"
-DEFAULT_CONFIG = {"market_cap_threshold": "10000000000"}
+# v4 is v3 with Congress candidates capped at max_congress_candidates. With
+# complete House Clerk data every purchased ticker would otherwise be a
+# candidate (~650 a year), and each candidate costs one FMP market-cap request
+# against a 250-a-day free plan. v4 also ignores purchases dated after their
+# own disclosure: a trade cannot be reported before it happens, so the date is
+# a filer's typo (e.g. a 2025 trade written as 2026), and it would otherwise
+# become the ticker's "most recent" buy. Stored rows keep the date as filed.
+VERSION = "watchlist-v4"
+VERSIONS = ("watchlist-v1", "watchlist-v2", "watchlist-v3", "watchlist-v4")
+DEFAULT_CONFIG = {
+    "market_cap_threshold": "10000000000",
+    "max_congress_candidates": 100,
+}
 
 
-def candidate_symbols(rows: Mapping[str, Sequence[dict[str, Any]]]) -> list[str]:
-    return sorted(
-        {
-            r["symbol"]
-            for r in rows["congress_trades"]
-            if "purchase" in r["trade_type"].lower()
-        }
-        | {r["symbol"] for r in rows["ark_holdings"]}
+def candidate_symbols(
+    rows: Mapping[str, Sequence[dict[str, Any]]],
+    *,
+    version: str = VERSION,
+    config: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """
+    Symbols a publication evaluates (and fetches market caps for).
+
+    v1-v3: every Congress purchase symbol plus every ARK holding.
+    v4: the top `max_congress_candidates` Congress purchase symbols, by
+    distinct buyers, then buy count, then most recent transaction, then
+    symbol, counting only purchases with a plausible date; plus every ARK
+    holding.
+    """
+    ark = {r["symbol"] for r in rows["ark_holdings"]}
+    if version != "watchlist-v4":
+        return sorted(
+            {
+                r["symbol"]
+                for r in rows["congress_trades"]
+                if "purchase" in r["trade_type"].lower()
+            }
+            | ark
+        )
+    settings = dict(DEFAULT_CONFIG if config is None else config)
+    limit = int(
+        settings.get(
+            "max_congress_candidates", DEFAULT_CONFIG["max_congress_candidates"]
+        )
     )
+    purchases: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in _cross_provider_purchases(rows["congress_trades"]):
+        if not dated_after_disclosure(row):
+            purchases[row["symbol"]].append(row)
+
+    def strength(symbol: str) -> tuple[Any, ...]:
+        trades = purchases[symbol]
+        latest = max(r["transaction_date"] for r in trades)
+        return (
+            -len({r["politician_name"] for r in trades}),
+            -len(trades),
+            -latest.toordinal(),
+            symbol,
+        )
+
+    return sorted(set(sorted(purchases, key=strength)[:limit]) | ark)
+
+
+def dated_after_disclosure(row: Mapping[str, Any]) -> bool:
+    """True when a trade's own date is later than the date it was disclosed."""
+    traded, disclosed = row.get("transaction_date"), row.get("disclosure_date")
+    return traded is not None and disclosed is not None and traded > disclosed
 
 
 def json_ready(value: Any) -> Any:
@@ -74,15 +129,17 @@ def calculate(
     *,
     version: str = VERSION,
 ) -> dict[str, Any]:
-    if version not in ("watchlist-v1", "watchlist-v2", "watchlist-v3"):
+    if version not in VERSIONS:
         raise ValueError("unsupported ranking version")
     config = dict(DEFAULT_CONFIG if config is None else config)
     threshold = Decimal(config["market_cap_threshold"])
     congress: dict[str, list[dict[str, Any]]] = defaultdict(list)
     insiders: dict[str, list[dict[str, Any]]] = defaultdict(list)
     congress_rows = rows["congress_trades"]
-    if version in ("watchlist-v2", "watchlist-v3"):
+    if version != "watchlist-v1":
         congress_rows = _cross_provider_purchases(congress_rows)
+    if version == "watchlist-v4":
+        congress_rows = [r for r in congress_rows if not dated_after_disclosure(r)]
     for row in congress_rows:
         if "purchase" in row["trade_type"].lower():
             congress[row["symbol"]].append(row)
@@ -96,7 +153,7 @@ def calculate(
         "affordable_growing": [],
         "unresolved": [],
     }
-    for symbol in candidate_symbols(rows):
+    for symbol in candidate_symbols(rows, version=version, config=config):
         c, i, a, si = (
             congress.get(symbol),
             insiders.get(symbol),

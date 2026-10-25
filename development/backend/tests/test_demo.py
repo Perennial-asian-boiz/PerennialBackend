@@ -335,3 +335,30 @@ print(json.dumps({"calls": calls, "key_seen": key == "SYNTHETIC_ENV_KEY",
 
     report = json.loads(result.stdout.strip().splitlines()[-1])
     assert report == {"calls": [], "key_seen": False, "env_restored": True}
+
+
+@pytest.mark.db
+def test_walkthrough_completes_with_a_gdelt_run_in_the_demo_database(demo_engine):
+    """DEMO-G1: the override step reads only watchlist sources; a GDELT run in
+    the same database must not join the run set it publishes."""
+    from datetime import datetime, timezone
+
+    from src.ingestion.importer import CollectionOutcome, import_collection
+    from src.pipeline.lifecycle import begin_run
+
+    today = datetime.now(timezone.utc).date()
+    rows = [{"theme": "ECON_TEST", "day": today.isoformat(), "article_count": 3,
+             "total_articles": None, "avg_tone": None}]
+    result = import_collection(
+        demo_engine,
+        CollectionOutcome.success(
+            "gdelt_theme_volume", "live", rows, source_as_of=today,
+            coverage={"complete": True, "scope": "window"},
+        ),
+        run_id=begin_run(demo_engine, "gdelt_theme_volume", "live"),
+    )
+    assert result.succeeded
+    steps = {s["step"]: s for s in walkthrough(demo_engine)}
+    assert len(steps) == 8
+    assert steps["audited override"]["events"] == ["quality_override"]
+    assert steps["quality refusal"]["refused"] is True

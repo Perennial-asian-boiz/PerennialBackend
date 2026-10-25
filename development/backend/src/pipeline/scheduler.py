@@ -168,9 +168,7 @@ if __name__ == "__main__":
         parser.add_argument("--once", action="store_true", required=True)
         parser.add_argument("--job", choices=("pipeline", "gdelt"), default="pipeline")
         args = parser.parse_args()  # exits 2 on a missing or unknown --job
-        logging.basicConfig(
-            level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
-        )
+        configure_logging()  # the production entry point: JSON and URL stripping
         sys.exit(run_once(args.job))
     if "--test" in sys.argv:
         configure_logging()
