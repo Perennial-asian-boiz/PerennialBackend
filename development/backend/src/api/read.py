@@ -19,6 +19,7 @@ Design: docs/work-items/m5-read-api-design-note.md. Schemas: docs/technical-spec
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from datetime import timezone
@@ -114,6 +115,19 @@ class WatchlistResponse(BaseModel):
     watchlist: dict[str, Any] = Field(description="publications.output, verbatim")
 
 
+class SummarySource(BaseModel):
+    name: str = Field(description="Who published the description")
+    url: str = Field(description="An https link to that description")
+
+
+class Summary(BaseModel):
+    text: str = Field(
+        description="2 to 4 sentences, verbatim from the source's description"
+    )
+    source: SummarySource
+    as_of: str = Field(description="When it was stored: ISO 8601, UTC")
+
+
 class Security(BaseModel):
     id: int
     symbol: str
@@ -125,6 +139,9 @@ class Security(BaseModel):
     is_active: bool
     sector: str | None
     industry: str | None
+    summary: Summary | None = Field(
+        description="A brief company summary (S1-12), or null when there is none"
+    )
 
 
 class SecurityCurrent(BaseModel):
@@ -239,6 +256,33 @@ def _envelope(conn: Connection, publication_id: int) -> tuple[dict[str, Any], An
     return meta, output
 
 
+# https with a host only, as migration 0012's CHECK has it (CS-5).
+_HTTPS_URL = re.compile(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?([/?#][^\s]*)?")
+
+
+def _summary(found: Any) -> dict[str, Any] | None:
+    """S1-12 CS-5: the stored excerpt and its source, or None.
+
+    None unless the status is ok and every part is stored. A URL that isn't https
+    is served as None too, although the database already refuses one.
+    """
+    url = found.summary_source_url
+    if (
+        found.summary_status != "ok"
+        or not found.summary
+        or not found.summary_source_name
+        or found.summary_as_of is None
+        or not isinstance(url, str)
+        or not _HTTPS_URL.fullmatch(url)
+    ):
+        return None
+    return {
+        "text": found.summary,
+        "source": {"name": found.summary_source_name, "url": url},
+        "as_of": found.summary_as_of.astimezone(timezone.utc).isoformat(),
+    }
+
+
 def _security(conn: Connection, symbol: str) -> Any:
     """Resolve a ticker through security_identifiers (BRK-B finds BRK.B)."""
     s, ids, p = m.securities, m.security_identifiers, m.company_profiles
@@ -254,6 +298,11 @@ def _security(conn: Connection, symbol: str) -> Any:
             s.c.is_active,
             p.c.sector,
             p.c.industry,
+            p.c.summary,
+            p.c.summary_status,
+            p.c.summary_source_name,
+            p.c.summary_source_url,
+            p.c.summary_as_of,
         )
         .select_from(
             ids.join(s, s.c.id == ids.c.security_id).outerjoin(
@@ -422,6 +471,7 @@ def get_security(symbol: str, request: Request) -> Response:
         "is_active": bool(found.is_active),
         "sector": found.sector,
         "industry": found.industry,
+        "summary": _summary(found),
     }
     body = {"api_version": API_VERSION, "security": security, "current": current}
     return CanonicalJSONResponse(body, headers={"Cache-Control": "no-cache"})

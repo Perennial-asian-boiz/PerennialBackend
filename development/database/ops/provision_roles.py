@@ -40,7 +40,9 @@ TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # runs or operator text. Two grants are column-level, so code selects columns.
 API_TABLES = ("publications", "current_publication", "securities", "security_identifiers")
 API_COLUMNS = {
-    "company_profiles": ("id", "sector", "industry"),
+    # S1-12: the stored summary it serves; never summary_grade or description_digest.
+    "company_profiles": ("id", "sector", "industry", "summary", "summary_status",
+                         "summary_source_name", "summary_source_url", "summary_as_of"),
     "publication_events": ("id", "publication_id", "kind", "checks", "created_at"),
 }
 SUPABASE_API_ROLES = ("anon", "authenticated", "service_role")
