@@ -20,7 +20,16 @@ from typing import Any, Dict, Optional
 from src.ingestion.redaction import redact
 
 ENVELOPE_KEYS = {
-    "congress_trades": ("source", "endpoints", "fetched_at", "total_trades"),
+    "congress_trades": (
+        "source",
+        "endpoints",
+        "fetched_at",
+        "total_trades",
+        "chambers",
+        "house_source",
+        "house_reports",
+        "house_reports_scanned",
+    ),
     "ark_holdings": (
         "source",
         "funds_tracked",
@@ -58,6 +67,8 @@ ENVELOPE_KEYS = {
         "min_articles",
         "input_batch_id",
     ),
+    # provider is the adapter name; it is also in every row, which is hashed.
+    "market_caps": ("provider", "fetched_at", "total_symbols", "symbols_with_value"),
 }
 MAX_LIST_ITEMS = 20
 

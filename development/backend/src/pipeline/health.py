@@ -197,6 +197,18 @@ def health(
             ).scalar_one()
             if finished is None or now - finished > GDELT_MAX_AGE:
                 advisories.append(f"{source}:stale")
+        if settings is not None and settings.market_cap_adapter is not None:
+            # M4 MCB-11: publish() falls back to earlier rows within the limit,
+            # so a stale collection is an advisory, never an issue.
+            finished = conn.execute(
+                select(func.max(m.ingestion_runs.c.finished_at)).where(
+                    m.ingestion_runs.c.source == "market_caps",
+                    m.ingestion_runs.c.status == "succeeded",
+                    m.ingestion_runs.c.collection_mode.in_(modes),
+                )
+            ).scalar_one()
+            if finished is None or now - finished > settings.market_cap_max_reuse_age:
+                advisories.append("market_caps:stale")
     pub = current(engine)
     if pub is None:
         issues.append("publication:missing")

@@ -555,6 +555,67 @@ class GdeltSpikeResult(GlobalRecord):
     rule_version: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
 
 
+_PROVIDER = re.compile(r"[a-z0-9_]{1,32}")
+_positive_cap = _decimal_validator(2, 24)
+
+
+def _market_cap(value: Any) -> Optional[Decimal]:
+    dec = _positive_cap(value)
+    if dec is not None and dec <= 0:
+        raise ValueError("market cap must be positive")
+    return dec
+
+
+def _provider(value: Any) -> str:
+    if not isinstance(value, str) or not _PROVIDER.fullmatch(value):
+        raise ValueError("provider must be an adapter name")
+    return value
+
+
+class MarketCapRecord(SourceRecord):
+    """One security's market cap from one adapter (M4). The ticker is canonical.
+
+    `value_currency` is the currency `value` is reported in, stored in the
+    `currency` column. It is deliberately not SourceRecord.currency, which the
+    importer writes to securities.currency: a provider's reporting currency is
+    not the listing's trading currency, and this source never edits securities.
+    """
+
+    DB_COLUMNS = (
+        "value",
+        "provider",
+        "issuer_level",
+        "observed_at",
+        "sector",
+        "industry",
+    )
+
+    value: Annotated[Optional[Decimal], BeforeValidator(_market_cap)] = None
+    value_currency: Annotated[str, BeforeValidator(_text_validator(3, required=True))]
+    provider: Annotated[str, BeforeValidator(_provider)]
+    issuer_level: bool = Field(strict=True)
+    observed_at: Optional[datetime] = None
+    sector: Annotated[Optional[str], BeforeValidator(_text_validator(64))] = None
+    industry: Annotated[Optional[str], BeforeValidator(_text_validator(128))] = None
+
+    @field_validator("value_currency")
+    @classmethod
+    def _value_currency(cls, v: str) -> str:
+        if not re.fullmatch(r"[A-Z]{3}", v):
+            raise ValueError("currency must be a 3-letter code")
+        return v
+
+    @field_validator("observed_at")
+    @classmethod
+    def _aware(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("observed_at must be timezone-aware")
+        return v
+
+    def db_values(self) -> Dict[str, Any]:
+        return {**super().db_values(), "currency": self.value_currency}
+
+
 RECORD_MODELS: Dict[str, type[ContractRecord]] = {
     "congress_trades": CongressTrade,
     "ark_holdings": ArkHolding,
@@ -563,6 +624,7 @@ RECORD_MODELS: Dict[str, type[ContractRecord]] = {
     "gdelt_theme_volume": GdeltThemeVolume,
     "gdelt_theme_articles": GdeltThemeArticle,
     "gdelt_spike_results": GdeltSpikeResult,
+    "market_caps": MarketCapRecord,
 }
 
 # Top-level key holding the record list in each fetcher's JSON output.
@@ -574,4 +636,4 @@ RECORDS_KEY = {
 }
 
 # Sources whose rows are one-per-security (unique (batch_id, security_id)).
-ONE_ROW_PER_SECURITY = frozenset({"ark_holdings", "short_interest"})
+ONE_ROW_PER_SECURITY = frozenset({"ark_holdings", "short_interest", "market_caps"})

@@ -187,3 +187,50 @@ def test_formatter_strips_whole_urls_from_message_args_and_context(capture):
         "provider.invalid",
     ):
         assert leaked not in text
+
+
+@pytest.mark.parametrize(
+    "job, patch, message",
+    [
+        (
+            "pipeline",
+            ("src.settings", "load_settings"),
+            "pipeline failed: RuntimeError",
+        ),
+        ("gdelt", ("src.db.session", "make_engine"), "gdelt run failed: RuntimeError"),
+    ],
+)
+def test_scheduler_once_logs_json_through_the_safe_formatter(
+    monkeypatch, capsys, job, patch, message
+):
+    # MAIN-1: `python -m src.pipeline.scheduler --once` is the scheduled
+    # production entry point; it must not fall back to plain-text logging.
+    import importlib
+    import runpy
+    import sys
+    import warnings
+
+    def broken(*args, **kwargs):
+        raise RuntimeError(
+            "https://provider.invalid/SYNTHETIC_PATH_SECRET?apikey=SYNTHETIC_QUERY_SECRET"
+        )
+
+    module, name = patch
+    monkeypatch.setattr(importlib.import_module(module), name, broken)
+    monkeypatch.setattr(sys, "argv", ["scheduler", "--once", "--job", job])
+    root = logging.getLogger()
+    handlers, level = list(root.handlers), root.level
+    root.handlers = []  # as in a fresh process: no host-installed handlers
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # module already imported
+            with pytest.raises(SystemExit) as exit_:
+                runpy.run_module("src.pipeline.scheduler", run_name="__main__")
+    finally:
+        root.handlers = handlers
+        root.setLevel(level)
+    assert exit_.value.code == 1
+    err = capsys.readouterr().err
+    rows = [json.loads(line) for line in err.splitlines()]
+    assert rows[-1]["level"] == "ERROR" and rows[-1]["message"] == message
+    assert "SYNTHETIC" not in err and "provider.invalid" not in err
