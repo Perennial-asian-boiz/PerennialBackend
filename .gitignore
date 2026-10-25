@@ -58,6 +58,7 @@ mastodon_ticker_sentiment.json
 #reddit stuff
 cookies.txt
 reddit_cookies.txt
+reddit_sentiments.json
 
 #youtube stuff
 /credentials
