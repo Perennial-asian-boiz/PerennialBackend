@@ -11,7 +11,7 @@ import secrets
 import socket
 import time
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from functools import partial
 
@@ -95,12 +95,14 @@ class StubAdapter:
 def upstream(purchases=(), holdings=(), sales=()):
     """The {trades, holdings} rows collect_source hands downstream collectors."""
 
-    def trade(symbol, kind):
-        return {"ticker": symbol, "symbol": symbol, "trade_type": kind}
+    def trade(number, symbol, kind):  # with the fields #48's purchase grouping keys on
+        return {"ticker": symbol, "symbol": symbol, "trade_type": kind,
+                "politician_name": "Synthetic Member", "transaction_date": date(2026, 10, 1),
+                "row_number": number}
 
+    kinds = [(s, "Purchase") for s in purchases] + [(s, "Sale (Full)") for s in sales]
     return {
-        "trades": [trade(s, "Purchase") for s in purchases]
-        + [trade(s, "Sale (Full)") for s in sales],
+        "trades": [trade(n, s, kind) for n, (s, kind) in enumerate(kinds, 1)],
         "holdings": [
             {"ticker": s, "symbol": s, "fund_count": 1, "funds": ["ARKK"]}
             for s in holdings
