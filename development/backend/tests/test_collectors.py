@@ -118,11 +118,13 @@ def test_ark_one_bad_fund_fails_whole_collection(bad, code):
     assert outcome.diagnostics["failures"] == [{"unit": "ARKG", "code": code}]
 
 
-def test_ark_mixed_dates_leave_source_as_of_unknown():
+def test_ark_funds_on_different_dates_take_the_oldest_fund_date():
+    # Staging run 19: funds report different dates. The batch is as old as its
+    # stalest fund (test_ark_as_of.py has the full per-fund rule).
     session = ark_session(
         {"ARKQ": FakeResponse(body={"holdings": [holding("ZZAA", day="2026-09-29")]})}
     )
-    assert collectors.collect_ark(session, sleep=NO_SLEEP).source_as_of is None
+    assert str(collectors.collect_ark(session, sleep=NO_SLEEP).source_as_of) == "2026-09-29"
 
 
 def test_streamed_body_over_cap_is_rejected(monkeypatch):
