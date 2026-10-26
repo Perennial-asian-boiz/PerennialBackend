@@ -1,15 +1,17 @@
 # Pattern evaluation: design note
 
-**Branch:** `Pattern-Evaluation` · **Author:** @Zura16 · **Co-owner:** @haohnguyen94-droid · **Status:** prototype built (`score.py`, rules v1.1), no migration · **Implements:** DECISIONS.md, "Confidence Score composition" (fundamentals, 60%)
+**Branch:** `Pattern-Evaluation` · **Author:** @Zura16 · **Co-owner:** @haohnguyen94-droid · **Status:** implemented (`src/services/fundamentals`, migration `0016`, rules `fundamentals-v1`); awaiting review · **Implements:** DECISIONS.md, "Confidence Score composition" (fundamentals, 60%)
 
 ## Summary
 
 The fundamentals component scores each company from 0 to 100 using its filed annual reports. Two models are proposed:
 
 - **General model:** 3-year revenue growth (50%), operating margin (30%) and operating margin trend (20%).
-- **Bank model:** used for companies that report bank figures. 3-year growth in revenue net of interest (50%), return on equity (30%) and efficiency ratio (20%).
+- **Bank model:** used for companies that report non-interest expense. 3-year growth in revenue net of interest (50%), return on equity (30%) and efficiency ratio (20%).
 
-Data comes from **SEC EDGAR**, not FMP as the roadmap assumed. EDGAR is free, needs no key, is public data, covers the small caps that FMP's free plan blocks, and includes every input the Piotroski validation needs. Probes and their output are in `development/backend/prototypes/fundamentals/`.
+Data comes from **SEC EDGAR**, not FMP as the roadmap assumed. EDGAR is free, needs no key, is public data, covers the small caps that FMP's free plan blocks, and includes every input the Piotroski validation needs.
+
+The production implementation is in `src/services/fundamentals/`: two ingestion-contract sources, `fundamentals` (live) and `fundamental_scores` (derived), with migration `0016` and a scheduler job (section 8). The probes and the JSON prototype that led to these rules are in `development/backend/prototypes/fundamentals/`.
 
 ## 1. Data source
 
@@ -69,7 +71,7 @@ Where the two disagree, the cause is known:
 
 ## 3. Bank model
 
-**When it applies.** A company gets the bank model when its filings include both `NoninterestExpense` and `RevenuesNetOfInterestExpense`. SIC codes are too broad for this: Coinbase (6199) and Robinhood (6211) are classed as financial, but they don't report bank figures, and the general model works for them. From `bank_probe_output.txt`, JPM, BAC, GS, MS and SOFI qualify.
+**When it applies.** A company gets the bank model when its filings report `NoninterestExpense` for its latest revenue year. Bank revenue is `RevenuesNetOfInterestExpense` when reported, otherwise `Revenues`: Bank of America reports only `Revenues`, which for a bank is already net of interest. SIC codes are too broad for this. Coinbase (6199) and Robinhood (6211) are classed as financial, but they don't report bank figures, and the general model works for them. JPM, BAC, GS, MS and SOFI qualify.
 
 | Measure | Weight | 0 points at | 100 points at |
 |---|---|---|---|
@@ -81,16 +83,19 @@ Where the two disagree, the cause is known:
 
 This follows DECISIONS.md. A missing measure is dropped and its weight is spread over the remaining measures. A missing measure never counts as neutral.
 
-A company needs **at least 2 of its model's 3 measures** to be scored. Without that rule, one measure becomes the whole score: Robinhood scored 100 on growth alone, and Deere scored 0. With fewer than 2, the component is missing and the Confidence Score renormalizes. Every missing result carries a fixed reason code that the app can show:
+A company needs **at least 2 of its model's 3 measures** to be scored. Without that rule, one measure becomes the whole score: Robinhood scored 100 on growth alone, and Deere scored 0. With fewer than 2, the component is missing and the Confidence Score renormalizes.
+
+**Growth from a tiny revenue base is not scored.** When the operating margin is below −100%, meaning costs are more than twice revenue, growth is dropped. Without this rule, CRSP scored 62.5 on 43% growth of small, irregular revenue while its margin was −18,934%. The rule works in any currency and matches the ±100% margin rule. With the 2-of-3 rule, such companies end as `not_enough_data`.
+
+A stored `fundamental_scores` row carries fixed reason codes the app can show:
 
 | Code | Shown to the user | Example |
 |---|---|---|
-| `not_sec_filer` | "Financial reports for this company aren't available yet." | BYDDY |
-| `no_annual_report` | "No annual report yet (recently listed)." | CBRS |
 | `no_revenue` | "No revenue yet." | OKLO |
 | `insufficient_history` | "Less than 3 years of reports, so growth isn't scored yet." | CRWV, for growth only |
-| `not_enough_data` | "Not enough reported figures to score yet." | JOBY |
-| `identity_unresolved` | Internal only. Blocked until M4 identity work lands. | XOM |
+| `not_enough_data` | "Not enough reported figures to score yet." | JOBY, CRSP |
+
+A company with **no score row** has no SEC annual data: it isn't an SEC filer (BYDDY), it hasn't filed an annual report yet (CBRS), or its ticker maps to a new entity without history (XOM). The app shows "Financial reports for this company aren't available yet." The `fundamentals` batch envelope counts these companies (`no_cik_count`, `no_annual_data_count`) and lists the first 20. Scores are derived only from the `fundamentals` batch, so a company that batch doesn't mention can't get a row, which keeps the derivation replayable.
 
 ## 5. Choices
 
@@ -132,19 +137,54 @@ From `score_output.txt` (rules v1.1, 110 tickers):
 
 The highest scores are HOOD 100, PLTR 91, LLY 90 and NVDA 88. Large, slower-growing companies sit mid-table (MSFT 61, AAPL 43), because the weights favor growth, as designed.
 
-**Known weakness: growth from a tiny revenue base.** CRSP scores 62.5 on 43% annual growth of small, irregular collaboration revenue, while its operating margin is −18,934%. Options are a minimum revenue level before growth is scored, or capping growth points when the operating margin is below −100%. To be decided.
+Growth from a tiny revenue base, the weakness found here, is now handled by the rule in section 4.
 
-## 8. Fit with the roadmap
+## 7b. Production results (`fundamentals-v1`)
 
-- **Prototype first.** A JSON prototype (`fundamentals_scores.json`) produces scores, the parts, the weights and limits used, reason codes, Key Reasons and revenue history. It needs no migration, so the migration freeze doesn't block it.
-- **Production** follows rules 1 and 2. EDGAR becomes the `fundamentals` source in `0007_fundamentals`, with one row per `(batch, security, fiscal_period, line_item)`. The scores become a derivation run that records the input batch and `score_version`.
-- **Identity.** EDGAR keys companies by CIK, which M4's `security_identifiers` (scheme `cik`) already plans for. The XOM case is a regression test for M4.
+The production collector and scorer ran live against EDGAR for the same 110 tickers on 2026-10-25, without a database:
+
+| Result | Count |
+|---|---|
+| Companies with annual data | 100 (7,044 line-item rows) |
+| No CIK in SEC's ticker map | 3 (BYDDY, KMTUY, and WBD, whose ticker left SEC's map) |
+| No annual data for the mapped CIK | 7 (ALMR, CBRS, GENB, SCTX, SPCX, XE, XOM) |
+| Scored | 78 (73 general, 5 bank: BAC, GS, JPM, MS, SOFI) |
+| `not_enough_data` | 19, of which 11 come from the tiny-revenue rule (ABSI, AUR, BEAM, CRSP, KYMR, NRIX, NTLA, PACB, PONY, PSNL, RXRX) |
+| `no_revenue` | 3 (CMPS, FRNM, OKLO) |
+
+Every company scored by both the production code and the v1.1 prototype has the same score.
+
+**Validation:** Spearman ρ against Piotroski is **0.27** over 56 general-model companies with all 9 signals, down from 0.40 in v1.1. The tiny-revenue rule removed weak companies that ranked low on both measures. That narrows the range and lowers the correlation without changing how the remaining companies agree. The correlation stays positive. D10's validation is recorded, and tuning the limits is the next step if the team wants closer agreement.
+
+## 8. Production implementation
+
+This follows design rule 1 (one ingestion contract) and rule 2 (derived data is a run).
+
+| Piece | Where |
+|---|---|
+| Sources `fundamentals` and `fundamental_scores` | `models.FUNDAMENTALS_SOURCES`, lock keys 170018 and 170019, `CANONICAL_ONLY_SOURCES`, `IMMUTABLE` grants |
+| Tables and the vocabulary CHECK | Migration `0016` (expand only, `lock_timeout`, a downgrade that refuses while fundamentals lineage exists) |
+| Record schemas | `FundamentalLine`, `FundamentalScore` in `src/ingestion/schemas.py` (signed decimals; a scored row needs a model, an unscored row needs a code) |
+| EDGAR client and line-item extraction | `src/services/fundamentals/edgar.py` |
+| Score rules, `breakdown()`, `key_reasons()` | `src/services/fundamentals/scoring.py` (pure functions, strict mypy) |
+| Collection and derivation runs | `src/services/fundamentals/job.py` |
+| Scheduler | `python -m src.pipeline.scheduler --once --job fundamentals` |
+| Setting | `SEC_USER_AGENT`, read as `Settings.sec_user_agent` |
+| Tests | `tests/test_fundamentals.py`: EDGAR parsing, every rule, both runs with lineage, batch reuse, failure fallback |
+
+**The universe** is every ticker in the current production watchlist publication, and the run's dependencies name the Congress and ARK batches that publication pinned. The candidate list therefore matches the watchlist exactly, whatever ranking version produced it.
+
+**Long format, as the roadmap specified:** one `fundamentals` row per `(batch, security, fiscal_year_end, line_item)`, with the XBRL concept, form and filing date of each value. Restatements arrive as new batches.
+
+**Not stored:** points and Key Reasons. Both are recomputed from the stored measures and `ScoreRule`, whose limits are in the derived batch's envelope.
+
+**Left for M6 scores:** combining fundamentals with sentiment and events into `company_scores`, and the `GET /v1/securities/{symbol}/score` breakdown endpoint, which can call `breakdown()` and `key_reasons()`.
 
 ## Questions for review
 
 1. Is EDGAR approved as the fundamentals source in place of FMP?
 2. Are the starting limits acceptable as version 1, given they will be tuned against Piotroski?
-3. Is the data-based bank rule (`NoninterestExpense` plus `RevenuesNetOfInterestExpense`) acceptable, rather than SIC codes?
+3. Is the data-based bank rule (non-interest expense reported for the latest revenue year) acceptable, rather than SIC codes?
 4. Is treating absent long-term debt as 0 acceptable for Piotroski?
 5. SEC fair-access rules: the production collector needs a team contact address in the User-Agent. Whose address should it use?
-6. How should growth from a tiny revenue base be handled (see 7a)?
+6. Should XOM's predecessor CIK be seeded in `company_profiles` now, or as part of M4?

@@ -98,6 +98,8 @@ class ProviderSettings(BaseSettings):
 
     fmp_api_key: SecretStr | None = None
     finnhub_api_key: SecretStr | None = None
+    # SEC EDGAR fair-access rules require a contact in the User-Agent (fundamentals).
+    sec_user_agent: str | None = None
 
     def require_provider_keys(self, provider: Literal["fmp", "finnhub"]) -> None:
         key = self.fmp_api_key if provider == "fmp" else self.finnhub_api_key

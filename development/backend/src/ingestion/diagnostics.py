@@ -79,6 +79,7 @@ UNIT_KINDS = frozenset(
         "insider tickers",
         "short-interest tickers",
         "market-cap tickers",
+        "SEC filers",
         "upstream files",
     }
 )
