@@ -347,13 +347,6 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _single_iso_date(values: List[Any]) -> Optional[date]:
-    """The provider date if every value is the same ISO date; otherwise unknown."""
-    if not values or not all(_is_iso_date(v) for v in values) or len(set(values)) != 1:
-        return None
-    return date.fromisoformat(values[0])
-
-
 def _latest_iso_date(values: List[Any]) -> Optional[date]:
     """Latest retained content date; empty or incomplete dates stay unknown.
 
@@ -483,6 +476,24 @@ def _ark_fund_ok(holdings: Any) -> Optional[str]:
     return None if tickered else "empty_or_malformed_holdings"
 
 
+def _ark_as_of(all_raw: Dict[str, List[Dict[str, Any]]]) -> Optional[date]:
+    """The batch is as old as its stalest fund.
+
+    Each fund's date is the latest ISO date among its ticker rows (cash rows
+    have no ticker and don't count). Any fund unknown, or dated after today
+    (UTC), makes the batch unknown: a future fund must not hide behind older
+    ones, so publish's stale-or-unknown check still refuses it.
+    """
+    today = datetime.now(timezone.utc).date()
+    funds = [
+        _latest_iso_date([h.get("date") for h in rows if h.get("ticker")])
+        for rows in all_raw.values()
+    ]
+    if not funds or any(day is None or day > today for day in funds):
+        return None
+    return min(day for day in funds if day is not None)
+
+
 def collect_ark(
     session: Optional[requests.Session] = None,
     sleep: Callable[[float], None] = time.sleep,
@@ -517,9 +528,6 @@ def collect_ark(
         holdings = ark.parse_holdings(all_raw)
     except (TypeError, ValueError, AttributeError):
         return tracker.parse_failure("ark_holdings")
-    dates = [
-        h.get("date") for rows in all_raw.values() for h in rows if h.get("ticker")
-    ]
     envelope = {
         "source": "ARK Invest ETF Holdings (arkfunds.io)",
         "funds_tracked": list(ark.ARK_FUNDS),
@@ -532,7 +540,7 @@ def collect_ark(
         "ark_holdings",
         holdings,
         envelope=envelope,
-        source_as_of=_single_iso_date(dates),
+        source_as_of=_ark_as_of(all_raw),
     )
 
 
