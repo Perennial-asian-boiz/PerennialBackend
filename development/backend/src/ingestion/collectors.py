@@ -89,6 +89,11 @@ MAX_HTTP_RETRIES = 2
 HTTP_DEADLINE_SECONDS = 60.0
 MAX_RETRY_DELAY_SECONDS = 10.0
 RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+# Nasdaq answers 404 for a ticker it has no quote for (delisted, renamed): no
+# record, like its explicit empty answer. More than this share of the requested
+# tickers 404ing, or every one, looks like an outage or a changed endpoint and
+# fails the source instead.
+SHORT_INTEREST_MAX_404_SHARE = 0.05
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 UpstreamRows = Dict[str, List[Dict[str, Any]]]
 
@@ -1008,7 +1013,15 @@ def collect_short_interest(
     session = session or requests.Session()
     tracker = _Tracker("short-interest tickers", planned=len(tickers))
     records: List[Dict[str, Any]] = []
+    # Nasdaq's URL takes the symbol as a path segment, which "/" (units,
+    # warrants, rights: ETHQ/U) can't be: never sent, listed like insider's.
+    unsupported = [t for t in tickers if "/" in t]
+    requested = len(tickers) - len(unsupported)
+    not_found: List[str] = []
     for ticker in tickers:
+        if "/" in ticker:
+            tracker.ok()
+            continue
         resp = _get_json(
             session,
             si.NASDAQ_URL.format(symbol=ticker),
@@ -1017,7 +1030,12 @@ def collect_short_interest(
             sleep=sleep,
         )
         kind = _short_interest_kind(resp.data) if resp.ok else None
-        if not resp.ok:
+        if not resp.ok and resp.code == "http_404":
+            not_found.append(ticker)
+            tracker.ok()  # no record for this ticker
+            if len(not_found) > SHORT_INTEREST_MAX_404_SHARE * requested:
+                break  # an outage, not missing records: stop asking
+        elif not resp.ok:
             tracker.fail(ticker, resp.code)
             break
         elif kind is None:
@@ -1034,6 +1052,27 @@ def collect_short_interest(
                 records.append(record)
                 tracker.ok()
         sleep(si.REQUEST_DELAY)
+    tracker.extra_counts["not_found"] = len(not_found)
+    if (
+        not tracker.failure_count
+        and not_found
+        and (
+            len(not_found) == requested
+            or len(not_found) > SHORT_INTEREST_MAX_404_SHARE * requested
+        )
+    ):
+        diagnostics = tracker.diagnostics()
+        diagnostics.update(
+            completed=tracker.completed - len(not_found),
+            failed=len(not_found),
+            failures=[
+                {"unit": t, "code": "http_404"}
+                for t in not_found[:MAX_REPORTED_FAILURES]
+            ],
+        )
+        return CollectionOutcome.failure(
+            "short_interest", "live", "collection_failed", diagnostics=diagnostics
+        )
     if not records and not tracker.failure_count:
         return CollectionOutcome.failure(
             "short_interest",
@@ -1047,6 +1086,7 @@ def collect_short_interest(
         "source": "nasdaq",
         "fetched_at": _now_iso(),
         "total_records": len(records),
+        "unsupported_tickers": unsupported,
     }
     return tracker.outcome(
         "short_interest",
