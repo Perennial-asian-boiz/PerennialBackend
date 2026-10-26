@@ -74,7 +74,7 @@ MASTODON = Script("mastodon", "mastodon", "mastodon_stock_fetcher")
 SOURCES = (
     Script("bluesky", "bluesky", "bluesky"),
     MASTODON,
-    Script("reddit", "reddit", "reddit"),
+    # Script("reddit", "reddit", "reddit"),
     Script("youtube", "youtube", "youtube"),
 )
 SERVERS_FILE = MASTODON.cwd / "mastodon_servers.json"   # written by the crawler, read by the fetcher
