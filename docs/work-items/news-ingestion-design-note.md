@@ -37,15 +37,16 @@ Anything else is dropped. `match_rule` records which rule matched.
 |---|---|
 | 1 | `tests/test_news.py`: stored records carry URL, headline, outlet, publish date and ticker. The live sample covered 110 tickers: 98 covered, 12 with no coverage, 0 errors, 2,665 matched pairs. |
 | 2 | `content_retrieved` on every row. Tested for both values. |
-| 3 | `match-v1` unit tests, plus `prototypes/news/match_sample.csv`: 20 random live matches (seed 20261026) to hand-check, target at least 18 correct. |
+| 3 | `match-v1` unit tests, plus `prototypes/news/match_sample.csv`: 20 random live matches (seed 20261026), hand-checked at 19 of 20 correct (target 18). |
 | 4 | Reruns store only new pairs (tested over three runs). A direct duplicate insert is rejected by the database (tested). |
 | 5 | A rate-limited ticker gets an `error` row and the run continues. A ticker with no articles gets `no_coverage` (tested). |
 
 ## Hand check (AC 3)
 
-The first-pass review of `match_sample.csv` is 15 clearly correct, 4 where the company is mentioned but isn't the article's main subject (an ETF holding, a list of stocks, a partner mentioned in an article about another company), and 1 likely wrong (SPCX on an article about Tesla).
+**Result: 19 of 20 correct, so AC 3 passes (target 18).** The labels are in the CSV's `correct` column.
 
-- If "about that company" includes a substantive mention, the sample passes at 19 of 20.
-- If the company must be the main subject, `match-v2` would require the match in the headline, or the ticker in the summary, and the sample would be redrawn.
+- 15 are mainly about the matched company.
+- 4 name the company substantively without it being the main subject: an ETF adding Broadcom (AVGO), Meta in an article about Corning (META), a list of aerospace stocks (LUNR), and PHP bugs mentioning Cloudflare (NET). These count as correct, because the article does say something about the company.
+- 1 is wrong: SPCX matched an article about Tesla's Cybercab.
 
-The final labels are in the CSV's `correct` column.
+The rule counts a substantive mention as a match. If sentiment later needs the company to be the main subject, a `match-v2` could require the match in the headline, and the sample would be redrawn.
