@@ -53,6 +53,7 @@ from src.db.models import (
     publications,
     securities,
 )
+from src.ingestion.collectors import FMP_MAX_402_SHARE
 from src.ingestion.diagnostics import failure_code
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,12 @@ class DescriptionAdapterError(Exception):
         self.code = code
 
 
+class DescriptionNotEntitled(DescriptionAdapterError):
+    """The source has this one description, but not for our plan or licence
+    (FMP's 402 for a premium-only symbol, decision 84). The job skips that
+    member and keeps its stored row (stale-good), within FMP_MAX_402_SHARE."""
+
+
 class DescriptionAdapter(Protocol):
     @property
     def source_name(self) -> str:
@@ -183,6 +190,7 @@ class SummaryResult:
     members: int
     with_summary: int
     unavailable: int
+    skipped_402: int = 0  # members the source withheld (DescriptionNotEntitled)
 
 
 def consensus_members(engine: Engine) -> list[str]:
@@ -298,12 +306,26 @@ def summarize(
 
     # Fetch everything first: a failure must leave every row as it was.
     fetched: dict[int, Description | None] = {}
+    withheld: set[int] = set()  # not entitled: skipped, stored rows untouched
+    requested = len(set(profile_of.values()))
     for symbol in members:
         profile = profile_of.get(symbol)
-        if profile is None or profile in fetched:  # share classes share a profile
+        # Share classes share a profile: fetch it once.
+        if profile is None or profile in fetched or profile in withheld:
             continue
         try:
             description = adapter.fetch(symbol)
+        except DescriptionNotEntitled:
+            withheld.add(profile)
+            if len(withheld) > FMP_MAX_402_SHARE * requested:
+                logger.warning(
+                    "company summaries failed: not_entitled=%s of %s requested"
+                    " profiles, over the share; nothing written",
+                    len(withheld),
+                    requested,
+                )
+                return _failed("collection_failed")
+            continue
         except DescriptionAdapterError as exc:
             code = failure_code(exc.code)
             logger.warning(
@@ -324,6 +346,12 @@ def summarize(
             )
             return _failed("collection_failed")
         fetched[profile] = description
+    if withheld and len(withheld) == requested:
+        logger.warning(
+            "company summaries failed: every requested profile not_entitled;"
+            " nothing written"
+        )
+        return _failed("collection_failed")
 
     now = datetime.now(timezone.utc)
     rewritten = 0
@@ -367,17 +395,23 @@ def summarize(
         if symbol in profile_of and statuses.get(profile_of[symbol]) == "ok"
     )
     result_counts = SummaryResult(
-        True, None, len(members), with_summary, len(members) - with_summary
+        True,
+        None,
+        len(members),
+        with_summary,
+        len(members) - with_summary,
+        skipped_402=len(withheld),
     )
     logger.info(
         "company summaries members=%s with_summary=%s unavailable=%s"
-        " no_profile=%s fetched=%s rewritten=%s selector=%s",
+        " no_profile=%s fetched=%s rewritten=%s skipped_402=%s selector=%s",
         result_counts.members,
         result_counts.with_summary,
         result_counts.unavailable,
         len(members) - len(profile_of),
         len(fetched),
         rewritten,
+        result_counts.skipped_402,
         SELECTOR_VERSION,
     )
     return result_counts
