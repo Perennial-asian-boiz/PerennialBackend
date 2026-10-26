@@ -59,7 +59,7 @@ import time
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -99,6 +99,10 @@ SHORT_INTEREST_MAX_404_SHARE = 0.05
 # symbols, or every one, is a plan or key problem and fails as before. Used by
 # market caps (runner.collect_market_caps) and company summaries.
 FMP_MAX_402_SHARE = 0.25
+# Publish refuses an ARK batch dated before today minus this. A fund older
+# than that (arkfunds.io served ARKW 20 days stale) is left out of the batch
+# instead of making the whole batch unpublishable. publication.py imports it.
+ARK_MAX_AGE = timedelta(days=7)
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 UpstreamRows = Dict[str, List[Dict[str, Any]]]
 
@@ -308,6 +312,12 @@ class _Tracker:
         if len(self.failures) < MAX_REPORTED_FAILURES:
             self.failures.append({"unit": unit, "code": code or "failed"})
 
+    def reject(self, unit: str, code: str) -> None:
+        """A unit counted ok() that turned out unusable: completed becomes failed."""
+        self.attempted -= 1
+        self.completed -= 1
+        self.fail(unit, code)
+
     def diagnostics(self) -> Dict[str, Any]:
         counts = {
             "unit_kind": self.unit_kind,
@@ -476,19 +486,31 @@ def _ark_fund_ok(holdings: Any) -> Optional[str]:
     return None if tickered else "empty_or_malformed_holdings"
 
 
-def _ark_as_of(all_raw: Dict[str, List[Dict[str, Any]]]) -> Optional[date]:
-    """The batch is as old as its stalest fund.
+def _ark_fund_day(rows: List[Dict[str, Any]]) -> Optional[date]:
+    """The latest ISO date among a fund's ticker rows; cash rows (no ticker) don't count."""
+    return _latest_iso_date([h.get("date") for h in rows if h.get("ticker")])
 
-    Each fund's date is the latest ISO date among its ticker rows (cash rows
-    have no ticker and don't count). Any fund unknown, or dated after today
-    (UTC), makes the batch unknown: a future fund must not hide behind older
-    ones, so publish's stale-or-unknown check still refuses it.
+
+def _ark_stale_funds(all_raw: Dict[str, List[Dict[str, Any]]]) -> Dict[str, date]:
+    """Funds dated before publish's limit (today UTC minus ARK_MAX_AGE), in fetch order.
+
+    An unknown or future-dated fund is not stale: it stays in, and _ark_as_of
+    makes the batch unknown so publish still refuses it.
+    """
+    cutoff = (datetime.now(timezone.utc) - ARK_MAX_AGE).date()
+    days = {symbol: _ark_fund_day(rows) for symbol, rows in all_raw.items()}
+    return {s: day for s, day in days.items() if day is not None and day < cutoff}
+
+
+def _ark_as_of(all_raw: Dict[str, List[Dict[str, Any]]]) -> Optional[date]:
+    """The batch is as old as its stalest kept fund.
+
+    Any fund unknown, or dated after today (UTC), makes the batch unknown: a
+    future fund must not hide behind older ones, so publish's stale-or-unknown
+    check still refuses it.
     """
     today = datetime.now(timezone.utc).date()
-    funds = [
-        _latest_iso_date([h.get("date") for h in rows if h.get("ticker")])
-        for rows in all_raw.values()
-    ]
+    funds = [_ark_fund_day(rows) for rows in all_raw.values()]
     if not funds or any(day is None or day > today for day in funds):
         return None
     return min(day for day in funds if day is not None)
@@ -524,6 +546,15 @@ def collect_ark(
         sleep(ark.REQUEST_DELAY)
     if tracker.failure_count:
         return tracker.outcome("ark_holdings", [])
+    stale = _ark_stale_funds(all_raw)
+    if len(stale) == len(all_raw):
+        for symbol in stale:
+            tracker.reject(symbol, "stale_fund")
+        return CollectionOutcome.failure(
+            "ark_holdings", "live", "ark_funds_stale", diagnostics=tracker.diagnostics()
+        )
+    for symbol in stale:
+        del all_raw[symbol]
     try:
         holdings = ark.parse_holdings(all_raw)
     except (TypeError, ValueError, AttributeError):
@@ -535,6 +566,7 @@ def collect_ark(
         "total_tickers": len(holdings),
         "multi_fund_tickers": sum(1 for h in holdings if h["fund_count"] > 1),
         "single_fund_tickers": sum(1 for h in holdings if h["fund_count"] == 1),
+        "excluded_stale_funds": [f"{s}:{day.isoformat()}" for s, day in stale.items()],
     }
     return tracker.outcome(
         "ark_holdings",

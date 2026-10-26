@@ -37,6 +37,8 @@ ENVELOPE_KEYS = {
         "total_tickers",
         "multi_fund_tickers",
         "single_fund_tickers",
+        # Funds left out for being older than publish's limit ("FUND:YYYY-MM-DD").
+        "excluded_stale_funds",
     ),
     "insider_trades": (
         "source",

@@ -16,16 +16,27 @@ The rule pinned here:
   "oldest fund").
 - Identity: identical collections give the same source_as_of, and nothing else
   in the envelope changes.
+Amended 2026-10-26 (test_ark_stale_funds.py): a fund older than the publish
+limit is excluded instead of dating the batch, so these cases use dates within
+it, relative to today (UTC).
 Fake HTTP only (test_collectors' fakes).
 """
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from src.ingestion import collectors
 from test_collectors import NO_SLEEP, FakeResponse, ark_session, holding
 
 FUNDS = ("ARKK", "ARKQ", "ARKG", "ARKW")
+
+
+def ago(days):
+    return datetime.now(timezone.utc).date() - timedelta(days=days)
+
+
+def iso(days):
+    return ago(days).isoformat()
 
 
 def fund(*days, symbol="ARKQ"):
@@ -43,24 +54,22 @@ def as_of(overrides):
 
 
 def test_funds_on_different_dates_give_the_oldest_fund_date():
-    # ARKQ is a day behind the default 2026-09-30 of the other three funds.
-    assert as_of({"ARKQ": fund("2026-09-29")}) == date(2026, 9, 29)
+    # ARKQ is a day behind the default (yesterday) of the other three funds.
+    assert as_of({"ARKQ": fund(iso(2))}) == ago(2)
 
 
 def test_all_funds_on_one_date_give_that_date():
-    assert as_of({}) == date(2026, 9, 30)
+    assert as_of({}) == ago(1)
 
 
 def test_a_fund_with_mixed_dates_counts_as_its_latest():
-    assert as_of({"ARKQ": fund("2026-09-28", "2026-09-30", "2026-09-29")}) == date(
-        2026, 9, 30
-    )
-    assert as_of({"ARKQ": fund("2026-09-27", "2026-09-28")}) == date(2026, 9, 28)
+    assert as_of({"ARKQ": fund(iso(3), iso(1), iso(2))}) == ago(1)
+    assert as_of({"ARKQ": fund(iso(4), iso(3))}) == ago(3)
 
 
-def test_the_stalest_fund_sets_the_batch_date_even_eight_days_back():
-    """Not hidden behind fresher funds, so publish's 7-day check refuses it."""
-    assert as_of({"ARKG": fund("2026-09-20", symbol="ARKG")}) == date(2026, 9, 20)
+def test_the_stalest_kept_fund_sets_the_batch_date():
+    """Not hidden behind fresher funds while within the publish limit."""
+    assert as_of({"ARKG": fund(iso(6), symbol="ARKG")}) == ago(6)
 
 
 @pytest.mark.parametrize(
@@ -69,18 +78,18 @@ def test_the_stalest_fund_sets_the_batch_date_even_eight_days_back():
     ids=["missing", "empty", "us_format", "unpadded", "impossible", "integer"],
 )
 def test_one_ticker_row_without_an_iso_date_makes_the_batch_unknown(bad_day):
-    assert as_of({"ARKW": fund("2026-09-30", bad_day, symbol="ARKW")}) is None
+    assert as_of({"ARKW": fund(iso(1), bad_day, symbol="ARKW")}) is None
 
 
 def test_rows_without_a_ticker_dont_count():
     body = {
         "symbol": "ARKK",
         "holdings": [
-            holding("ZZK1", day="2026-09-29"),
+            holding("ZZK1", day=iso(2)),
             {"ticker": None, "weight": 0.2, "date": "garbage"},
         ],
     }
-    assert as_of({"ARKK": FakeResponse(body=body)}) == date(2026, 9, 29)
+    assert as_of({"ARKK": FakeResponse(body=body)}) == ago(2)
 
 
 def test_a_future_dated_fund_is_not_hidden_behind_older_funds():
@@ -94,10 +103,10 @@ def test_a_future_dated_fund_is_not_hidden_behind_older_funds():
 
 
 def test_identical_collections_have_the_same_date_and_envelope():
-    overrides = {"ARKQ": fund("2026-09-29")}
+    overrides = {"ARKQ": fund(iso(2))}
     first = collectors.collect_ark(ark_session(overrides), sleep=NO_SLEEP)
     second = collectors.collect_ark(ark_session(overrides), sleep=NO_SLEEP)
-    assert first.source_as_of == second.source_as_of == date(2026, 9, 29)
+    assert first.source_as_of == second.source_as_of == ago(2)
     assert first.records == second.records
     drop = lambda e: {k: v for k, v in e.items() if k != "fetched_at"}  # noqa: E731
     assert drop(first.envelope) == drop(second.envelope)
@@ -108,6 +117,7 @@ def test_identical_collections_have_the_same_date_and_envelope():
         "total_tickers",
         "multi_fund_tickers",
         "single_fund_tickers",
+        "excluded_stale_funds",
     }
 
 
@@ -115,7 +125,7 @@ def test_identical_collections_have_the_same_date_and_envelope():
 def test_identical_collections_dedupe_to_one_batch(engine):
     from src.ingestion.importer import import_collection
 
-    overrides = {"ARKQ": fund("2026-09-29")}
+    overrides = {"ARKQ": fund(iso(2))}
     first = import_collection(
         engine, collectors.collect_ark(ark_session(overrides), sleep=NO_SLEEP)
     )
@@ -130,4 +140,4 @@ def test_identical_collections_dedupe_to_one_batch(engine):
         assert conn.execute(
             text("SELECT source_as_of FROM perennial.source_batches WHERE id = :i"),
             {"i": first.batch_id},
-        ).scalar() == date(2026, 9, 29)
+        ).scalar() == ago(2)
