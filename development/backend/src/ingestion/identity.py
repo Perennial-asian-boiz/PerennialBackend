@@ -42,6 +42,10 @@ PROVIDERS = frozenset({*SOURCE_PROVIDERS.values()})
 # Sources whose adapters return results under the canonical symbols they were
 # given (M4 market caps): no provider namespace, so only canonical tickers match.
 CANONICAL_ONLY_SOURCES = frozenset({"market_caps"})
+# Pattern evaluation plans from the published watchlist's canonical symbols.
+CANONICAL_ONLY_SOURCES |= {"fundamentals", "fundamental_scores"}
+# S1-03 news ingestion plans from the same published watchlist.
+CANONICAL_ONLY_SOURCES |= {"news_articles"}
 
 UNRESOLVED = "unresolved"
 INACTIVE = "inactive_security"

@@ -1,0 +1,222 @@
+"""SEC EDGAR companyfacts: annual line items per company.
+
+SEC fair-access rules: at most 10 requests a second, and a User-Agent that names
+a contact (Settings.sec_user_agent). Retries, size caps and JSON validation come
+from the shared collectors._get_json.
+"""
+
+import time
+from dataclasses import dataclass
+from datetime import date
+from typing import Any, Callable, Iterable, Mapping
+
+import requests
+from src.ingestion.collectors import _get_json
+
+TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
+FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
+MIN_REQUEST_INTERVAL_SECONDS = 0.12
+ANNUAL_FORMS = frozenset({"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"})
+FISCAL_YEARS_KEPT = 6  # 3-year growth, last year's trend and the 5-year chart
+
+# line item -> (us-gaap concepts, ifrs-full concepts); per fiscal year, the first
+# concept that reports a value wins, because companies change concepts over time.
+CONCEPTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "revenue": (
+        (
+            "Revenues",
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+            "RevenueFromContractWithCustomerIncludingAssessedTax",
+            "SalesRevenueNet",
+            "SalesRevenueGoodsNet",
+        ),
+        ("Revenue", "RevenueFromContractsWithCustomers"),
+    ),
+    "revenue_net_of_interest": (("RevenuesNetOfInterestExpense",), ()),
+    "gross_profit": (("GrossProfit",), ("GrossProfit",)),
+    "cost_of_revenue": (
+        ("CostOfRevenue", "CostOfGoodsAndServicesSold", "CostOfGoodsSold"),
+        ("CostOfSales",),
+    ),
+    "operating_income": (
+        ("OperatingIncomeLoss",),
+        ("ProfitLossFromOperatingActivities",),
+    ),
+    "pretax_income": (
+        (
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
+            "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+        ),
+        ("ProfitLossBeforeTax",),
+    ),
+    "net_income": (
+        ("NetIncomeLoss", "ProfitLoss"),
+        ("ProfitLossAttributableToOwnersOfParent", "ProfitLoss"),
+    ),
+    "operating_cash_flow": (
+        ("NetCashProvidedByUsedInOperatingActivities",),
+        ("CashFlowsFromUsedInOperatingActivities",),
+    ),
+    "assets": (("Assets",), ("Assets",)),
+    "current_assets": (("AssetsCurrent",), ("CurrentAssets",)),
+    "current_liabilities": (("LiabilitiesCurrent",), ("CurrentLiabilities",)),
+    "liabilities": (("Liabilities",), ("Liabilities",)),
+    "long_term_debt": (
+        (
+            "LongTermDebtNoncurrent",
+            "LongTermDebt",
+            "LongTermDebtAndCapitalLeaseObligations",
+        ),
+        ("NoncurrentPortionOfNoncurrentBorrowings", "LongtermBorrowings"),
+    ),
+    "equity": (
+        ("StockholdersEquity",),
+        ("EquityAttributableToOwnersOfParent", "Equity"),
+    ),
+    "diluted_shares": (
+        ("WeightedAverageNumberOfDilutedSharesOutstanding",),
+        ("AdjustedWeightedAverageShares",),
+    ),
+    "noninterest_expense": (("NoninterestExpense",), ()),
+}
+# Duration items cover one fiscal year; the rest are balances at year end.
+FLOW_ITEMS = frozenset(
+    {
+        "revenue",
+        "revenue_net_of_interest",
+        "gross_profit",
+        "cost_of_revenue",
+        "operating_income",
+        "pretax_income",
+        "net_income",
+        "operating_cash_flow",
+        "diluted_shares",
+        "noninterest_expense",
+    }
+)
+
+
+class EdgarError(RuntimeError):
+    """A request failed; carries a short code, never response text."""
+
+
+@dataclass(frozen=True)
+class AnnualValue:
+    fiscal_year_end: date
+    line_item: str
+    value: float
+    unit: str
+    concept: str
+    form: str
+    filed: date
+
+
+def _annual_entries(entries: Iterable[Any], flow: bool) -> dict[date, dict[str, Any]]:
+    """Latest-filed annual value per fiscal year end; flow items must span ~1 year."""
+    out: dict[date, dict[str, Any]] = {}
+    for e in entries:
+        if not isinstance(e, dict) or e.get("form") not in ANNUAL_FORMS:
+            continue
+        if e.get("fp") != "FY" or not isinstance(e.get("val"), (int, float)):
+            continue
+        try:
+            end = date.fromisoformat(e["end"])
+            filed = date.fromisoformat(e["filed"])
+            if flow:
+                days = (end - date.fromisoformat(e["start"])).days
+                if not 350 <= days <= 380:
+                    continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        if isinstance(e["val"], bool):
+            continue
+        prev = out.get(end)
+        if prev is None or filed > prev["filed"]:
+            out[end] = {"val": float(e["val"]), "filed": filed, "form": e["form"]}
+    return out
+
+
+def annual_values(
+    facts: Mapping[str, Any], keep: int = FISCAL_YEARS_KEPT
+) -> list[AnnualValue]:
+    """Every line item's annual values for the latest `keep` fiscal years.
+
+    Money items use USD when reported, otherwise the filing currency; shares use
+    the "shares" unit. One unit per line item, so a series never mixes currencies.
+    """
+    found: list[AnnualValue] = []
+    for item, (gaap, ifrs) in CONCEPTS.items():
+        merged: dict[date, AnnualValue] = {}
+        unit_used: str | None = None
+        for taxonomy, names in (("us-gaap", gaap), ("ifrs-full", ifrs)):
+            for name in names:
+                units = facts.get(taxonomy, {}).get(name, {}).get("units", {})
+                if not isinstance(units, dict) or not units:
+                    continue
+                if item == "diluted_shares":
+                    unit = "shares"
+                else:
+                    unit = unit_used or ("USD" if "USD" in units else next(iter(units)))
+                if unit not in units or (unit != "shares" and len(unit) != 3):
+                    continue
+                unit_used = unit
+                for end, e in _annual_entries(units[unit], item in FLOW_ITEMS).items():
+                    merged.setdefault(
+                        end,
+                        AnnualValue(
+                            end, item, e["val"], unit, name, e["form"], e["filed"]
+                        ),
+                    )
+        found.extend(merged[end] for end in sorted(merged)[-keep:])
+    return found
+
+
+class EdgarClient:
+    def __init__(
+        self,
+        session: requests.Session,
+        user_agent: str,
+        *,
+        interval: float = MIN_REQUEST_INTERVAL_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ):
+        self.session, self.headers = session, {"User-Agent": user_agent}
+        self.interval, self.monotonic, self.sleep = interval, monotonic, sleep
+        self._last: float | None = None
+
+    def _get(self, url: str, allowed: tuple[int, ...] = ()) -> Any:
+        if self._last is not None:
+            wait = self.interval - (self.monotonic() - self._last)
+            if wait > 0:
+                self.sleep(wait)
+        self._last = self.monotonic()
+        response = _get_json(
+            self.session, url, headers=self.headers, allowed_status=allowed
+        )
+        if not response.ok:
+            raise EdgarError(response.code or "request_failed")
+        return response
+
+    def ticker_map(self) -> dict[str, int]:
+        """SEC's ticker -> CIK map. Share-class punctuation uses '-' (BRK-B)."""
+        data = self._get(TICKER_MAP_URL).data
+        if not isinstance(data, dict):
+            raise EdgarError("ticker_map_malformed")
+        out: dict[str, int] = {}
+        for row in data.values():
+            if isinstance(row, dict) and isinstance(row.get("ticker"), str):
+                cik = row.get("cik_str")
+                if isinstance(cik, int) and not isinstance(cik, bool):
+                    out.setdefault(row["ticker"].upper(), cik)
+        return out
+
+    def company_facts(self, cik: int) -> dict[str, Any] | None:
+        """The company's facts, or None when SEC has none for this CIK (404)."""
+        response = self._get(FACTS_URL.format(cik=cik), allowed=(404,))
+        if response.status == 404:
+            return None
+        facts = response.data.get("facts") if isinstance(response.data, dict) else None
+        if not isinstance(facts, dict):
+            raise EdgarError("facts_malformed")
+        return facts

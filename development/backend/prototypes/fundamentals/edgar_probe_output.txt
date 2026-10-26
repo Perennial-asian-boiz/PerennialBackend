@@ -1,0 +1,125 @@
+ticker  taxonomy  rev yrs  latest FY  missing for last 2 fiscal years
+TSLA    us-gaap        17 2025-12-31  -
+SPCX    us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+TEM     us-gaap         4 2025-12-31  long_term_debt, gross_margin_inputs
+CRCL    us-gaap         3 2025-12-31  long_term_debt, gross_margin_inputs
+COIN    us-gaap         7 2025-12-31  gross_margin_inputs
+CRSP    us-gaap        11 2025-12-31  long_term_debt, gross_margin_inputs
+SHOP    us-gaap         9 2025-12-31  long_term_debt
+TWST    us-gaap         9 2025-09-30  long_term_debt
+HOOD    us-gaap         7 2025-12-31  long_term_debt, gross_margin_inputs, operating_income
+NVDA    us-gaap        19 2026-01-25  -
+PLTR    us-gaap         8 2025-12-31  long_term_debt
+TXG     us-gaap         9 2025-12-31  long_term_debt
+CRWV    us-gaap         3 2025-12-31  -
+AMZN    us-gaap        19 2025-12-31  -
+XYZ     us-gaap        12 2025-12-31  long_term_debt
+BEAM    us-gaap         7 2025-12-31  long_term_debt, gross_margin_inputs
+META    us-gaap        16 2025-12-31  -
+CBRS    us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+AVGO    us-gaap        10 2025-11-02  -
+NTLA    us-gaap        10 2025-12-31  long_term_debt, gross_margin_inputs
+AMD     us-gaap        18 2025-12-27  -
+BLSH    ifrs-full       3 2025-12-31  operating_income
+BMNR    us-gaap         5 2025-08-31  long_term_debt
+GOOG    us-gaap        13 2025-12-31  -
+RXRX    us-gaap         7 2025-12-31  -
+NET     us-gaap         9 2025-12-31  long_term_debt
+RKLB    us-gaap         6 2025-12-31  -
+NTRA    us-gaap        13 2025-12-31  long_term_debt, gross_margin_inputs
+KTOS    us-gaap        17 2025-12-28  -
+BWXT    us-gaap        17 2025-12-31  -
+VCYT    us-gaap        15 2025-12-31  long_term_debt
+TSM     ifrs-full       8 2024-12-31  -
+ACHR    us-gaap         3 2025-12-31  -
+WGS     us-gaap         7 2025-12-31  -
+ILMN    us-gaap        18 2025-12-28  long_term_debt
+TER     us-gaap        18 2025-12-31  long_term_debt
+XE      us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+LLY     us-gaap        19 2025-12-31  operating_income
+SOFI    us-gaap         7 2025-12-31  current_assets, current_liabilities, long_term_debt, operating_income
+PACB    us-gaap        17 2025-12-31  long_term_debt
+DE      us-gaap        21 2025-11-02  current_assets, current_liabilities, long_term_debt, gross_margin_inputs, operating_income
+LHX     us-gaap        18 2025-01-03  -
+AVAV    us-gaap        17 2026-04-30  -
+TRMB    us-gaap        18 2026-01-02  -
+SYM     us-gaap         6 2025-09-27  long_term_debt
+LUNR    us-gaap         4 2025-12-31  gross_margin_inputs
+AUR     us-gaap         7 2025-12-31  long_term_debt
+ISRG    us-gaap        19 2025-12-31  long_term_debt
+DASH    us-gaap         8 2025-12-31  long_term_debt, gross_margin_inputs
+CCJ     ifrs-full      10 2025-12-31  -
+CAT     us-gaap        19 2025-12-31  -
+ESLT    us-gaap        18 2025-12-31  -
+SNPS    us-gaap        18 2025-10-31  -
+JOBY    us-gaap         5 2025-12-31  long_term_debt, gross_margin_inputs
+WRD     ifrs-full       3 2024-12-31  diluted_shares
+BIDU    us-gaap        17 2025-12-31  diluted_shares
+PONY    us-gaap         4 2025-12-31  long_term_debt
+OKLO    us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+KDK     us-gaap         3 2025-12-31  gross_margin_inputs
+GH      us-gaap         9 2025-12-31  -
+CDNA    us-gaap        14 2025-12-31  long_term_debt, gross_margin_inputs
+SDGR    us-gaap         7 2025-12-31  long_term_debt
+CMPS    us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+NRIX    us-gaap         7 2025-11-30  long_term_debt, gross_margin_inputs
+CERS    us-gaap        17 2025-12-31  long_term_debt, gross_margin_inputs
+ABSI    us-gaap         6 2025-12-31  long_term_debt, gross_margin_inputs
+ADPT    us-gaap         9 2025-12-31  -
+PSNL    us-gaap         9 2025-12-31  long_term_debt
+BFLY    us-gaap         7 2025-12-31  long_term_debt
+IONS    us-gaap        18 2025-12-31  -
+ARCT    us-gaap         8 2025-12-31  long_term_debt, gross_margin_inputs
+ALMR    us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+PRME    us-gaap         6 2025-12-31  long_term_debt, gross_margin_inputs
+MASS    us-gaap         6 2025-12-31  long_term_debt
+GENB    us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+SCTX    us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+FRNM    us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+KYMR    us-gaap         7 2025-12-31  long_term_debt
+QSI     us-gaap         5 2025-12-31  long_term_debt
+DDOG    us-gaap         9 2025-12-31  long_term_debt
+CRWD    us-gaap         9 2026-01-31  -
+RBRK    us-gaap         4 2026-01-31  long_term_debt
+RBLX    us-gaap         7 2025-12-31  -
+GTLB    us-gaap         7 2026-01-31  long_term_debt
+TOST    us-gaap         7 2025-12-31  long_term_debt
+MELI    us-gaap        10 2025-12-31  -
+SPOT    ifrs-full      10 2025-12-31  -
+SNOW    us-gaap         8 2026-01-31  long_term_debt
+NFLX    us-gaap        19 2025-12-31  -
+FIG     us-gaap         3 2025-12-31  long_term_debt
+ABNB    us-gaap         7 2025-12-31  -
+GENI    us-gaap         7 2025-12-31  long_term_debt
+DKNG    us-gaap         6 2025-12-31  long_term_debt
+AAPL    us-gaap        19 2025-09-27  -
+MSFT    us-gaap        19 2026-06-30  -
+JPM     us-gaap        19 2025-12-31  current_assets, current_liabilities, long_term_debt, gross_margin_inputs, operating_income
+GS      us-gaap        15 2025-12-31  current_assets, current_liabilities, long_term_debt, gross_margin_inputs, operating_income
+MS      us-gaap        19 2025-12-31  current_assets, current_liabilities, gross_margin_inputs, operating_income
+BLK     us-gaap         4 2025-12-31  current_assets, current_liabilities, gross_margin_inputs
+XOM     us-gaap         0       None  net_income, operating_cash_flow, assets, current_assets, current_liabilities, long_term_debt, diluted_shares, revenue, gross_margin_inputs, operating_income
+WMT     us-gaap        19 2026-01-31  -
+DIS     us-gaap         9 2025-09-27  gross_margin_inputs
+WBD     us-gaap        19 2025-12-31  gross_margin_inputs
+BA      us-gaap        19 2025-12-31  -
+INTC    us-gaap        19 2025-12-27  -
+ORCL    us-gaap        19 2026-05-31  long_term_debt, gross_margin_inputs
+BAC     us-gaap        19 2025-12-31  current_assets, current_liabilities, gross_margin_inputs, operating_income
+UNH     us-gaap        19 2025-12-31  -
+
+110 tickers: 2 not in SEC's ticker list (KMTUY, BYDDY)
+108 with EDGAR data
+  5+ years of annual revenue: 86
+  revenue for last 2 FYs: 98
+  gross margin inputs: 71
+  operating income: 89
+  all Piotroski inputs: 44
+    net_income: 98
+    operating_cash_flow: 98
+    assets: 98
+    current_assets: 91
+    current_liabilities: 91
+    long_term_debt: 49
+    diluted_shares: 96
+    revenue: 98

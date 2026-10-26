@@ -109,3 +109,44 @@ def sanitize_envelope(
     if source == "short_interest" and isinstance(envelope.get("errors"), list):
         clean["errors_count"] = len(envelope["errors"])
     return clean
+
+
+# Pattern evaluation (src/services/fundamentals). Lists keep the first
+# MAX_LIST_ITEMS; the *_count keys are exact.
+ENVELOPE_KEYS.update(
+    fundamentals=(
+        "source",
+        "fiscal_years",
+        "universe",
+        "with_data",
+        "no_cik",
+        "no_cik_count",
+        "no_annual_data",
+        "no_annual_data_count",
+    ),
+    fundamental_scores=(
+        "score_version",
+        "general_limits",
+        "bank_limits",
+        "min_measures",
+        "max_margin",
+        "input_batch_id",
+    ),
+)
+
+# S1-03 news ingestion. Lists keep the first MAX_LIST_ITEMS; counts are exact.
+ENVELOPE_KEYS.update(
+    news_articles=(
+        "source",
+        "window_days",
+        "universe",
+        "covered",
+        "no_coverage",
+        "no_coverage_count",
+        "errors",
+        "errors_count",
+        "articles_found",
+        "articles_new",
+        "match_rule_version",
+    ),
+)
