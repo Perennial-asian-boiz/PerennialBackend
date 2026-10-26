@@ -192,6 +192,7 @@ SOURCE_LOCK_KEYS = {
     "market_caps": 170017,
     "fundamentals": 170018,
     "fundamental_scores": 170019,
+    "news_articles": 170020,
     "pipeline": 170098,
 }
 

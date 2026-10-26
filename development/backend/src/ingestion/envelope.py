@@ -133,3 +133,20 @@ ENVELOPE_KEYS.update(
         "input_batch_id",
     ),
 )
+
+# S1-03 news ingestion. Lists keep the first MAX_LIST_ITEMS; counts are exact.
+ENVELOPE_KEYS.update(
+    news_articles=(
+        "source",
+        "window_days",
+        "universe",
+        "covered",
+        "no_coverage",
+        "no_coverage_count",
+        "errors",
+        "errors_count",
+        "articles_found",
+        "articles_new",
+        "match_rule_version",
+    ),
+)

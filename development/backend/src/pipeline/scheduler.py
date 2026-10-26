@@ -5,6 +5,7 @@ Production (roadmap M3): a platform scheduler runs one job per invocation,
     python -m src.pipeline.scheduler --once            # the database pipeline
     python -m src.pipeline.scheduler --once --job gdelt
     python -m src.pipeline.scheduler --once --job fundamentals
+    python -m src.pipeline.scheduler --once --job news
 
 at 09:00 America/Los_Angeles (pipeline) and 09:30 (GDELT) on trading days. The
 exit code is the success signal: 0 when the job completed, 1 otherwise,
@@ -92,6 +93,10 @@ def run_once(job: str = "pipeline", settings: Settings | None = None) -> int:
         from src.services.fundamentals.job import run_once as run_fundamentals_once
 
         return run_fundamentals_once(settings)
+    if job == "news":  # S1-03: Finnhub company news for the consensus list
+        from src.services.news.job import run_once as run_news_once
+
+        return run_news_once(settings)
     raise ValueError("unknown scheduled job")
 
 
@@ -172,7 +177,9 @@ if __name__ == "__main__":
         parser = argparse.ArgumentParser(prog="python -m src.pipeline.scheduler")
         parser.add_argument("--once", action="store_true", required=True)
         parser.add_argument(
-            "--job", choices=("pipeline", "gdelt", "fundamentals"), default="pipeline"
+            "--job",
+            choices=("pipeline", "gdelt", "fundamentals", "news"),
+            default="pipeline",
         )
         args = parser.parse_args()  # exits 2 on a missing or unknown --job
         configure_logging()  # the production entry point: JSON and URL stripping

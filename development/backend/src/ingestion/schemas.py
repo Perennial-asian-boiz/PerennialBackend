@@ -803,3 +803,70 @@ class FundamentalScore(SourceRecord):
 
 RECORD_MODELS.update(fundamentals=FundamentalLine, fundamental_scores=FundamentalScore)
 ONE_ROW_PER_SECURITY = ONE_ROW_PER_SECURITY | {"fundamental_scores"}
+
+
+# ── S1-03 news ingestion (src/services/news) ─────────────
+
+
+class NewsArticle(SourceRecord):
+    """One article linked to one security, first seen in this run (Finnhub company-news)."""
+
+    DB_COLUMNS = (
+        "finnhub_id",
+        "url",
+        "headline",
+        "outlet",
+        "published_at",
+        "content_retrieved",
+        "match_rule",
+        "content_hash",
+    )
+
+    finnhub_id: int = Field(gt=0, le=BIGINT_MAX, strict=True)
+    url: Annotated[str, BeforeValidator(_text_validator(2048, required=True))]
+    headline: Annotated[str, BeforeValidator(_text_validator(500, required=True))]
+    outlet: Annotated[str, BeforeValidator(_text_validator(100, required=True))]
+    published_at: datetime
+    content_retrieved: Annotated[
+        str, BeforeValidator(_text_validator(24, required=True))
+    ]
+    match_rule: Annotated[str, BeforeValidator(_text_validator(8, required=True))]
+    content_hash: Annotated[str, BeforeValidator(_text_validator(64, required=True))]
+
+    @field_validator("url")
+    @classmethod
+    def _http_url(cls, v: str) -> str:
+        if not re.match(r"https?://", v):
+            raise ValueError("url must be http or https")
+        return v
+
+    @field_validator("published_at")
+    @classmethod
+    def _aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("published_at must be timezone-aware")
+        return v
+
+    @field_validator("content_retrieved")
+    @classmethod
+    def _content(cls, v: str) -> str:
+        if v not in ("headline_and_summary", "headline_only"):
+            raise ValueError("unknown content level")
+        return v
+
+    @field_validator("match_rule")
+    @classmethod
+    def _rule(cls, v: str) -> str:
+        if v not in ("ticker", "name"):
+            raise ValueError("unknown match rule")
+        return v
+
+    @field_validator("content_hash")
+    @classmethod
+    def _hash(cls, v: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{64}", v):
+            raise ValueError("content_hash must be a SHA-256 hex digest")
+        return v
+
+
+RECORD_MODELS.update(news_articles=NewsArticle)

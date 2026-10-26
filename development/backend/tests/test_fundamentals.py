@@ -59,7 +59,8 @@ def test_fundamentals_sources_are_appended_without_moving_anything():
     from src.pipeline.lifecycle import SOURCE_LOCK_KEYS
 
     before = models.WATCHLIST_SOURCES + models.SUBJECTLESS_SOURCES + models.PINNED_ROW_SOURCES
-    assert models.SOURCES == before + ("fundamentals", "fundamental_scores")
+    # Later sources may follow (append only); fundamentals keep their positions.
+    assert models.SOURCES[: len(before) + 2] == before + ("fundamentals", "fundamental_scores")
     assert not set(models.FUNDAMENTALS_SOURCES) & set(models.WATCHLIST_SOURCES)
     assert (SOURCE_LOCK_KEYS["fundamentals"], SOURCE_LOCK_KEYS["fundamental_scores"]) == (170018, 170019)
     assert len(set(SOURCE_LOCK_KEYS.values())) == len(SOURCE_LOCK_KEYS)
