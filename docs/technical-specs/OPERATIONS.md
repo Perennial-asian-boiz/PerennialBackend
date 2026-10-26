@@ -203,6 +203,10 @@ FMP quota as market caps and Congress. Output on stdout:
   failure, and earlier summaries stay as they were.
 - Exit 2: a configuration or database error (see stderr).
 
+Each stored summary is shown as "Source: Financial Modeling Prep", linked to
+FMP's public home page, https://financialmodelingprep.com/, for every company
+(decision 78 (a): FMP's per-company page only loads after logging in).
+
 No company text, key or provider response appears in the output or logs.
 
 ## M3 database observability plan (Supabase PostgreSQL 17)
