@@ -17,6 +17,7 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 
 from src.db import models as m
 from src.db.queries import batch_rows
+from src.ingestion.collectors import ARK_MAX_AGE
 from src.ingestion.diagnostics import safe_code
 from src.pipeline import congress_history
 from src.pipeline.demo_guard import (
@@ -318,9 +319,7 @@ def _check_run(
     day = batch["source_as_of"]
     if day and day > now.date():
         raise PublicationError("source observation is future-dated")
-    if source == "ark_holdings" and (
-        day is None or day < (now - timedelta(days=7)).date()
-    ):
+    if source == "ark_holdings" and (day is None or day < (now - ARK_MAX_AGE).date()):
         raise PublicationError("ARK observation date is stale or unknown")
     rows = batch_rows(conn, source, run["batch_id"])
     if source == "short_interest" and any(
