@@ -25,54 +25,190 @@ from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 
 __all__ = [
-    "TickerMatcher", "load_tickers", "load_json_file", "clean_text",
-    "is_discussion_title", "build_scoring_items", "aggregate_rows",
-    "write_csv_atomic", "ROW_FIELDS", "DAILY_FIELDS", "SUMMARY_FIELDS",
-    "parse_dt", "parse_int", "split_sentences", "norm_key", "CLAUSE_SPLIT",
+    "TickerMatcher",
+    "load_tickers",
+    "load_json_file",
+    "clean_text",
+    "is_discussion_title",
+    "build_scoring_items",
+    "aggregate_rows",
+    "write_csv_atomic",
+    "ROW_FIELDS",
+    "DAILY_FIELDS",
+    "SUMMARY_FIELDS",
+    "parse_dt",
+    "parse_int",
+    "split_sentences",
+    "norm_key",
+    "CLAUSE_SPLIT",
     "MAX_TITLE_TICKERS",
 ]
 
 # --------------------------------------------------------------------------- #
 # Tunables
 # --------------------------------------------------------------------------- #
-MIN_WORDS = 3            # drop items shorter than this (after cleaning)
-SHORT_WORDS = 6          # snippets shorter than this get parent/title context
-INHERIT_MIN_WORDS = 4    # a comment must be at least this long to inherit a title ticker
-MAX_TITLE_TICKERS = 2    # titles naming more tickers than this are round-ups: no inheriting
-MAX_CHARS = 8000         # longer items are copy-pasted articles / outliers
-LONG_CHARS = 1000        # longer texts are scored sentence-level around the ticker
+MIN_WORDS = 3  # drop items shorter than this (after cleaning)
+SHORT_WORDS = 6  # snippets shorter than this get parent/title context
+INHERIT_MIN_WORDS = 4  # a comment must be at least this long to inherit a title ticker
+MAX_TITLE_TICKERS = (
+    2  # titles naming more tickers than this are round-ups: no inheriting
+)
+MAX_CHARS = 8000  # longer items are copy-pasted articles / outliers
+LONG_CHARS = 1000  # longer texts are scored sentence-level around the ticker
 MAX_SNIPPET = 1500
 CONTEXT_CHARS = 400
-CONTEXT_WINDOW = 60      # chars either side of an ambiguous match searched for finance words
-MIN_NAME_CHARS = 4       # company names shorter than this are never matched
-BULL_THRESHOLD, BEAR_THRESHOLD = 6.5, 4.5   # on the 1..10 score scale (5.5 = neutral)
+CONTEXT_WINDOW = (
+    60  # chars either side of an ambiguous match searched for finance words
+)
+MIN_NAME_CHARS = 4  # company names shorter than this are never matched
+BULL_THRESHOLD, BEAR_THRESHOLD = 6.5, 4.5  # on the 1..10 score scale (5.5 = neutral)
 
 # Symbols that are English words / jargon: a finance word nearby does NOT prove
 # the author means the company ("AI stocks", "IT is going up"), so they are only
 # accepted as a cashtag: $AI, $IT.
 CASHTAG_ONLY_SYMBOLS = {
-    "A", "AI", "AM", "AN", "ANY", "ARE", "AS", "AT", "ATH", "BE", "BY", "CEO",
-    "CFO", "CPI", "DCA", "DD", "DO", "EPS", "ETF", "EV", "FDA", "FED", "FOMO",
-    "FYI", "GDP", "GO", "HE", "IF", "IMO", "IN", "IPO", "IRA", "IT", "ITM", "IV",
-    "LOL", "ME", "MY", "OF", "OK", "OR", "OTM", "PT", "ROI", "SEC", "SO", "TO",
-    "UK", "UP", "US", "USA", "USD", "WTF", "YOLO",
+    "A",
+    "AI",
+    "AM",
+    "AN",
+    "ANY",
+    "ARE",
+    "AS",
+    "AT",
+    "ATH",
+    "BE",
+    "BY",
+    "CEO",
+    "CFO",
+    "CPI",
+    "DCA",
+    "DD",
+    "DO",
+    "EPS",
+    "ETF",
+    "EV",
+    "FDA",
+    "FED",
+    "FOMO",
+    "FYI",
+    "GDP",
+    "GO",
+    "HE",
+    "IF",
+    "IMO",
+    "IN",
+    "IPO",
+    "IRA",
+    "IT",
+    "ITM",
+    "IV",
+    "LOL",
+    "ME",
+    "MY",
+    "OF",
+    "OK",
+    "OR",
+    "OTM",
+    "PT",
+    "ROI",
+    "SEC",
+    "SO",
+    "TO",
+    "UK",
+    "UP",
+    "US",
+    "USA",
+    "USD",
+    "WTF",
+    "YOLO",
 }
 # Real tickers that are also common words: accepted in CAPS only when a finance
 # word is nearby (ON earnings, NOW calls), and never inside shouting text.
 NEEDS_CONTEXT_SYMBOLS = {
-    "ALL", "BIG", "CAN", "CAR", "CASH", "COST", "DAY", "FAST", "FOR", "FREE",
-    "FUN", "GOOD", "HAS", "HOME", "HOT", "KEY", "LIFE", "LIKE", "LIVE", "LOVE",
-    "LOW", "MAN", "MAY", "MET", "NEW", "NEXT", "NICE", "NOW", "ON", "ONE", "OPEN",
-    "OUT", "PAY", "PEAK", "PLAY", "POST", "REAL", "RIDE", "ROCK", "RUN", "SAVE",
-    "SEE", "SHOP", "TECH", "TOP", "TRUE", "TWO", "WAY", "WELL", "WIN", "WORK", "YOU",
+    "ALL",
+    "BIG",
+    "CAN",
+    "CAR",
+    "CASH",
+    "COST",
+    "DAY",
+    "FAST",
+    "FOR",
+    "FREE",
+    "FUN",
+    "GOOD",
+    "HAS",
+    "HOME",
+    "HOT",
+    "KEY",
+    "LIFE",
+    "LIKE",
+    "LIVE",
+    "LOVE",
+    "LOW",
+    "MAN",
+    "MAY",
+    "MET",
+    "NEW",
+    "NEXT",
+    "NICE",
+    "NOW",
+    "ON",
+    "ONE",
+    "OPEN",
+    "OUT",
+    "PAY",
+    "PEAK",
+    "PLAY",
+    "POST",
+    "REAL",
+    "RIDE",
+    "ROCK",
+    "RUN",
+    "SAVE",
+    "SEE",
+    "SHOP",
+    "TECH",
+    "TOP",
+    "TRUE",
+    "TWO",
+    "WAY",
+    "WELL",
+    "WIN",
+    "WORK",
+    "YOU",
 }
 # Company names that are also ordinary words: need the exact capitalisation
 # ("Apple", not "apple") AND a finance word nearby.
 NEEDS_CONTEXT_NAMES = {
-    "apple", "target", "block", "visa", "ford", "meta", "oracle", "square",
-    "snap", "shell", "match", "delta", "united", "carnival", "discovery",
-    "general", "american", "first", "national", "pacific", "atlas", "summit",
-    "mosaic", "ally", "ross", "dollar", "southwest", "paramount",
+    "apple",
+    "target",
+    "block",
+    "visa",
+    "ford",
+    "meta",
+    "oracle",
+    "square",
+    "snap",
+    "shell",
+    "match",
+    "delta",
+    "united",
+    "carnival",
+    "discovery",
+    "general",
+    "american",
+    "first",
+    "national",
+    "pacific",
+    "atlas",
+    "summit",
+    "mosaic",
+    "ally",
+    "ross",
+    "dollar",
+    "southwest",
+    "paramount",
 }
 # Hand-made aliases (only used if the ticker is in your tickers.json).
 DEFAULT_ALIASES = {
@@ -86,14 +222,23 @@ DEFAULT_ALIASES = {
 }
 
 BOT_AUTHORS = {
-    "automoderator", "visualmod", "wsbapp", "sneakpeekbot", "remindmebot",
-    "repostsleuthbot", "wallstreetbets-modteam", "b0trank", "friendlybot",
+    "automoderator",
+    "visualmod",
+    "wsbapp",
+    "sneakpeekbot",
+    "remindmebot",
+    "repostsleuthbot",
+    "wallstreetbets-modteam",
+    "b0trank",
+    "friendlybot",
 }
 # "RemindMeBot", "foo_bot", "bot_x" -- but not the surname "Talbot"
 _BOT_NAME_RE = re.compile(r"(?:[_-][Bb]ot$|(?<=[a-z0-9])Bot$|^[Bb]ot[_-])")
 _BOT_BODY_RE = re.compile(
     r"\bi am a bot\b|\bi'm a bot\b|this action was performed automatically"
-    r"|\bbeep boop\b", re.I)
+    r"|\bbeep boop\b",
+    re.I,
+)
 REMOVED_MARKERS = {"[deleted]", "[removed]", "[deleted by user]"}
 
 _FIN_RE = re.compile(
@@ -102,22 +247,39 @@ _FIN_RE = re.compile(
     r"sold|short(?:s|ing|ed)?|dividends?|ipo|market ?cap|valuation|price targets?|"
     r"pt|ath|position|holding|holders?|invest(?:ed|ing|ment|or|ors)?|ticker|etf|"
     r"portfolio|dip|moon|squeeze|premarket|pre-market|after-?hours|breakout|"
-    r"resistance|yoy|ytd|shareholders?|quarter|q[1-4]|10-?[kq])\b", re.I)
+    r"resistance|yoy|ytd|shareholders?|quarter|q[1-4]|10-?[kq])\b",
+    re.I,
+)
 
 # Stricter context used for ambiguous company names when capitalisation can't be
 # trusted (spoken transcripts): "Target stock" yes, "buy calls, my target is" no.
 _CORP_RE = re.compile(
     r"\b(?:stocks?|shares?|earnings|eps|revenue|guidance|ceo|cfo|company|quarter|"
     r"q[1-4]|dividends?|ipo|valuation|market ?cap|investors?|investing|shareholders?|"
-    r"analysts?|ticker|portfolio|bull(?:ish)?|bear(?:ish)?)\b", re.I)
-_NAME_PREV_BLOCK = {"price", "analyst", "analysts", "street", "average", "median",
-                    "consensus", "revised", "raised", "lowered", "cut"}
+    r"analysts?|ticker|portfolio|bull(?:ish)?|bear(?:ish)?)\b",
+    re.I,
+)
+_NAME_PREV_BLOCK = {
+    "price",
+    "analyst",
+    "analysts",
+    "street",
+    "average",
+    "median",
+    "consensus",
+    "revised",
+    "raised",
+    "lowered",
+    "cut",
+}
 
 _DISCUSSION_RE = re.compile(
     r"\b(?:daily|weekly|weekend)\b.*\b(?:thread|discussion|chat|moves|talk)\b"
     r"|discussion thread|mega ?thread|what are your moves|moves tomorrow"
     r"|live thread|free talk|rate my portfolio|general discussion"
-    r"|questions? thread|earnings thread|^\s*(?:daily|weekly)\b", re.I)
+    r"|questions? thread|earnings thread|^\s*(?:daily|weekly)\b",
+    re.I,
+)
 
 _TOKEN_RE = re.compile(r"\$?[A-Za-z0-9]+")
 _URL_RE = re.compile(r"https?://\S+|www\.\S+", re.I)
@@ -125,10 +287,13 @@ _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 _CLAUSE_SPLIT = re.compile(
     r"\s*[;,]\s*|\s+[-\u2013\u2014]\s+|\s+\b(?:but|however|while|whereas|although|though|yet)\b\s+",
-    re.I)
+    re.I,
+)
 _SUFFIX_RE = re.compile(
     r"[,\s]+(inc|incorporated|corp|corporation|co|company|ltd|limited|plc|llc|"
-    r"holdings?|group|class [a-c])\.?$", re.I)
+    r"holdings?|group|class [a-c])\.?$",
+    re.I,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -147,8 +312,9 @@ def load_tickers(path):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if not isinstance(data, dict) or not data:
-        raise ValueError(f"{path} must hold a non-empty JSON object of "
-                         f"{{company name: ticker}}")
+        raise ValueError(
+            f"{path} must hold a non-empty JSON object of {{company name: ticker}}"
+        )
     return data
 
 
@@ -175,7 +341,7 @@ def _short_name(name):
     prev = None
     while prev != name:
         prev, name = name, _SUFFIX_RE.sub("", name).strip()
-    return re.sub(r"\.com$", "", name, flags=re.I)      # "Amazon.com" -> "Amazon"
+    return re.sub(r"\.com$", "", name, flags=re.I)  # "Amazon.com" -> "Amazon"
 
 
 def is_discussion_title(title):
@@ -218,7 +384,7 @@ def reject_reason(text, author, min_words=MIN_WORDS, max_chars=MAX_CHARS):
     if _BOT_BODY_RE.search(text):
         return "bot_text"
     if not re.search(r"[A-Za-z]{2,}", text):
-        return "no_words"                     # link-only / emoji-only
+        return "no_words"  # link-only / emoji-only
     if len(text.split()) < min_words:
         return "too_short"
     if len(text) > max_chars:
@@ -263,19 +429,25 @@ class TickerMatcher:
         if not isinstance(tickers, dict):
             raise ValueError("tickers must be a {company name: ticker} dict")
         extra = {str(x).strip() for x in (extra_ambiguous or []) if str(x).strip()}
-        amb_syms = {x.upper() for x in NEEDS_CONTEXT_SYMBOLS} | {x.upper() for x in extra}
-        amb_names = {x.lower() for x in NEEDS_CONTEXT_NAMES} | {x.lower() for x in extra}
+        amb_syms = {x.upper() for x in NEEDS_CONTEXT_SYMBOLS} | {
+            x.upper() for x in extra
+        }
+        amb_names = {x.lower() for x in NEEDS_CONTEXT_NAMES} | {
+            x.lower() for x in extra
+        }
 
         self.known = set()
-        self._cash = {}          # any symbol form -> symbol (cashtag use)
-        self._strong = {}        # 3-letter symbols, CAPS only
-        self._weak = {}          # word-tickers: CAPS + finance context
-        self._cand = {}          # 4+ letter symbols: CAPS always, lowercase once fitted
+        self._cash = {}  # any symbol form -> symbol (cashtag use)
+        self._strong = {}  # 3-letter symbols, CAPS only
+        self._weak = {}  # word-tickers: CAPS + finance context
+        self._cand = {}  # 4+ letter symbols: CAPS always, lowercase once fitted
         self._lower_ok = set()
-        self._punct = {}         # symbols containing . or - (BRK.B)
-        self._names = defaultdict(dict)   # first word -> {(words, needs_ctx): [orig, {syms}]}
+        self._punct = {}  # symbols containing . or - (BRK.B)
+        self._names = defaultdict(
+            dict
+        )  # first word -> {(words, needs_ctx): [orig, {syms}]}
         self._queries = {}
-        self._terms = defaultdict(list)      # symbol -> search terms (symbol, short name)
+        self._terms = defaultdict(list)  # symbol -> search terms (symbol, short name)
 
         for name, raw in tickers.items():
             sym = str(raw).strip().upper().lstrip("$")
@@ -304,8 +476,12 @@ class TickerMatcher:
             # search-engine queries (one per term; ambiguous terms get " stock")
             terms = []
             if letters >= 2:
-                terms.append((sym, sym in amb_syms or sym in CASHTAG_ONLY_SYMBOLS
-                              or letters == 2))
+                terms.append(
+                    (
+                        sym,
+                        sym in amb_syms or sym in CASHTAG_ONLY_SYMBOLS or letters == 2,
+                    )
+                )
             if len(short) >= MIN_NAME_CHARS:
                 terms.append((short, short.lower() in amb_names))
             for term, ambiguous in terms:
@@ -326,8 +502,12 @@ class TickerMatcher:
 
         self._punct_re = None
         if self._punct:
-            alt = "|".join(re.escape(f) for f in sorted(self._punct, key=len, reverse=True))
-            self._punct_re = re.compile(rf"(?<![A-Za-z0-9])(\$)?({alt})(?![A-Za-z0-9])", re.I)
+            alt = "|".join(
+                re.escape(f) for f in sorted(self._punct, key=len, reverse=True)
+            )
+            self._punct_re = re.compile(
+                rf"(?<![A-Za-z0-9])(\$)?({alt})(?![A-Za-z0-9])", re.I
+            )
 
     def _add_name(self, nm, sym, amb_names):
         if len(nm) < MIN_NAME_CHARS:
@@ -336,7 +516,9 @@ class TickerMatcher:
         if not orig:
             return
         low = tuple(w.lower() for w in orig)
-        slot = self._names[low[0]].setdefault((low, nm.lower() in amb_names), [orig, set()])
+        slot = self._names[low[0]].setdefault(
+            (low, nm.lower() in amb_names), [orig, set()]
+        )
         slot[1].add(sym)
 
     @property
@@ -371,8 +553,8 @@ class TickerMatcher:
 
     @staticmethod
     def _has_context(text, start, end, regex=_FIN_RE):
-        before = text[max(0, start - CONTEXT_WINDOW):start]     # match itself excluded
-        after = text[end:end + CONTEXT_WINDOW]
+        before = text[max(0, start - CONTEXT_WINDOW) : start]  # match itself excluded
+        after = text[end : end + CONTEXT_WINDOW]
         return bool(regex.search(before) or regex.search(after))
 
     def find(self, text):
@@ -391,7 +573,7 @@ class TickerMatcher:
         shouting = None
         toks = [(m.group(), m.start(), m.end()) for m in _TOKEN_RE.finditer(text)]
         for i, (tok, s, e) in enumerate(toks):
-            if tok[0] == "$":                                   # cashtag
+            if tok[0] == "$":  # cashtag
                 sym = self._cash.get(tok[1:].upper())
                 if sym:
                     found.append((sym, s))
@@ -407,8 +589,11 @@ class TickerMatcher:
                     found.append((sym, s))
                 else:
                     sym = self._weak.get(key)
-                    if (sym and text[e:e + 1] not in ("'", "\u2019")      # IT'S, ON'T
-                            and self._has_context(text, s, e)):
+                    if (
+                        sym
+                        and text[e : e + 1] not in ("'", "\u2019")  # IT'S, ON'T
+                        and self._has_context(text, s, e)
+                    ):
                         if shouting is None:
                             shouting = _is_shouting(text)
                         if not shouting:
@@ -418,9 +603,10 @@ class TickerMatcher:
             if cands:
                 for (words_low, needs_ctx), (words_orig, syms) in cands.items():
                     n = len(words_low)
-                    seg = toks[i:i + n]
-                    if len(seg) < n or any(seg[k][0].lower() != words_low[k]
-                                           for k in range(n)):
+                    seg = toks[i : i + n]
+                    if len(seg) < n or any(
+                        seg[k][0].lower() != words_low[k] for k in range(n)
+                    ):
                         continue
                     if needs_ctx:
                         if self.strict_case:
@@ -447,9 +633,24 @@ class TickerMatcher:
 # Building the scoring items
 # --------------------------------------------------------------------------- #
 ROW_FIELDS = [
-    "id", "kind", "source", "ticker", "subreddit", "post_id", "comment_id",
-    "author", "created_utc", "upvotes", "n_tickers", "score", "bullish",
-    "bearish", "neutral", "text", "context", "permalink",
+    "id",
+    "kind",
+    "source",
+    "ticker",
+    "subreddit",
+    "post_id",
+    "comment_id",
+    "author",
+    "created_utc",
+    "upvotes",
+    "n_tickers",
+    "score",
+    "bullish",
+    "bearish",
+    "neutral",
+    "text",
+    "context",
+    "permalink",
 ]
 
 
@@ -464,8 +665,11 @@ def _snippet(text, ticker, matcher, n_own):
             continue
         if len(tickers_here) > 1:
             # "NVDA is great but AMD is garbage": keep only the clause(s) about this ticker
-            clauses = [c for c in _CLAUSE_SPLIT.split(sent)
-                       if c and c.strip() and ticker in matcher.find(c)]
+            clauses = [
+                c
+                for c in _CLAUSE_SPLIT.split(sent)
+                if c and c.strip() and ticker in matcher.find(c)
+            ]
             if clauses:
                 sent = " ".join(clauses)
         picks.append(sent)
@@ -522,7 +726,9 @@ def build_scoring_items(posts, comments, matcher, cutoff=None, inherit_title=Tru
     def add_items(kind, base_id, tickers, text, meta, context_for):
         n_own = sum(1 for s in tickers.values() if s == "text")
         for ticker, source in sorted(tickers.items()):
-            snippet = text if source == "title" else _snippet(text, ticker, matcher, n_own)
+            snippet = (
+                text if source == "title" else _snippet(text, ticker, matcher, n_own)
+            )
             if not snippet:
                 stats["dropped_no_sentence_match"] += 1
                 continue
@@ -534,12 +740,18 @@ def build_scoring_items(posts, comments, matcher, cutoff=None, inherit_title=Tru
                 continue
             seen.add(key)
             digest = hashlib.sha1(fingerprint.encode("utf-8")).hexdigest()[:8]
-            items.append({
-                "id": f"{kind[0]}:{base_id}:{ticker}:{digest}",
-                "kind": kind, "source": source, "ticker": ticker,
-                "n_tickers": len(tickers), "text": snippet, "context": context,
-                **meta,
-            })
+            items.append(
+                {
+                    "id": f"{kind[0]}:{base_id}:{ticker}:{digest}",
+                    "kind": kind,
+                    "source": source,
+                    "ticker": ticker,
+                    "n_tickers": len(tickers),
+                    "text": snippet,
+                    "context": context,
+                    **meta,
+                }
+            )
             stats[f"items_{kind}"] += 1
 
     # ---- 4a. posts
@@ -557,12 +769,21 @@ def build_scoring_items(posts, comments, matcher, cutoff=None, inherit_title=Tru
             stats["dropped_no_ticker"] += 1
             continue
         add_items(
-            "post", p["post_id"], {t: "text" for t in own}, text,
-            {"subreddit": p.get("subreddit", ""), "post_id": p["post_id"],
-             "comment_id": "", "author": p.get("author", ""),
-             "created_utc": created.isoformat() if created else "",
-             "upvotes": parse_int(p.get("score")), "permalink": p.get("permalink", "")},
-            lambda snippet: "")
+            "post",
+            p["post_id"],
+            {t: "text" for t in own},
+            text,
+            {
+                "subreddit": p.get("subreddit", ""),
+                "post_id": p["post_id"],
+                "comment_id": "",
+                "author": p.get("author", ""),
+                "created_utc": created.isoformat() if created else "",
+                "upvotes": parse_int(p.get("score")),
+                "permalink": p.get("permalink", ""),
+            },
+            lambda snippet: "",
+        )
 
     # ---- 4b. comments
     for c, text in cmt_docs:
@@ -570,8 +791,12 @@ def build_scoring_items(posts, comments, matcher, cutoff=None, inherit_title=Tru
         own = matcher.find(text)
         if own:
             tickers = {t: "text" for t in own}
-        elif (inherit_title and not disc and 1 <= len(title_tk) <= MAX_TITLE_TICKERS
-              and len(text.split()) >= INHERIT_MIN_WORDS):
+        elif (
+            inherit_title
+            and not disc
+            and 1 <= len(title_tk) <= MAX_TITLE_TICKERS
+            and len(text.split()) >= INHERIT_MIN_WORDS
+        ):
             tickers = {t: "title" for t in title_tk}
         else:
             stats["dropped_no_ticker"] += 1
@@ -581,7 +806,11 @@ def build_scoring_items(posts, comments, matcher, cutoff=None, inherit_title=Tru
             if len(snippet.split()) >= SHORT_WORDS:
                 return ""
             parent_id = c.get("parent_id")
-            parent = cmt_by_id.get(parent_id) if parent_id and parent_id != c["post_id"] else None
+            parent = (
+                cmt_by_id.get(parent_id)
+                if parent_id and parent_id != c["post_id"]
+                else None
+            )
             if parent:
                 ptxt = clean_text(parent.get("body", ""))
                 if ptxt and ptxt.strip().lower() not in REMOVED_MARKERS:
@@ -590,16 +819,27 @@ def build_scoring_items(posts, comments, matcher, cutoff=None, inherit_title=Tru
 
         created = parse_dt(c.get("created_utc"))
         add_items(
-            "comment", c["comment_id"], tickers, text,
-            {"subreddit": c.get("subreddit", ""), "post_id": c["post_id"],
-             "comment_id": c["comment_id"], "author": c.get("author", ""),
-             "created_utc": created.isoformat() if created else "",
-             "upvotes": parse_int(c.get("score")), "permalink": c.get("permalink", "")},
-            context_for)
+            "comment",
+            c["comment_id"],
+            tickers,
+            text,
+            {
+                "subreddit": c.get("subreddit", ""),
+                "post_id": c["post_id"],
+                "comment_id": c["comment_id"],
+                "author": c.get("author", ""),
+                "created_utc": created.isoformat() if created else "",
+                "upvotes": parse_int(c.get("score")),
+                "permalink": c.get("permalink", ""),
+            },
+            context_for,
+        )
 
     # comments with no timestamp: borrow the post's, so they still land on a day
-    post_time = {p["post_id"]: (created.isoformat() if created else "")
-                 for p, _t, _x, created in post_docs}
+    post_time = {
+        p["post_id"]: (created.isoformat() if created else "")
+        for p, _t, _x, created in post_docs
+    }
     for it in items:
         if not it["created_utc"]:
             it["created_utc"] = post_time.get(it["post_id"], "")
@@ -610,14 +850,34 @@ def build_scoring_items(posts, comments, matcher, cutoff=None, inherit_title=Tru
 # Aggregation
 # --------------------------------------------------------------------------- #
 DAILY_FIELDS = [
-    "ticker", "date", "n_items", "n_voters", "total_upvotes",
-    "mean_score_weighted", "mean_score", "pct_bullish", "pct_bearish",
-    "avg_neutral", "mention_z", "reliable", "reported_score",
+    "ticker",
+    "date",
+    "n_items",
+    "n_voters",
+    "total_upvotes",
+    "mean_score_weighted",
+    "mean_score",
+    "pct_bullish",
+    "pct_bearish",
+    "avg_neutral",
+    "mention_z",
+    "reliable",
+    "reported_score",
 ]
 SUMMARY_FIELDS = [
-    "ticker", "n_items", "n_voters", "active_days", "peak_day", "peak_items",
-    "mean_score_weighted", "mean_score", "pct_bullish", "pct_bearish",
-    "avg_neutral", "reliable", "reported_score",
+    "ticker",
+    "n_items",
+    "n_voters",
+    "active_days",
+    "peak_day",
+    "peak_items",
+    "mean_score_weighted",
+    "mean_score",
+    "pct_bullish",
+    "pct_bearish",
+    "avg_neutral",
+    "reliable",
+    "reported_score",
 ]
 
 
@@ -648,8 +908,12 @@ def _stats(votes, rows, min_items):
     return {
         "mean_score_weighted": round(wmean, 3),
         "mean_score": round(mean, 3),
-        "pct_bullish": round(sum(s >= BULL_THRESHOLD for s, _ in votes) / len(votes), 3),
-        "pct_bearish": round(sum(s <= BEAR_THRESHOLD for s, _ in votes) / len(votes), 3),
+        "pct_bullish": round(
+            sum(s >= BULL_THRESHOLD for s, _ in votes) / len(votes), 3
+        ),
+        "pct_bearish": round(
+            sum(s <= BEAR_THRESHOLD for s, _ in votes) / len(votes), 3
+        ),
         "avg_neutral": round(sum(r["neutral"] for r in rows) / len(rows), 3),
     }
 
@@ -680,8 +944,8 @@ def aggregate_rows(rows, min_items=20, weight_field="upvotes"):
     d0, d1 = date.fromisoformat(all_days[0]), date.fromisoformat(all_days[-1])
     span = [(d0 + timedelta(days=i)).isoformat() for i in range((d1 - d0).days + 1)]
 
-    counts = defaultdict(dict)                 # ticker -> day -> n_items
-    votes_by_ticker = defaultdict(list)        # ticker -> [(score, weight)]
+    counts = defaultdict(dict)  # ticker -> day -> n_items
+    votes_by_ticker = defaultdict(list)  # ticker -> [(score, weight)]
     rows_by_ticker = defaultdict(list)
     voters_by_ticker = defaultdict(set)
     daily = []
@@ -693,10 +957,14 @@ def aggregate_rows(rows, min_items=20, weight_field="upvotes"):
         votes_by_ticker[ticker].extend(votes)
         rows_by_ticker[ticker].extend(item_rows)
         voters_by_ticker[ticker].update(voters.keys())
-        rec = {"ticker": ticker, "date": day, "n_items": len(item_rows),
-               "n_voters": len(voters),
-               "total_upvotes": sum(max(0, r[weight_field]) for r in item_rows),
-               **_stats(votes, item_rows, min_items)}
+        rec = {
+            "ticker": ticker,
+            "date": day,
+            "n_items": len(item_rows),
+            "n_voters": len(voters),
+            "total_upvotes": sum(max(0, r[weight_field]) for r in item_rows),
+            **_stats(votes, item_rows, min_items),
+        }
         rec["reliable"] = len(voters) >= min_items
         rec["reported_score"] = rec["mean_score_weighted"] if rec["reliable"] else ""
         daily.append(rec)
@@ -706,19 +974,27 @@ def aggregate_rows(rows, min_items=20, weight_field="upvotes"):
         if len(series) >= 3:
             mean = sum(series) / len(series)
             std = math.sqrt(sum((x - mean) ** 2 for x in series) / len(series))
-            rec["mention_z"] = round((rec["n_items"] - mean) / std, 3) if std > 0 else 0.0
+            rec["mention_z"] = (
+                round((rec["n_items"] - mean) / std, 3) if std > 0 else 0.0
+            )
         else:
             rec["mention_z"] = ""
     daily.sort(key=lambda r: (r["ticker"], r["date"]))
 
     summary = []
     for ticker, votes in votes_by_ticker.items():
-        peak_day, peak_items = max(counts[ticker].items(), key=lambda kv: (kv[1], kv[0]))
-        rec = {"ticker": ticker, "n_items": len(rows_by_ticker[ticker]),
-               "n_voters": len(voters_by_ticker[ticker]),
-               "active_days": len(counts[ticker]),
-               "peak_day": peak_day, "peak_items": peak_items,
-               **_stats(votes, rows_by_ticker[ticker], min_items)}
+        peak_day, peak_items = max(
+            counts[ticker].items(), key=lambda kv: (kv[1], kv[0])
+        )
+        rec = {
+            "ticker": ticker,
+            "n_items": len(rows_by_ticker[ticker]),
+            "n_voters": len(voters_by_ticker[ticker]),
+            "active_days": len(counts[ticker]),
+            "peak_day": peak_day,
+            "peak_items": peak_items,
+            **_stats(votes, rows_by_ticker[ticker], min_items),
+        }
         rec["reliable"] = rec["n_voters"] >= min_items
         rec["reported_score"] = rec["mean_score_weighted"] if rec["reliable"] else ""
         summary.append(rec)

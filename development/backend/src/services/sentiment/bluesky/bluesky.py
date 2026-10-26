@@ -64,13 +64,16 @@ import httpx
 from dotenv import load_dotenv
 
 from src.utils.fetch_tickers import fetch_ticker_map
+
 # NOTE: adjust this import path to wherever sentiment_scorer.py lives in your project.
 from src.services.sentiment.sentiment_scorer import score_texts, load_scores
 
 load_dotenv()  # reads BSKY_HANDLE / BSKY_APP_PASSWORD from a .env file next to the script
 
 # ---------- Config ----------
-PDS_URL = "https://bsky.social/xrpc"   # authenticated; proxies searchPosts to the AppView
+PDS_URL = (
+    "https://bsky.social/xrpc"  # authenticated; proxies searchPosts to the AppView
+)
 # symbol -> company name (same pairs as the ticker file, which is name -> symbol)
 FALLBACK_COMPANIES = {
     "NVDA": "NVIDIA",
@@ -80,16 +83,16 @@ FALLBACK_COMPANIES = {
     "GOOGL": "Alphabet",
 }
 ENGLISH_ONLY = True
-PAGE_LIMIT = 100                       # API max per page
-DEFAULT_LOOKBACK_DAYS = 7              # used when --since is not given
-DEFAULT_WINDOW_HOURS = 24              # slice big ranges so deep pagination never caps out
+PAGE_LIMIT = 100  # API max per page
+DEFAULT_LOOKBACK_DAYS = 7  # used when --since is not given
+DEFAULT_WINDOW_HOURS = 24  # slice big ranges so deep pagination never caps out
 
 OUTPUT_FILE = Path(__file__).with_name("bluesky_sentiments.json")
 
 LOG_FILE = Path(__file__).with_name("bluesky_query.log")
-LOG_MAX_BYTES = 5_000_000              # rotate at ~5 MB, keep 3 old files
+LOG_MAX_BYTES = 5_000_000  # rotate at ~5 MB, keep 3 old files
 LOG_BACKUPS = 3
-BODY_SNIPPET = 200                     # max chars of an error response body to log
+BODY_SNIPPET = 200  # max chars of an error response body to log
 
 # Same regex as the live listener: $TSLA, $nvda, but not "$5" or "$100".
 CASHTAG_RE = re.compile(r"(?<![\w$])\$([A-Za-z]{1,5})\b")
@@ -191,7 +194,9 @@ async def score_batch(posts, results):
             for ticker in post["tickers"]:
                 results.setdefault(ticker, {})[post["id"]] = post["score"]
         await handle_post(post)
-    log.info("scored batch posts=%d elapsed=%.1fs", len(posts), time.monotonic() - start)
+    log.info(
+        "scored batch posts=%d elapsed=%.1fs", len(posts), time.monotonic() - start
+    )
     return len(posts)
 
 
@@ -205,12 +210,14 @@ def build_report(results, tickers):
     for ticker in sorted(tickers):
         posts = results.get(ticker, {})
         average = round(sum(posts.values()) / len(posts), 2) if posts else None
-        report.append({
-            "ticker": ticker,
-            "average_sentiment": average,
-            "post_count": len(posts),
-            "posts": posts,
-        })
+        report.append(
+            {
+                "ticker": ticker,
+                "average_sentiment": average,
+                "post_count": len(posts),
+                "posts": posts,
+            }
+        )
     return report
 
 
@@ -225,8 +232,12 @@ def write_results(path, results, tickers):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
-        log.info("results written path=%s tickers=%d posts=%d",
-                 path, len(report), sum(r["post_count"] for r in report))
+        log.info(
+            "results written path=%s tickers=%d posts=%d",
+            path,
+            len(report),
+            sum(r["post_count"] for r in report),
+        )
         print(f"Results saved to {path}")
     except Exception:
         log.exception("failed to write results to %s", path)
@@ -259,7 +270,7 @@ class BlueskyClient:
         self.app_password = app_password
         self.http = httpx.AsyncClient(timeout=30)
         self.token = None
-        self.deadline = deadline   # time.monotonic() value from --time, or None
+        self.deadline = deadline  # time.monotonic() value from --time, or None
 
     def time_up(self):
         return self.deadline is not None and time.monotonic() >= self.deadline
@@ -284,7 +295,9 @@ class BlueskyClient:
             log.error("login failed (network): %s: %s", type(e).__name__, e)
             raise
         if r.status_code != 200:
-            log.error("login failed status=%s body=%s", r.status_code, r.text[:BODY_SNIPPET])
+            log.error(
+                "login failed status=%s body=%s", r.status_code, r.text[:BODY_SNIPPET]
+            )
             r.raise_for_status()
         self.token = r.json()["accessJwt"]
         log.info("login ok handle=%s", self.handle)
@@ -301,8 +314,14 @@ class BlueskyClient:
                     headers={"Authorization": f"Bearer {self.token}"},
                 )
             except httpx.TransportError as e:
-                log.warning("%s network error attempt=%d/%d: %s: %s",
-                            method, attempt, retries, type(e).__name__, e)
+                log.warning(
+                    "%s network error attempt=%d/%d: %s: %s",
+                    method,
+                    attempt,
+                    retries,
+                    type(e).__name__,
+                    e,
+                )
                 await self._sleep(2 ** (attempt - 1))
                 continue
 
@@ -311,25 +330,50 @@ class BlueskyClient:
                     log.info("%s succeeded after %d attempts", method, attempt)
                 return r.json()
             if r.status_code in (400, 401) and "ExpiredToken" in r.text:
-                log.warning("%s token expired, logging in again (attempt=%d/%d)", method, attempt, retries)
+                log.warning(
+                    "%s token expired, logging in again (attempt=%d/%d)",
+                    method,
+                    attempt,
+                    retries,
+                )
                 await self.login()
                 continue
             if r.status_code == 429:
                 reset = r.headers.get("ratelimit-reset")
-                wait = max(1, int(reset) - int(time.time())) if reset and reset.isdigit() else 2 ** (attempt - 1)
+                wait = (
+                    max(1, int(reset) - int(time.time()))
+                    if reset and reset.isdigit()
+                    else 2 ** (attempt - 1)
+                )
                 wait = min(wait, 300)
-                log.warning("%s rate limited status=429 sleeping=%ss attempt=%d/%d",
-                            method, wait, attempt, retries)
+                log.warning(
+                    "%s rate limited status=429 sleeping=%ss attempt=%d/%d",
+                    method,
+                    wait,
+                    attempt,
+                    retries,
+                )
                 print(f"Rate limited, sleeping {wait}s")
                 await self._sleep(wait)
                 continue
             if r.status_code >= 500:
-                log.warning("%s server error status=%s attempt=%d/%d body=%s",
-                            method, r.status_code, attempt, retries, r.text[:BODY_SNIPPET])
+                log.warning(
+                    "%s server error status=%s attempt=%d/%d body=%s",
+                    method,
+                    r.status_code,
+                    attempt,
+                    retries,
+                    r.text[:BODY_SNIPPET],
+                )
                 await self._sleep(2 ** (attempt - 1))
                 continue
 
-            log.error("%s request rejected status=%s body=%s", method, r.status_code, r.text[:BODY_SNIPPET])
+            log.error(
+                "%s request rejected status=%s body=%s",
+                method,
+                r.status_code,
+                r.text[:BODY_SNIPPET],
+            )
             r.raise_for_status()
 
         log.error("%s failed after %d attempts", method, retries)
@@ -359,9 +403,15 @@ class BlueskyClient:
             posts = data.get("posts", [])
             cursor = data.get("cursor")
             page_no += 1
-            log.info("search ok q=%s window=%s page=%d posts=%d more=%s elapsed=%.2fs",
-                     query, short_window(since, until), page_no, len(posts),
-                     "yes" if cursor else "no", elapsed)
+            log.info(
+                "search ok q=%s window=%s page=%d posts=%d more=%s elapsed=%.2fs",
+                query,
+                short_window(since, until),
+                page_no,
+                len(posts),
+                "yes" if cursor else "no",
+                elapsed,
+            )
 
             if posts:
                 yield posts
@@ -384,13 +434,20 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
     client = BlueskyClient(handle, password, deadline)
 
     allowed = frozenset(tickers)
-    seen = set()   # a post mentioning $TSLA and $NVDA shows up in both searches; handle once
+    seen = (
+        set()
+    )  # a post mentioning $TSLA and $NVDA shows up in both searches; handle once
     count = 0
-    results = {}   # {ticker: {post_id: score}}, written to the JSON file at the end
+    results = {}  # {ticker: {post_id: score}}, written to the JSON file at the end
     run_start = time.monotonic()
 
-    log.info("run start tickers=%s since=%s until=%s window_hours=%d",
-             sorted(allowed), iso(since), iso(until), window_hours)
+    log.info(
+        "run start tickers=%s since=%s until=%s window_hours=%d",
+        sorted(allowed),
+        iso(since),
+        iso(until),
+        window_hours,
+    )
 
     try:
         await client.login()
@@ -419,19 +476,27 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
                             continue
 
                         seen.add(post_id)
-                        batch.append({
-                            "id": post_id,
-                            "tickers": sorted(found),
-                            "text": text,
-                            "created_at": record.get("createdAt"),
-                            "ingested_at": time.time(),
-                        })
+                        batch.append(
+                            {
+                                "id": post_id,
+                                "tickers": sorted(found),
+                                "text": text,
+                                "created_at": record.get("createdAt"),
+                                "ingested_at": time.time(),
+                            }
+                        )
 
                     # One scoring call per fetched API page.
                     kept += len(batch)
                     count += await score_batch(batch, results)
-                log.info("window done ticker=%s window=%s fetched=%d new=%d total=%d",
-                         ticker, short_window(w_start, w_end), fetched, kept, count)
+                log.info(
+                    "window done ticker=%s window=%s fetched=%d new=%d total=%d",
+                    ticker,
+                    short_window(w_start, w_end),
+                    fetched,
+                    kept,
+                    count,
+                )
                 print(f"  {ticker} {iso(w_start)} -> {iso(w_end)} done (total {count})")
     except TimeUp:
         log.info("time limit reached, no more API requests (%d posts scored)", count)
@@ -443,12 +508,16 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
         await client.close()
         write_results(output_path, results, allowed)
 
-    log.info("run finished unique_posts=%d elapsed=%.1fs", count, time.monotonic() - run_start)
+    log.info(
+        "run finished unique_posts=%d elapsed=%.1fs",
+        count,
+        time.monotonic() - run_start,
+    )
     print(f"Finished: {count} unique posts.")
 
 
 # ---------- Ticker loading ----------
-SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")   # what CASHTAG_RE can actually match
+SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")  # what CASHTAG_RE can actually match
 NAME_TO_SYMBOL = {n.lower(): s for s, n in FALLBACK_COMPANIES.items()}
 
 
@@ -461,7 +530,9 @@ def parse_companies(raw):
     match it.
     """
     if not isinstance(raw, dict):
-        raise TypeError(f"Expected a {{company name: ticker}} dict, got {type(raw).__name__}.")
+        raise TypeError(
+            f"Expected a {{company name: ticker}} dict, got {type(raw).__name__}."
+        )
 
     out = {}
     for name, sym in raw.items():
@@ -470,8 +541,14 @@ def parse_companies(raw):
         if SYMBOL_RE.match(sym):
             out[sym] = name
         else:
-            log.warning("skipping ticker entry %r: %r is not a valid symbol (1-5 letters)", name, sym)
-            print(f"Skipping {name!r}: {sym!r} is not a valid ticker symbol (1-5 letters).")
+            log.warning(
+                "skipping ticker entry %r: %r is not a valid symbol (1-5 letters)",
+                name,
+                sym,
+            )
+            print(
+                f"Skipping {name!r}: {sym!r} is not a valid ticker symbol (1-5 letters)."
+            )
     return out
 
 
@@ -514,24 +591,50 @@ async def load_tickers(cli_tickers):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Query past Bluesky posts for ticker cashtags and score their sentiment.")
-    ap.add_argument("--tickers", nargs="+",
-                    help="Tickers or company names to query (default: everything in the ticker file, else fallback list)")
-    ap.add_argument("--since", help="Start, e.g. 2026-10-01 or 2026-10-01T12:00:00 "
-                                    f"(default: {DEFAULT_LOOKBACK_DAYS} days ago)")
+    ap = argparse.ArgumentParser(
+        description="Query past Bluesky posts for ticker cashtags and score their sentiment."
+    )
+    ap.add_argument(
+        "--tickers",
+        nargs="+",
+        help="Tickers or company names to query (default: everything in the ticker file, else fallback list)",
+    )
+    ap.add_argument(
+        "--since",
+        help="Start, e.g. 2026-10-01 or 2026-10-01T12:00:00 "
+        f"(default: {DEFAULT_LOOKBACK_DAYS} days ago)",
+    )
     ap.add_argument("--until", help="End (default: now)")
-    ap.add_argument("--days", type=float, default=DEFAULT_LOOKBACK_DAYS,
-                    help=f"Look back this many days from --until when --since is not given "
-                         f"(default: {DEFAULT_LOOKBACK_DAYS})")
-    ap.add_argument("--time", type=float, default=None,
-                    help="Stop making API requests after this many minutes; posts already "
-                         "fetched are scored and saved (default: no limit)")
-    ap.add_argument("--window-hours", type=int, default=DEFAULT_WINDOW_HOURS,
-                    help="Slice the range into windows of this size")
-    ap.add_argument("--output", default=str(OUTPUT_FILE),
-                    help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} next to this script; overwritten each run)")
-    ap.add_argument("--log-file", default=str(LOG_FILE),
-                    help=f"Where to write the log (default: {LOG_FILE.name} next to this script)")
+    ap.add_argument(
+        "--days",
+        type=float,
+        default=DEFAULT_LOOKBACK_DAYS,
+        help=f"Look back this many days from --until when --since is not given "
+        f"(default: {DEFAULT_LOOKBACK_DAYS})",
+    )
+    ap.add_argument(
+        "--time",
+        type=float,
+        default=None,
+        help="Stop making API requests after this many minutes; posts already "
+        "fetched are scored and saved (default: no limit)",
+    )
+    ap.add_argument(
+        "--window-hours",
+        type=int,
+        default=DEFAULT_WINDOW_HOURS,
+        help="Slice the range into windows of this size",
+    )
+    ap.add_argument(
+        "--output",
+        default=str(OUTPUT_FILE),
+        help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} next to this script; overwritten each run)",
+    )
+    ap.add_argument(
+        "--log-file",
+        default=str(LOG_FILE),
+        help=f"Where to write the log (default: {LOG_FILE.name} next to this script)",
+    )
     args = ap.parse_args()
     if args.days <= 0:
         ap.error("--days must be greater than 0")

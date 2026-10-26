@@ -102,12 +102,14 @@ import requests
 from src.utils.fetch_tickers import fetch_ticker_map
 
 # ---- Settings (edit here) ----
-SERVERS_FILE = "mastodon_servers.json"       # Mastodon server list JSON
-OUTPUT_FILE = Path(__file__).with_name("mastodon_sentiments.json")  # results, overwritten each run
+SERVERS_FILE = "mastodon_servers.json"  # Mastodon server list JSON
+OUTPUT_FILE = Path(__file__).with_name(
+    "mastodon_sentiments.json"
+)  # results, overwritten each run
 LOG_FILE = Path(__file__).with_name("mastodon.log")
-LOG_MAX_BYTES = 5_000_000           # rotate at ~5 MB, keep 3 old files
+LOG_MAX_BYTES = 5_000_000  # rotate at ~5 MB, keep 3 old files
 LOG_BACKUPS = 3
-BODY_SNIPPET = 200                  # max chars of an error response body to log
+BODY_SNIPPET = 200  # max chars of an error response body to log
 
 # Used when the ticker file is missing/unreadable. Same shape as the file:
 # company name -> ticker.
@@ -119,50 +121,62 @@ FALLBACK_TICKERS = {
     "Alphabet": "GOOGL",
 }
 
-DAYS = 7                            # how many days back to fetch
-LOCAL_ONLY = False                  # True = only posts authored on each server
-OPEN_ONLY = False                   # True = only servers with open_registrations
-MASTODON_ONLY = False               # True = only servers where software == "mastodon"
+DAYS = 7  # how many days back to fetch
+LOCAL_ONLY = False  # True = only posts authored on each server
+OPEN_ONLY = False  # True = only servers with open_registrations
+MASTODON_ONLY = False  # True = only servers where software == "mastodon"
 
 # ---- Post filters ----
-EXCLUDE_BOTS = True                 # drop accounts flagged as bots (account.bot)
-MIN_WORDS = 5                       # min words of real text (URLs, #tags, @mentions
-                                    # excluded). Set to 0 to disable.
-REQUIRE_CONTEXT_FOR_HASHTAG_MATCH = True  # hashtag-only ticker matches need a finance clue
-                                    # ...but only for AMBIGUOUS tickers (see below);
-                                    # other tickers match on the hashtag alone.
-AMBIGUOUS_MAX_LEN = 3               # tickers with <= this many letters count as ambiguous
-                                    # (#ALL, #IT, #ON, #A). Set to 0 to disable the rule.
-AMBIGUOUS_TICKERS = {"NVDA"}        # extra tickers that always need a finance clue, e.g.
-                                    # NVDA (screen reader), COST, NOW, CASH, PLAY, SNAP
+EXCLUDE_BOTS = True  # drop accounts flagged as bots (account.bot)
+MIN_WORDS = 5  # min words of real text (URLs, #tags, @mentions
+# excluded). Set to 0 to disable.
+REQUIRE_CONTEXT_FOR_HASHTAG_MATCH = (
+    True  # hashtag-only ticker matches need a finance clue
+)
+# ...but only for AMBIGUOUS tickers (see below);
+# other tickers match on the hashtag alone.
+AMBIGUOUS_MAX_LEN = 3  # tickers with <= this many letters count as ambiguous
+# (#ALL, #IT, #ON, #A). Set to 0 to disable the rule.
+AMBIGUOUS_TICKERS = {"NVDA"}  # extra tickers that always need a finance clue, e.g.
+# NVDA (screen reader), COST, NOW, CASH, PLAY, SNAP
 
 # ---- Comment settings ----
-FETCH_COMMENTS = True               # False = score posts only
-DIRECT_REPLIES_ONLY = False         # True = only direct replies, False = whole thread
-MAX_COMMENTS_PER_POST = 200         # cap per post (0 = no cap)
-MIN_COMMENT_WORDS = 2               # min words of real text in a comment (0 = disable)
-SKIP_CONTEXT_WHEN_NO_REPLIES = True # don't call the API for posts with replies_count == 0
-                                    # (set False if you suspect stale counts on remote posts)
+FETCH_COMMENTS = True  # False = score posts only
+DIRECT_REPLIES_ONLY = False  # True = only direct replies, False = whole thread
+MAX_COMMENTS_PER_POST = 200  # cap per post (0 = no cap)
+MIN_COMMENT_WORDS = 2  # min words of real text in a comment (0 = disable)
+SKIP_CONTEXT_WHEN_NO_REPLIES = (
+    True  # don't call the API for posts with replies_count == 0
+)
+# (set False if you suspect stale counts on remote posts)
 
 # ---- Discovery tags ----
 # Besides the #<ticker> timelines, also crawl these broad finance hashtags and pick
 # out posts that mention a ticker by cashtag ($NVDA), company name ("Nvidia") or an
 # unambiguous bare symbol ("NVDA"). Set DISCOVERY_TAGS = [] to turn discovery off.
-DISCOVERY_TAGS = ["stocks", "stockmarket", "investing", "trading",
-                  "wallstreet", "nasdaq", "sp500", "earnings"]
-DISCOVERY_MAX_PAGES = 50            # max pages (40 posts each) per request batch per server
-MATCH_COMPANY_NAMES = True          # match "Nvidia" etc. (name from the ticker file)
-MATCH_BARE_SYMBOLS = True           # match bare uppercase "NVDA" (non-ambiguous tickers only)
+DISCOVERY_TAGS = [
+    "stocks",
+    "stockmarket",
+    "investing",
+    "trading",
+    "wallstreet",
+    "nasdaq",
+    "sp500",
+    "earnings",
+]
+DISCOVERY_MAX_PAGES = 50  # max pages (40 posts each) per request batch per server
+MATCH_COMPANY_NAMES = True  # match "Nvidia" etc. (name from the ticker file)
+MATCH_BARE_SYMBOLS = True  # match bare uppercase "NVDA" (non-ambiguous tickers only)
 
 # ---- Author exclusion (we want opinions from people, not feeds/bots/spam) ----
-EXCLUDE_AUTHORS = True              # master switch for everything in this block
+EXCLUDE_AUTHORS = True  # master switch for everything in this block
 
 # Whole instances that host news feeds / bots. Best-effort list: a domain that
 # doesn't exist or never appears in your data does no harm. Extend it after
 # reviewing the "excluded authors" and "prolific authors" lines in the log.
 EXCLUDED_AUTHOR_DOMAINS = {
-    "pubeurope.com",     # per-country news-feed accounts (seen in your results)
-    "botsin.space",      # bot-hosting instances
+    "pubeurope.com",  # per-country news-feed accounts (seen in your results)
+    "botsin.space",  # bot-hosting instances
     "mastodon.bot",
     "newsbots.eu",
 }
@@ -194,29 +208,75 @@ EXCLUDED_BIO_RE = re.compile(
 MAX_POSTS_PER_AUTHOR = 25
 
 # ---- Sentiment aggregation ----
-COMMENT_AGGREGATION = "post_vs_comments"   # or "per_item"
+COMMENT_AGGREGATION = "post_vs_comments"  # or "per_item"
 
 # Finance clue 1: co-occurring hashtags (lowercase, no #)
 FINANCE_TAGS = {
-    "stock", "stocks", "stockmarket", "stockmarketnews", "investing",
-    "investment", "investor", "investors", "trading", "trader", "daytrading",
-    "swingtrading", "finance", "markets", "wallstreet", "nasdaq", "nyse",
-    "sp500", "dowjones", "earnings", "dividend", "dividends", "etf", "ipo",
-    "options", "equities", "bullmarket", "bearmarket", "shares", "fintech",
+    "stock",
+    "stocks",
+    "stockmarket",
+    "stockmarketnews",
+    "investing",
+    "investment",
+    "investor",
+    "investors",
+    "trading",
+    "trader",
+    "daytrading",
+    "swingtrading",
+    "finance",
+    "markets",
+    "wallstreet",
+    "nasdaq",
+    "nyse",
+    "sp500",
+    "dowjones",
+    "earnings",
+    "dividend",
+    "dividends",
+    "etf",
+    "ipo",
+    "options",
+    "equities",
+    "bullmarket",
+    "bearmarket",
+    "shares",
+    "fintech",
     "economy",
 }
 
 # Discovery tags are finance hashtags by definition, so they count as a finance clue.
-DISCOVERY_TAGS = list(dict.fromkeys(
-    re.sub(r"[^a-z0-9]", "", t.lower()) for t in DISCOVERY_TAGS if t))
+DISCOVERY_TAGS = list(
+    dict.fromkeys(re.sub(r"[^a-z0-9]", "", t.lower()) for t in DISCOVERY_TAGS if t)
+)
 FINANCE_TAGS |= set(DISCOVERY_TAGS)
 
 # Finance clue 2: keywords/phrases in the post text or media alt text
 FINANCE_KEYWORDS = [
-    "stock market", "stocks", "share price", "earnings", "nasdaq", "nyse",
-    "s&p", "s&p 500", "dow jones", "dividend", "portfolio", "investor",
-    "investing", "ipo", "etf", "bull market", "bear market", "trading",
-    "equity", "equities", "ticker", "market cap", "hedge fund", "wall street",
+    "stock market",
+    "stocks",
+    "share price",
+    "earnings",
+    "nasdaq",
+    "nyse",
+    "s&p",
+    "s&p 500",
+    "dow jones",
+    "dividend",
+    "portfolio",
+    "investor",
+    "investing",
+    "ipo",
+    "etf",
+    "bull market",
+    "bear market",
+    "trading",
+    "equity",
+    "equities",
+    "ticker",
+    "market cap",
+    "hedge fund",
+    "wall street",
 ]
 
 KEYWORD_RE = re.compile(
@@ -236,8 +296,8 @@ SYMBOL_RE = re.compile(r"^[A-Z0-9]{1,6}(?:[.\-][A-Z])?$")
 # Set to 1 to send one ticker per request (slower, but no batching assumptions).
 TICKERS_PER_REQUEST = 4
 DEFAULT_WORKERS = 10
-PAGE_SIZE = 40          # Mastodon's max for timelines
-REQUEST_TIMEOUT = 15    # seconds
+PAGE_SIZE = 40  # Mastodon's max for timelines
+REQUEST_TIMEOUT = 15  # seconds
 MAX_RETRIES = 3
 USER_AGENT = "mastodon-ticker-fetcher/1.0 (research script)"
 # Status codes on a tag-timeline request that mean "public tag timelines are
@@ -245,8 +305,13 @@ USER_AGENT = "mastodon-ticker-fetcher/1.0 (research script)"
 REFUSAL_STATUSES = (401, 403)
 
 SENTIMENT_FIELDS = ("score", "bullish", "bearish", "neutral")
-DROP_REASONS = ("bot", "excluded_author", "too_few_words",
-                "ticker_needs_context", "no_ticker_match")
+DROP_REASONS = (
+    "bot",
+    "excluded_author",
+    "too_few_words",
+    "ticker_needs_context",
+    "no_ticker_match",
+)
 
 log = logging.getLogger("mastodon_stock_fetcher")
 
@@ -324,12 +389,12 @@ def parse_tickers(data):
     are still accepted here.
     """
     if isinstance(data, dict) and isinstance(data.get("tickers"), list):
-        raw = data["tickers"]                    # older format: {"tickers": [...]}
+        raw = data["tickers"]  # older format: {"tickers": [...]}
     elif isinstance(data, dict):
         # Main format: {"NVIDIA": "NVDA"} -> company name: ticker
         raw = [{"symbol": sym, "name": name} for name, sym in data.items()]
     else:
-        raw = data                               # older format: ["AAPL", ...]
+        raw = data  # older format: ["AAPL", ...]
 
     tickers, seen = [], set()
     for item in raw:
@@ -352,7 +417,11 @@ def parse_tickers(data):
         seen.add(symbol)
 
         tickers.append(
-            {"symbol": symbol, "name": name, "tag": re.sub(r"[^a-z0-9]", "", symbol.lower())}
+            {
+                "symbol": symbol,
+                "name": name,
+                "tag": re.sub(r"[^a-z0-9]", "", symbol.lower()),
+            }
         )
     return tickers
 
@@ -372,8 +441,12 @@ def load_tickers():
     if not tickers:
         tickers = parse_tickers(FALLBACK_TICKERS)
         source = "fallback"
-    log.info("tickers loaded source=%s count=%d tickers=%s",
-             source, len(tickers), [t["symbol"] for t in tickers])
+    log.info(
+        "tickers loaded source=%s count=%d tickers=%s",
+        source,
+        len(tickers),
+        [t["symbol"] for t in tickers],
+    )
     return tickers
 
 
@@ -407,12 +480,14 @@ def build_report(results, tickers):
     for ticker in sorted(tickers):
         posts = results.get(ticker, {})
         average = round(sum(posts.values()) / len(posts), 2) if posts else None
-        report.append({
-            "ticker": ticker,
-            "average_sentiment": average,
-            "post_count": len(posts),
-            "posts": posts,
-        })
+        report.append(
+            {
+                "ticker": ticker,
+                "average_sentiment": average,
+                "post_count": len(posts),
+                "posts": posts,
+            }
+        )
     return report
 
 
@@ -427,8 +502,12 @@ def write_results(path, results, tickers):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
-        log.info("results written path=%s tickers=%d posts=%d",
-                 path, len(report), sum(r["post_count"] for r in report))
+        log.info(
+            "results written path=%s tickers=%d posts=%d",
+            path,
+            len(report),
+            sum(r["post_count"] for r in report),
+        )
         print(f"Results saved to {path}")
     except Exception:
         log.exception("failed to write results to %s", path)
@@ -515,8 +594,11 @@ class TickerIndex:
 
         # Bare uppercase symbols ("NVDA"), only for tickers that aren't ambiguous
         self.bare_re = None
-        bare = [t["symbol"] for t in tickers
-                if MATCH_BARE_SYMBOLS and not is_ambiguous(t["symbol"])]
+        bare = [
+            t["symbol"]
+            for t in tickers
+            if MATCH_BARE_SYMBOLS and not is_ambiguous(t["symbol"])
+        ]
         if bare:
             bare.sort(key=len, reverse=True)
             self.bare_re = re.compile(
@@ -525,8 +607,11 @@ class TickerIndex:
 
     def text_hits(self, text):
         """Symbols mentioned by company name / bare symbol in `text`: (names, bare)."""
-        names = ({self.name_to_symbol[m.lower()] for m in self.name_re.findall(text)}
-                 if self.name_re else set())
+        names = (
+            {self.name_to_symbol[m.lower()] for m in self.name_re.findall(text)}
+            if self.name_re
+            else set()
+        )
         bare = set(self.bare_re.findall(text)) if self.bare_re else set()
         return names, bare
 
@@ -551,8 +636,9 @@ def author_check(account):
         return handle, "domain"
     if account.get("group"):
         return handle, "group"
-    if (EXCLUDED_NAME_RE.search(f"{username} {display}".lower())
-            or EXCLUDED_CAMEL_RE.search(username)):
+    if EXCLUDED_NAME_RE.search(
+        f"{username} {display}".lower()
+    ) or EXCLUDED_CAMEL_RE.search(username):
         return handle, "name"
     note = strip_html(account.get("note"))
     if note and EXCLUDED_BIO_RE.search(note):
@@ -568,10 +654,19 @@ def note_author_exclusion(stats, handle, reason):
 
 def summarize_author_exclusions(stats, top=100):
     """Excluded-author counts by reason and the most-excluded handles."""
-    reasons = {k.split(":", 1)[1]: v for k, v in stats.items()
-               if k.startswith("author_reason:")}
-    handles = sorted(((k.split(":", 1)[1], v) for k, v in stats.items()
-                      if k.startswith("author_handle:")), key=lambda kv: -kv[1])[:top]
+    reasons = {
+        k.split(":", 1)[1]: v
+        for k, v in stats.items()
+        if k.startswith("author_reason:")
+    }
+    handles = sorted(
+        (
+            (k.split(":", 1)[1], v)
+            for k, v in stats.items()
+            if k.startswith("author_handle:")
+        ),
+        key=lambda kv: -kv[1],
+    )[:top]
     return {"by_reason": reasons, "top_handles": dict(handles)}
 
 
@@ -621,8 +716,12 @@ def evaluate_status(status, index, stats):
         return None, "too_few_words"
 
     # 3. Ticker match
-    cashtag_hits = {m.upper() for m in CASHTAG_RE.findall(f"{text}\n{alt_joined}")} & index.symbols
-    hashtag_hits = {index.tag_to_symbol[t] for t in tag_names if t in index.tag_to_symbol}
+    cashtag_hits = {
+        m.upper() for m in CASHTAG_RE.findall(f"{text}\n{alt_joined}")
+    } & index.symbols
+    hashtag_hits = {
+        index.tag_to_symbol[t] for t in tag_names if t in index.tag_to_symbol
+    }
     context = finance_context(text, alt_joined, tag_names)
 
     matches = {}
@@ -633,8 +732,7 @@ def evaluate_status(status, index, stats):
         for symbol in bare_hits:
             matches[symbol] = "symbol"
     for symbol in hashtag_hits:
-        if (context or not REQUIRE_CONTEXT_FOR_HASHTAG_MATCH
-                or not is_ambiguous(symbol)):
+        if context or not REQUIRE_CONTEXT_FOR_HASHTAG_MATCH or not is_ambiguous(symbol):
             matches[symbol] = "hashtag"
     for symbol in cashtag_hits:  # cashtag is the stronger match, so it wins
         matches[symbol] = "cashtag"
@@ -689,13 +787,19 @@ def get_with_retry(session, url, params=None, tag_timeline=False, failure=None):
         try:
             resp = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
         except requests.RequestException as e:
-            log.warning("GET %s network error attempt=%d/%d: %s: %s",
-                        label, attempt, MAX_RETRIES, type(e).__name__, e)
+            log.warning(
+                "GET %s network error attempt=%d/%d: %s: %s",
+                label,
+                attempt,
+                MAX_RETRIES,
+                type(e).__name__,
+                e,
+            )
             if attempt == MAX_RETRIES:
                 log.error("GET %s failed after %d attempts", label, MAX_RETRIES)
                 print(f"  ! {url}: {e}")
                 return None
-            polite_sleep(2 ** attempt)
+            polite_sleep(2**attempt)
             continue
 
         if resp.status_code == 200:
@@ -709,37 +813,69 @@ def get_with_retry(session, url, params=None, tag_timeline=False, failure=None):
             reset = resp.headers.get("X-RateLimit-Reset")
             if reset:
                 try:
-                    delta = (parse_time(reset) - datetime.now(timezone.utc)).total_seconds()
+                    delta = (
+                        parse_time(reset) - datetime.now(timezone.utc)
+                    ).total_seconds()
                     wait = min(max(delta, 1), 60)
                 except ValueError:
                     pass
-            log.warning("GET %s rate limited status=429 sleeping=%.0fs attempt=%d/%d body=%s",
-                        label, wait, attempt, MAX_RETRIES, _snippet(resp))
+            log.warning(
+                "GET %s rate limited status=429 sleeping=%.0fs attempt=%d/%d body=%s",
+                label,
+                wait,
+                attempt,
+                MAX_RETRIES,
+                _snippet(resp),
+            )
             polite_sleep(wait)
             continue
 
         if resp.status_code >= 500 and attempt < MAX_RETRIES:
-            log.warning("GET %s server error status=%s attempt=%d/%d body=%s",
-                        label, resp.status_code, attempt, MAX_RETRIES, _snippet(resp))
-            polite_sleep(2 ** attempt)
+            log.warning(
+                "GET %s server error status=%s attempt=%d/%d body=%s",
+                label,
+                resp.status_code,
+                attempt,
+                MAX_RETRIES,
+                _snippet(resp),
+            )
+            polite_sleep(2**attempt)
             continue
 
         if resp.status_code >= 500:
-            log.warning("GET %s server error status=%s attempt=%d/%d body=%s",
-                        label, resp.status_code, attempt, MAX_RETRIES, _snippet(resp))
-            log.error("GET %s failed after %d attempts status=%s",
-                      label, MAX_RETRIES, resp.status_code)
+            log.warning(
+                "GET %s server error status=%s attempt=%d/%d body=%s",
+                label,
+                resp.status_code,
+                attempt,
+                MAX_RETRIES,
+                _snippet(resp),
+            )
+            log.error(
+                "GET %s failed after %d attempts status=%s",
+                label,
+                MAX_RETRIES,
+                resp.status_code,
+            )
         elif tag_timeline and resp.status_code in REFUSAL_STATUSES:
             # Server requires login for hashtag timelines (Mastodon's
             # "timeline_preview" setting is off). Expected policy, not a fault.
-            log.warning("GET %s server refused public tag timelines status=%s body=%s",
-                        label, resp.status_code, _snippet(resp))
+            log.warning(
+                "GET %s server refused public tag timelines status=%s body=%s",
+                label,
+                resp.status_code,
+                _snippet(resp),
+            )
             if failure is not None:
                 failure["refused"] = True
         else:
             # 404/410/422 etc
-            log.error("GET %s request rejected status=%s body=%s",
-                      label, resp.status_code, _snippet(resp))
+            log.error(
+                "GET %s request rejected status=%s body=%s",
+                label,
+                resp.status_code,
+                _snippet(resp),
+            )
         if failure is not None:
             failure["status"] = resp.status_code
         print(f"  ! {url}: HTTP {resp.status_code}")
@@ -751,13 +887,26 @@ def get_with_retry(session, url, params=None, tag_timeline=False, failure=None):
 
 def item_key(record, domain=None):
     """Stable, globally unique key for a post/comment (ids are server-local, URIs are not)."""
-    return (record.get("uri") or record.get("url")
-            or f"{domain or record.get('source_server')}:{record.get('id')}")
+    return (
+        record.get("uri")
+        or record.get("url")
+        or f"{domain or record.get('source_server')}:{record.get('id')}"
+    )
 
 
 # --------------------------------------------------------------- fetch ---
-def fetch_batch(session, domain, batch, index, cutoff, local_only,
-                seen_uris, posts, stats, max_pages=500):
+def fetch_batch(
+    session,
+    domain,
+    batch,
+    index,
+    cutoff,
+    local_only,
+    seen_uris,
+    posts,
+    stats,
+    max_pages=500,
+):
     """
     Page through the hashtag timeline for one batch of tickers on one server.
     Appends kept posts to `posts`. Returns True if the first request succeeded.
@@ -793,16 +942,32 @@ def fetch_batch(session, domain, batch, index, cutoff, local_only,
         try:
             page = resp.json()
         except ValueError:
-            log.warning("timeline bad JSON server=%s tags=%s page=%d body=%s",
-                        domain, tags_label, pages, _snippet(resp))
+            log.warning(
+                "timeline bad JSON server=%s tags=%s page=%d body=%s",
+                domain,
+                tags_label,
+                pages,
+                _snippet(resp),
+            )
             break
         if not isinstance(page, list):
-            log.warning("timeline unexpected response server=%s tags=%s page=%d type=%s body=%s",
-                        domain, tags_label, pages, type(page).__name__, _snippet(resp))
+            log.warning(
+                "timeline unexpected response server=%s tags=%s page=%d type=%s body=%s",
+                domain,
+                tags_label,
+                pages,
+                type(page).__name__,
+                _snippet(resp),
+            )
             break
         if not page:
-            log.info("timeline ok server=%s tags=%s page=%d posts=0 kept=0 more=no elapsed=%.2fs",
-                     domain, tags_label, pages, elapsed)
+            log.info(
+                "timeline ok server=%s tags=%s page=%d posts=0 kept=0 more=no elapsed=%.2fs",
+                domain,
+                tags_label,
+                pages,
+                elapsed,
+            )
             break
         fetched += len(page)
         kept_on_page = len(posts)
@@ -830,9 +995,16 @@ def fetch_batch(session, domain, batch, index, cutoff, local_only,
         # Follow pagination via the Link header (rel="next")
         next_link = resp.links.get("next", {}).get("url")
         more = bool(next_link) and not reached_cutoff and pages < max_pages
-        log.info("timeline ok server=%s tags=%s page=%d posts=%d kept=%d more=%s elapsed=%.2fs",
-                 domain, tags_label, pages, len(page), len(posts) - kept_on_page,
-                 "yes" if more else "no", elapsed)
+        log.info(
+            "timeline ok server=%s tags=%s page=%d posts=%d kept=%d more=%s elapsed=%.2fs",
+            domain,
+            tags_label,
+            pages,
+            len(page),
+            len(posts) - kept_on_page,
+            "yes" if more else "no",
+            elapsed,
+        )
 
         # Timeline is newest-first, so once we see a post older than the cutoff
         # everything after it is older too.
@@ -843,8 +1015,15 @@ def fetch_batch(session, domain, batch, index, cutoff, local_only,
 
         polite_sleep(0.3)  # be polite
 
-    log.info("tags done server=%s tags=%s pages=%d fetched=%d new=%d total=%d",
-             domain, tags_label, pages, fetched, len(posts) - kept_before, len(posts))
+    log.info(
+        "tags done server=%s tags=%s pages=%d fetched=%d new=%d total=%d",
+        domain,
+        tags_label,
+        pages,
+        fetched,
+        len(posts) - kept_before,
+        len(posts),
+    )
     return first_ok
 
 
@@ -863,18 +1042,30 @@ def fetch_server(domain, tickers, index, cutoff, local_only=False):
     # Jobs: ticker hashtag batches first, then the broad discovery hashtag batches
     # (capped at DISCOVERY_MAX_PAGES pages since those timelines can be huge).
     n = TICKERS_PER_REQUEST
-    jobs = [(tickers[i:i + n], 500) for i in range(0, len(tickers), n)]
-    jobs += [([{"tag": t} for t in DISCOVERY_TAGS[i:i + n]], DISCOVERY_MAX_PAGES)
-             for i in range(0, len(DISCOVERY_TAGS), n)]
+    jobs = [(tickers[i : i + n], 500) for i in range(0, len(tickers), n)]
+    jobs += [
+        ([{"tag": t} for t in DISCOVERY_TAGS[i : i + n]], DISCOVERY_MAX_PAGES)
+        for i in range(0, len(DISCOVERY_TAGS), n)
+    ]
 
     for batch, max_pages in jobs:
         if time_up():
             break
-        ok = fetch_batch(session, domain, batch, index, cutoff, local_only,
-                         seen_uris, posts, stats, max_pages=max_pages)
+        ok = fetch_batch(
+            session,
+            domain,
+            batch,
+            index,
+            cutoff,
+            local_only,
+            seen_uris,
+            posts,
+            stats,
+            max_pages=max_pages,
+        )
         any_ok = any_ok or ok
         if time_up():
-            break   # the time limit, not the server, ended this batch
+            break  # the time limit, not the server, ended this batch
         if not ok and not any_ok:
             # Nothing has worked on this server yet (down, or tag timelines
             # require login) -- don't hammer it with every remaining batch.
@@ -936,8 +1127,12 @@ def fetch_comments_for_post(session, domain, post, stats):
     try:
         descendants = (resp.json() or {}).get("descendants") or []
     except ValueError:
-        log.warning("context bad JSON server=%s post_id=%s body=%s",
-                    domain, post["id"], _snippet(resp))
+        log.warning(
+            "context bad JSON server=%s post_id=%s body=%s",
+            domain,
+            post["id"],
+            _snippet(resp),
+        )
         return None
 
     texts = {post["id"]: post["content"]}
@@ -958,8 +1153,14 @@ def fetch_comments_for_post(session, domain, post, stats):
         comments.append(record)
         if MAX_COMMENTS_PER_POST and len(comments) >= MAX_COMMENTS_PER_POST:
             break
-    log.info("context ok server=%s post_id=%s replies=%d kept=%d elapsed=%.2fs",
-             domain, post["id"], len(descendants), len(comments), elapsed)
+    log.info(
+        "context ok server=%s post_id=%s replies=%d kept=%d elapsed=%.2fs",
+        domain,
+        post["id"],
+        len(descendants),
+        len(comments),
+        elapsed,
+    )
     return comments
 
 
@@ -976,7 +1177,7 @@ def fetch_comments_for_server(domain, posts):
     queried = 0
     for post in posts:
         if time_up():
-            break   # posts left without comments are scored on their own
+            break  # posts left without comments are scored on their own
         if SKIP_CONTEXT_WHEN_NO_REPLIES and not post.get("replies"):
             result[item_key(post)] = []
             continue
@@ -988,9 +1189,14 @@ def fetch_comments_for_server(domain, posts):
         else:
             result[item_key(post)] = comments
         polite_sleep(0.3)  # be polite
-    log.info("comments done server=%s posts=%d requests=%d failed=%d kept=%d",
-             domain, len(posts), queried, stats["context_failed"],
-             sum(len(v) for v in result.values()))
+    log.info(
+        "comments done server=%s posts=%d requests=%d failed=%d kept=%d",
+        domain,
+        len(posts),
+        queried,
+        stats["context_failed"],
+        sum(len(v) for v in result.values()),
+    )
     return domain, result, stats
 
 
@@ -1005,8 +1211,10 @@ def fetch_all_comments(posts, workers):
 
     comments_by_post, total = {}, Counter()
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(fetch_comments_for_server, d, ps): d
-                   for d, ps in by_server.items()}
+        futures = {
+            pool.submit(fetch_comments_for_server, d, ps): d
+            for d, ps in by_server.items()
+        }
         for fut in as_completed(futures):
             domain = futures[fut]
             try:
@@ -1031,11 +1239,18 @@ def build_score_items(posts, comments_by_post):
     """
     items = []
     for p in posts:
-        items.append({"id": f"post::{item_key(p)}", "text": p["content"], "context": ""})
+        items.append(
+            {"id": f"post::{item_key(p)}", "text": p["content"], "context": ""}
+        )
     for comments in comments_by_post.values():
         for c in comments:
-            items.append({"id": f"comment::{item_key(c)}",
-                          "text": c["text"], "context": c["context"]})
+            items.append(
+                {
+                    "id": f"comment::{item_key(c)}",
+                    "text": c["text"],
+                    "context": c["context"],
+                }
+            )
     return items
 
 
@@ -1068,9 +1283,14 @@ def score_batch(domain, posts, comments_by_post):
     except Exception:
         log.exception("scoring failed server=%s items=%d", domain, len(items))
         raise
-    log.info("scored batch server=%s items=%d posts=%d comments=%d elapsed=%.1fs",
-             domain, len(items), len(posts), len(items) - len(posts),
-             time.monotonic() - start)
+    log.info(
+        "scored batch server=%s items=%d posts=%d comments=%d elapsed=%.1fs",
+        domain,
+        len(items),
+        len(posts),
+        len(items) - len(posts),
+        time.monotonic() - start,
+    )
     return records
 
 
@@ -1134,7 +1354,7 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
     place. Returns True if it ran to the end, False if there was nothing to score."""
     fetched = {}
     total_stats = Counter()
-    refused_servers = {}    # {domain: status} for servers refusing public tag timelines
+    refused_servers = {}  # {domain: status} for servers refusing public tag timelines
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(fetch_server, d, tickers, index, cutoff, LOCAL_ONLY): d
@@ -1153,18 +1373,28 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
             total_stats.update(stats)
             if stats["server_unavailable"] and refused_status:
                 refused_servers[domain] = refused_status
-                log.warning("server refused public tag timelines, skipped server=%s status=%s",
-                            domain, refused_status)
+                log.warning(
+                    "server refused public tag timelines, skipped server=%s status=%s",
+                    domain,
+                    refused_status,
+                )
                 print(f"[{domain}] unavailable, skipped")
             elif stats["server_unavailable"]:
                 log.warning("server unavailable, skipped server=%s", domain)
                 print(f"[{domain}] unavailable, skipped")
             else:
                 dropped = ", ".join(f"{r}={stats[r]}" for r in DROP_REASONS if stats[r])
-                log.info("server done server=%s seen=%d kept=%d dropped=%s",
-                         domain, stats["seen"], len(posts), dropped or "none")
-                print(f"[{domain}] kept {len(posts)} of {stats['seen']} posts"
-                      + (f" (dropped: {dropped})" if dropped else ""))
+                log.info(
+                    "server done server=%s seen=%d kept=%d dropped=%s",
+                    domain,
+                    stats["seen"],
+                    len(posts),
+                    dropped or "none",
+                )
+                print(
+                    f"[{domain}] kept {len(posts)} of {stats['seen']} posts"
+                    + (f" (dropped: {dropped})" if dropped else "")
+                )
 
     # Federated servers often see the same post; de-duplicate by canonical URI.
     seen, unique = set(), []
@@ -1179,32 +1409,50 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
             unique.append(p)
 
     unique.sort(key=lambda p: p["created_at"], reverse=True)
-    print(f"\nSeen {total_stats['seen']} posts; dropped "
-          + ", ".join(f"{r}={total_stats[r]}" for r in DROP_REASONS))
+    print(
+        f"\nSeen {total_stats['seen']} posts; dropped "
+        + ", ".join(f"{r}={total_stats[r]}" for r in DROP_REASONS)
+    )
     print(f"{len(unique)} unique posts kept after de-duplication.")
-    log.info("fetch done seen=%d kept=%d unique=%d dropped=%s servers_unavailable=%d "
-             "servers_refused_tag_timelines=%d",
-             total_stats["seen"], kept_total, len(unique),
-             ",".join(f"{r}={total_stats[r]}" for r in DROP_REASONS),
-             total_stats["server_unavailable"], len(refused_servers))
+    log.info(
+        "fetch done seen=%d kept=%d unique=%d dropped=%s servers_unavailable=%d "
+        "servers_refused_tag_timelines=%d",
+        total_stats["seen"],
+        kept_total,
+        len(unique),
+        ",".join(f"{r}={total_stats[r]}" for r in DROP_REASONS),
+        total_stats["server_unavailable"],
+        len(refused_servers),
+    )
     if refused_servers:
-        log.info("servers that refused public tag timelines: %s", sorted(refused_servers))
+        log.info(
+            "servers that refused public tag timelines: %s", sorted(refused_servers)
+        )
 
     excluded = summarize_author_exclusions(total_stats)
     if excluded["by_reason"]:
-        print("Excluded authors by reason: "
-              + ", ".join(f"{r}={n}" for r, n in excluded["by_reason"].items()))
+        print(
+            "Excluded authors by reason: "
+            + ", ".join(f"{r}={n}" for r, n in excluded["by_reason"].items())
+        )
         log.info("excluded authors (posts) by_reason=%s", excluded["by_reason"])
 
     unique, prolific = drop_prolific_authors(unique)
     if prolific:
-        print(f"Dropped posts from {len(prolific)} prolific authors "
-              f"(> {MAX_POSTS_PER_AUTHOR} posts each): "
-              + ", ".join(f"{h} ({c})" for h, c in list(prolific.items())[:5])
-              + (" ..." if len(prolific) > 5 else ""))
+        print(
+            f"Dropped posts from {len(prolific)} prolific authors "
+            f"(> {MAX_POSTS_PER_AUTHOR} posts each): "
+            + ", ".join(f"{h} ({c})" for h, c in list(prolific.items())[:5])
+            + (" ..." if len(prolific) > 5 else "")
+        )
         print(f"{len(unique)} posts remain.")
-        log.info("prolific authors dropped count=%d limit=%d authors=%s remaining_posts=%d",
-                 len(prolific), MAX_POSTS_PER_AUTHOR, prolific, len(unique))
+        log.info(
+            "prolific authors dropped count=%d limit=%d authors=%s remaining_posts=%d",
+            len(prolific),
+            MAX_POSTS_PER_AUTHOR,
+            prolific,
+            len(unique),
+        )
 
     if not unique:
         print("Nothing to score.")
@@ -1217,21 +1465,29 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
         print("Fetching comments...")
         comments_by_post, comment_stats = fetch_all_comments(unique, workers)
         comment_excluded = summarize_author_exclusions(comment_stats)
-        log.info("comments fetched found=%d kept=%d dropped bot=%d too_few_words=%d "
-                 "not_direct_reply=%d excluded_author=%d context_failed=%d",
-                 comment_stats["comments_found"],
-                 sum(len(v) for v in comments_by_post.values()),
-                 comment_stats["comment_bot"], comment_stats["comment_too_few_words"],
-                 comment_stats["comment_not_direct"],
-                 comment_stats["comment_excluded_author"],
-                 comment_stats["context_failed"])
+        log.info(
+            "comments fetched found=%d kept=%d dropped bot=%d too_few_words=%d "
+            "not_direct_reply=%d excluded_author=%d context_failed=%d",
+            comment_stats["comments_found"],
+            sum(len(v) for v in comments_by_post.values()),
+            comment_stats["comment_bot"],
+            comment_stats["comment_too_few_words"],
+            comment_stats["comment_not_direct"],
+            comment_stats["comment_excluded_author"],
+            comment_stats["context_failed"],
+        )
         if comment_excluded["by_reason"]:
-            log.info("excluded authors (comments) by_reason=%s", comment_excluded["by_reason"])
+            log.info(
+                "excluded authors (comments) by_reason=%s",
+                comment_excluded["by_reason"],
+            )
     total_comments = sum(len(v) for v in comments_by_post.values())
 
     # ---- sentiment: one batch per source server ----
-    print(f"Scoring {len(unique) + total_comments} items ({len(unique)} posts + "
-          f"{total_comments} comments)...")
+    print(
+        f"Scoring {len(unique) + total_comments} items ({len(unique)} posts + "
+        f"{total_comments} comments)..."
+    )
     by_server = defaultdict(list)
     for p in unique:
         by_server[p["source_server"]].append(p)
@@ -1239,10 +1495,13 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
     missing = 0
     for domain, server_posts in by_server.items():
         keys = [item_key(p) for p in server_posts]
-        server_comments = {k: comments_by_post[k] for k in keys if k in comments_by_post}
+        server_comments = {
+            k: comments_by_post[k] for k in keys if k in comments_by_post
+        }
         records = score_batch(domain, server_posts, server_comments)
         n_posts, n_comments, n_missing = aggregate_batch(
-            server_posts, server_comments, records, results)
+            server_posts, server_comments, records, results
+        )
         progress["posts_scored"] += n_posts
         progress["comments_scored"] += n_comments
         missing += n_missing
@@ -1273,53 +1532,92 @@ def run(workers, output_path, days=DAYS, time_limit_minutes=None, deadline=None)
     try:
         domains = load_domains(SERVERS_FILE, OPEN_ONLY, MASTODON_ONLY)
     except (OSError, ValueError) as e:
-        log.error("cannot read server list %s: %s: %s", SERVERS_FILE, type(e).__name__, e)
+        log.error(
+            "cannot read server list %s: %s: %s", SERVERS_FILE, type(e).__name__, e
+        )
         raise
     if not domains:
         log.warning("server list %s has no usable servers", SERVERS_FILE)
-    print(f"Loaded {len(tickers)} tickers and {len(domains)} servers; "
-          f"fetching posts since {cutoff.isoformat()}")
+    print(
+        f"Loaded {len(tickers)} tickers and {len(domains)} servers; "
+        f"fetching posts since {cutoff.isoformat()}"
+    )
 
-    log.info("run start tickers=%s since=%s days=%g servers=%d workers=%d local_only=%s "
-             "fetch_comments=%s discovery_tags=%s time_limit_min=%s",
-             sorted(symbols), cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"), days, len(domains),
-             workers, LOCAL_ONLY, FETCH_COMMENTS, DISCOVERY_TAGS,
-             None if deadline is None else round((deadline - run_start) / 60, 2))
+    log.info(
+        "run start tickers=%s since=%s days=%g servers=%d workers=%d local_only=%s "
+        "fetch_comments=%s discovery_tags=%s time_limit_min=%s",
+        sorted(symbols),
+        cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        days,
+        len(domains),
+        workers,
+        LOCAL_ONLY,
+        FETCH_COMMENTS,
+        DISCOVERY_TAGS,
+        None if deadline is None else round((deadline - run_start) / 60, 2),
+    )
 
-    results = {}            # {ticker: {post_key: score}}, written once at the end
-    progress = Counter()    # posts_scored, comments_scored
+    results = {}  # {ticker: {post_key: score}}, written once at the end
+    progress = Counter()  # posts_scored, comments_scored
     completed = False
     try:
-        completed = _pipeline(workers, tickers, index, cutoff, domains, results, progress)
+        completed = _pipeline(
+            workers, tickers, index, cutoff, domains, results, progress
+        )
     except Exception:
         log.exception("run aborted after %d posts scored", progress["posts_scored"])
         raise
     finally:
         write_results(output_path, results, symbols)
 
-    log.info("run finished unique_posts=%d comments=%d elapsed=%.1fs",
-             progress["posts_scored"], progress["comments_scored"],
-             time.monotonic() - run_start)
+    log.info(
+        "run finished unique_posts=%d comments=%d elapsed=%.1fs",
+        progress["posts_scored"],
+        progress["comments_scored"],
+        time.monotonic() - run_start,
+    )
     if completed:
-        print(f"\nDone. {progress['posts_scored']} posts and "
-              f"{progress['comments_scored']} comments scored.")
+        print(
+            f"\nDone. {progress['posts_scored']} posts and "
+            f"{progress['comments_scored']} comments scored."
+        )
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Fetch Mastodon posts mentioning stock tickers "
-                                             "and score their sentiment.")
-    ap.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
-                    help=f"Parallel servers (default: {DEFAULT_WORKERS})")
-    ap.add_argument("--output", default=str(OUTPUT_FILE),
-                    help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} "
-                         "next to this script; overwritten each run)")
-    ap.add_argument("--log-file", default=str(LOG_FILE),
-                    help=f"Where to write the log (default: {LOG_FILE.name} next to this script)")
-    ap.add_argument("--days", type=float, default=DAYS,
-                    help=f"Only keep posts from the last N days (default: {DAYS})")
-    ap.add_argument("--time", type=float, default=None,
-                    help="Stop making requests after this many minutes; what was fetched is "
-                         "still scored and saved (default: no limit)")
+    ap = argparse.ArgumentParser(
+        description="Fetch Mastodon posts mentioning stock tickers "
+        "and score their sentiment."
+    )
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Parallel servers (default: {DEFAULT_WORKERS})",
+    )
+    ap.add_argument(
+        "--output",
+        default=str(OUTPUT_FILE),
+        help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} "
+        "next to this script; overwritten each run)",
+    )
+    ap.add_argument(
+        "--log-file",
+        default=str(LOG_FILE),
+        help=f"Where to write the log (default: {LOG_FILE.name} next to this script)",
+    )
+    ap.add_argument(
+        "--days",
+        type=float,
+        default=DAYS,
+        help=f"Only keep posts from the last N days (default: {DAYS})",
+    )
+    ap.add_argument(
+        "--time",
+        type=float,
+        default=None,
+        help="Stop making requests after this many minutes; what was fetched is "
+        "still scored and saved (default: no limit)",
+    )
     args = ap.parse_args()
     if args.days <= 0:
         ap.error("--days must be greater than 0")

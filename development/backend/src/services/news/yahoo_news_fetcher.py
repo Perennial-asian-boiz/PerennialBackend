@@ -7,6 +7,7 @@ yfinance.Search has no server-side date filtering.
 Usage:
     python yahoo_news.py
 """
+
 import asyncio
 import hashlib
 import logging
@@ -23,8 +24,10 @@ import yfinance as yf
 try:  # present in newer yfinance releases
     from yfinance.exceptions import YFRateLimitError
 except ImportError:  # older versions: define a stand-in so `except` clauses still work
+
     class YFRateLimitError(Exception):
         pass
+
 
 # YfData contains session information and must be reset to fetch new results from the API
 try:  # internals used by the spy and the session reset; both degrade gracefully if missing
@@ -32,34 +35,50 @@ try:  # internals used by the spy and the session reset; both degrade gracefully
 except ImportError:
     YfData = SingletonMeta = None
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # insert src dir in path so utils dir can be accessed
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[2])
+)  # insert src dir in path so utils dir can be accessed
 from utils.fetch_tickers import fetch_tickers
 
-MAX_CONCURRENCY = 5        # simultaneous in-flight requests
-MIN_INTERVAL = 2.0        # minimum seconds between request *starts* (global)
-JITTER = 1.0               # extra random 0..JITTER seconds added to each interval
-MAX_RETRIES = 3            # retries per ticker after the first attempt
-BACKOFF_BASE = 5.0         # seconds; doubles each retry on rate limiting
-BACKOFF_CAP = 30.0        # never wait longer than this for one backoff
-TRANSIENT_BACKOFF = 1.5    # base seconds for network/timeouts (non rate-limit)
-REQUEST_TIMEOUT = 30.0     # seconds before we stop waiting on a single request
+MAX_CONCURRENCY = 5  # simultaneous in-flight requests
+MIN_INTERVAL = 2.0  # minimum seconds between request *starts* (global)
+JITTER = 1.0  # extra random 0..JITTER seconds added to each interval
+MAX_RETRIES = 3  # retries per ticker after the first attempt
+BACKOFF_BASE = 5.0  # seconds; doubles each retry on rate limiting
+BACKOFF_CAP = 30.0  # never wait longer than this for one backoff
+TRANSIENT_BACKOFF = 1.5  # base seconds for network/timeouts (non rate-limit)
+REQUEST_TIMEOUT = 30.0  # seconds before we stop waiting on a single request
 NEWS_COUNT = 100
 LOOKBACK_DAYS = 7
 
 # Diagnostics / recovery switches
-SPY_SEARCH_RESPONSES = True     # log status, size, latency, headers and body shape of every search response
-SPY_ALL_HEADERS = False         # True: dump every response header instead of a short whitelist
-SPY_LOG_FILE = Path(__file__).with_name("yahoo_spy.log")  # spy output goes here (appended), not to the terminal
-RESET_SESSION_ON_EMPTY = True   # when a response has 0 articles, retry on a brand-new yfinance session (up to MAX_RETRIES times); False = retry on the same session (diagnostics only)
-
+SPY_SEARCH_RESPONSES = (
+    True  # log status, size, latency, headers and body shape of every search response
+)
+SPY_ALL_HEADERS = False  # True: dump every response header instead of a short whitelist
+SPY_LOG_FILE = Path(__file__).with_name(
+    "yahoo_spy.log"
+)  # spy output goes here (appended), not to the terminal
+RESET_SESSION_ON_EMPTY = True  # when a response has 0 articles, retry on a brand-new yfinance session (up to MAX_RETRIES times); False = retry on the same session (diagnostics only)
 
 
 # Wraps YfData.get so every call to Yahoo's search endpoint prints what came
 # back. Because yfinance's lru_cache sits ABOVE get(), a retry that is served
 # from that cache prints no line at all, which is itself diagnostic.
-_SPY_HEADERS = ("date", "age", "via", "server", "cache-control", "x-cache",
-                "x-yahoo-request-id", "content-type", "content-encoding")
-_tls = threading.local()  # tells the spy which ticker/attempt/generation this worker thread is serving
+_SPY_HEADERS = (
+    "date",
+    "age",
+    "via",
+    "server",
+    "cache-control",
+    "x-cache",
+    "x-yahoo-request-id",
+    "content-type",
+    "content-encoding",
+)
+_tls = (
+    threading.local()
+)  # tells the spy which ticker/attempt/generation this worker thread is serving
 
 
 def _describe_body(resp) -> str:
@@ -73,10 +92,12 @@ def _describe_body(resp) -> str:
     news, quotes = body.get("news"), body.get("quotes")
     fin = body.get("finance")
     err = fin.get("error") if isinstance(fin, dict) else None
-    return (f"keys={sorted(body)} "
-            f"news={len(news) if isinstance(news, list) else news!r} "
-            f"quotes={len(quotes) if isinstance(quotes, list) else quotes!r}"
-            + (f" error={err}" if err else ""))
+    return (
+        f"keys={sorted(body)} "
+        f"news={len(news) if isinstance(news, list) else news!r} "
+        f"quotes={len(quotes) if isinstance(quotes, list) else quotes!r}"
+        + (f" error={err}" if err else "")
+    )
 
 
 _spy_logger = logging.getLogger("yahoo_news.spy")
@@ -86,8 +107,12 @@ def _setup_spy_logger() -> None:
     """Route spy output to SPY_LOG_FILE only (idempotent; thread-safe because logging handlers lock)."""
     if _spy_logger.handlers:
         return
-    handler = logging.FileHandler(SPY_LOG_FILE, encoding="utf-8")  # append mode; flushes on every record
-    formatter = logging.Formatter("%(asctime)sZ %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    handler = logging.FileHandler(
+        SPY_LOG_FILE, encoding="utf-8"
+    )  # append mode; flushes on every record
+    formatter = logging.Formatter(
+        "%(asctime)sZ %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    )
     formatter.converter = time.gmtime  # UTC timestamps
     handler.setFormatter(formatter)
     _spy_logger.addHandler(handler)
@@ -116,13 +141,21 @@ def _install_search_spy() -> None:
         try:
             resp = original_get(self, url, *args, **kwargs)
         except Exception as e:
-            _spy_log(f"raised {type(e).__name__}: {e} after {time.perf_counter() - t0:.2f}s")
+            _spy_log(
+                f"raised {type(e).__name__}: {e} after {time.perf_counter() - t0:.2f}s"
+            )
             raise
         try:  # logging must never break fetching
             hdrs = resp.headers
-            shown = dict(hdrs) if SPY_ALL_HEADERS else {k: hdrs.get(k) for k in _SPY_HEADERS if hdrs.get(k) is not None}
-            _spy_log(f"status={resp.status_code} bytes={len(resp.content)} "
-                     f"t={time.perf_counter() - t0:.2f}s {_describe_body(resp)} headers={shown}")
+            shown = (
+                dict(hdrs)
+                if SPY_ALL_HEADERS
+                else {k: hdrs.get(k) for k in _SPY_HEADERS if hdrs.get(k) is not None}
+            )
+            _spy_log(
+                f"status={resp.status_code} bytes={len(resp.content)} "
+                f"t={time.perf_counter() - t0:.2f}s {_describe_body(resp)} headers={shown}"
+            )
         except Exception as e:
             _spy_log(f"(could not describe response: {type(e).__name__}: {e})")
         return resp
@@ -138,7 +171,7 @@ def _install_search_spy() -> None:
 # retired and closed at shutdown. These are private yfinance internals and may
 # change between versions, so every step is guarded.
 _state_lock = threading.Lock()
-_generation = 0                # incremented on every successful reset
+_generation = 0  # incremented on every successful reset
 _retired_sessions: list = []
 
 
@@ -188,7 +221,10 @@ def _close_retired_sessions() -> None:
         try:
             session.close()
         except Exception as e:
-            print(f"[yfinance] error closing retired session: {type(e).__name__}: {e}", file=sys.stderr)
+            print(
+                f"[yfinance] error closing retired session: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
 
 
 class RateLimiter:
@@ -213,7 +249,9 @@ class RateLimiter:
                 now = loop.time()
                 wait = max(self._next_allowed, self._cooldown_until) - now
                 if wait <= 0:
-                    self._next_allowed = now + self._min_interval + random.uniform(0, self._jitter)
+                    self._next_allowed = (
+                        now + self._min_interval + random.uniform(0, self._jitter)
+                    )
                     return
             # sleep outside the lock, then re-check
             await asyncio.sleep(wait)
@@ -264,7 +302,9 @@ def _canonical_url(url) -> str | None:
         return None
     parts = urlsplit(url.strip())
     path = parts.path.rstrip("/") or "/"
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
+    return urlunsplit(
+        (parts.scheme.lower(), parts.netloc.lower(), path, parts.query, "")
+    )
 
 
 def _norm_text(value) -> str:
@@ -284,11 +324,13 @@ def make_dedupe_key(yahoo_id, url, title, publisher, published: datetime) -> str
     canon = _canonical_url(url)
     if canon:
         return f"url:{canon}"
-    basis = "\x1f".join((
-        _norm_text(title),
-        _norm_text(publisher),
-        published.astimezone(timezone.utc).isoformat(),
-    ))
+    basis = "\x1f".join(
+        (
+            _norm_text(title),
+            _norm_text(publisher),
+            published.astimezone(timezone.utc).isoformat(),
+        )
+    )
     return "hash:" + hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
@@ -331,7 +373,9 @@ def normalize(item: dict) -> dict | None:
     if not title:
         return None
 
-    yahoo_id = item.get("id") or item.get("uuid") or content.get("id") or content.get("uuid")
+    yahoo_id = (
+        item.get("id") or item.get("uuid") or content.get("id") or content.get("uuid")
+    )
 
     return {
         "id": yahoo_id or url or title,
@@ -345,19 +389,22 @@ def normalize(item: dict) -> dict | None:
 
 
 def dedupe_and_sort(articles: list[dict]) -> list[dict]:
-    """First occurrence of each dedupe_key wins; result is newest first """
+    """First occurrence of each dedupe_key wins; result is newest first"""
     unique: dict[str, dict] = {}
     for art in articles:
         unique.setdefault(art["dedupe_key"], art)
-    return sorted(unique.values(), key=lambda a: (a["published"], a["dedupe_key"]), reverse=True)
-
+    return sorted(
+        unique.values(), key=lambda a: (a["published"], a["dedupe_key"]), reverse=True
+    )
 
 
 # yfinance.Search has NO server-side start/end date parameters,
 # so every call returns the latest NEWS_COUNT (yahoo limits internally to 50) articles regardless
 # of date. We query once per ticker and apply the lookback window locally in
 # fetch_news().
-def _search_news_blocking(ticker: str, count: int, attempt: int = 0) -> tuple[list[dict], int]:
+def _search_news_blocking(
+    ticker: str, count: int, attempt: int = 0
+) -> tuple[list[dict], int]:
     """
     yfinance is synchronous (it does the HTTP call inside the constructor), so this runs in a worker thread.
     Returns (raw articles, session generation the request ran under).
@@ -387,7 +434,9 @@ async def fetch_news(
         try:
             async with sem:  # cap in-flight requests
                 raw, gen = await asyncio.wait_for(
-                    asyncio.to_thread(_search_news_blocking, ticker, count, attempt), # wrap synch search call in a thread for concurrency
+                    asyncio.to_thread(
+                        _search_news_blocking, ticker, count, attempt
+                    ),  # wrap synch search call in a thread for concurrency
                     timeout=REQUEST_TIMEOUT,
                 )
         except asyncio.CancelledError:
@@ -398,28 +447,44 @@ async def fetch_news(
                 break
             if _is_rate_limited(e):
                 # exponential backoff + jitter, applied to ALL workers via the limiter
-                delay = min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt)) + random.uniform(0, 2)
+                delay = min(BACKOFF_CAP, BACKOFF_BASE * (2**attempt)) + random.uniform(
+                    0, 2
+                )
                 limiter.penalize(delay)
-                print(f"[{ticker}] rate limited, pausing {delay:.1f}s "
-                      f"(retry {attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+                print(
+                    f"[{ticker}] rate limited, pausing {delay:.1f}s "
+                    f"(retry {attempt + 1}/{MAX_RETRIES})",
+                    file=sys.stderr,
+                )
             else:
                 # timeouts / connection hiccups: shorter, per-ticker backoff
-                delay = min(BACKOFF_CAP, TRANSIENT_BACKOFF * (2 ** attempt)) + random.uniform(0, 1)
-                print(f"[{ticker}] {type(e).__name__}: {e}; retrying in {delay:.1f}s "
-                      f"(retry {attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+                delay = min(
+                    BACKOFF_CAP, TRANSIENT_BACKOFF * (2**attempt)
+                ) + random.uniform(0, 1)
+                print(
+                    f"[{ticker}] {type(e).__name__}: {e}; retrying in {delay:.1f}s "
+                    f"(retry {attempt + 1}/{MAX_RETRIES})",
+                    file=sys.stderr,
+                )
                 await asyncio.sleep(delay)
             continue
 
         if not raw:  # 0 raw articles: retry (at most MAX_RETRIES times) on a NEW session, never the same one
             # Retrying on the same session just replays Yahoo's cached empty response.
             if attempt == MAX_RETRIES:
-                print(f"[{ticker}] Yahoo returned empty news after all retries", file=sys.stderr)
+                print(
+                    f"[{ticker}] Yahoo returned empty news after all retries",
+                    file=sys.stderr,
+                )
                 return []
 
-            delay = min(BACKOFF_CAP, TRANSIENT_BACKOFF * (2 ** attempt))
+            delay = min(BACKOFF_CAP, TRANSIENT_BACKOFF * (2**attempt))
             note = f"; session {_reset_yf_state(gen)}" if RESET_SESSION_ON_EMPTY else ""
-            print(f"[{ticker}] Yahoo returned empty news (gen {gen}){note}; "
-                  f"retrying in {delay:.1f}s (retry {attempt + 1}/{MAX_RETRIES})", file=sys.stderr)
+            print(
+                f"[{ticker}] Yahoo returned empty news (gen {gen}){note}; "
+                f"retrying in {delay:.1f}s (retry {attempt + 1}/{MAX_RETRIES})",
+                file=sys.stderr,
+            )
             await asyncio.sleep(delay)
             continue
 
@@ -428,7 +493,9 @@ async def fetch_news(
         for item in raw:
             try:
                 art = normalize(item)
-            except Exception as e:  # one malformed item shouldn't discard the whole response
+            except (
+                Exception
+            ) as e:  # one malformed item shouldn't discard the whole response
                 print(f"[{ticker}] skipped malformed article: {e}", file=sys.stderr)
                 continue
             if art and art["published"] >= since:  # local date filter

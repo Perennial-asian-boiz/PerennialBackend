@@ -107,14 +107,22 @@ if str(BACKEND_DIR) not in sys.path:
 from src.utils.fetch_tickers import fetch_ticker_map
 
 try:
-    from ..sentiment_scorer import load_scores, score_texts          # as a package
+    from ..sentiment_scorer import load_scores, score_texts  # as a package
     from .reddit_processing import (
-        TickerMatcher, build_scoring_items, is_discussion_title, load_json_file)
-except ImportError:                                                  # run as a script
+        TickerMatcher,
+        build_scoring_items,
+        is_discussion_title,
+        load_json_file,
+    )
+except ImportError:  # run as a script
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from sentiment_scorer import load_scores, score_texts
     from reddit_processing import (
-        TickerMatcher, build_scoring_items, is_discussion_title, load_json_file)
+        TickerMatcher,
+        build_scoring_items,
+        is_discussion_title,
+        load_json_file,
+    )
 
 SUBREDDITS = [
     "stocks",
@@ -135,13 +143,30 @@ CHROME_UA = (
 )
 
 POST_FIELDS = [
-    "subreddit", "post_id", "title", "author", "created_utc", "score",
-    "num_comments", "flair", "domain", "url", "permalink", "selftext",
+    "subreddit",
+    "post_id",
+    "title",
+    "author",
+    "created_utc",
+    "score",
+    "num_comments",
+    "flair",
+    "domain",
+    "url",
+    "permalink",
+    "selftext",
     "comments_scraped",
 ]
 COMMENT_FIELDS = [
-    "subreddit", "post_id", "comment_id", "parent_id", "author",
-    "created_utc", "score", "body", "permalink",
+    "subreddit",
+    "post_id",
+    "comment_id",
+    "parent_id",
+    "author",
+    "created_utc",
+    "score",
+    "body",
+    "permalink",
 ]
 
 
@@ -168,16 +193,16 @@ class Resp(NamedTuple):
 log = logging.getLogger("reddit_scraper")
 
 LOGIN_URL = "https://www.reddit.com/login"
-COOKIE_FILE = "reddit_cookies.txt"   # default session source (relative to where you run the script)
-VERIFY_URL = "https://old.reddit.com/"       # the site we actually scrape
+COOKIE_FILE = "reddit_cookies.txt"  # default session source (relative to where you run the script)
+VERIFY_URL = "https://old.reddit.com/"  # the site we actually scrape
 OUTPUT_FILE = Path(__file__).with_name("reddit_sentiments.json")
 LOG_FILE = Path(__file__).with_name("reddit.log")
-LOG_MAX_BYTES = 5_000_000    # rotate at ~5 MB, keep 3 old files
+LOG_MAX_BYTES = 5_000_000  # rotate at ~5 MB, keep 3 old files
 LOG_BACKUPS = 3
-BODY_SNIPPET = 200           # max chars of a response body to log
-CONTEXT_CHARS = 200          # max chars of parent text joined in front of a reply
-LOGIN_TIMEOUT_S = 45         # how long an automatic login may take
-MANUAL_TIMEOUT_S = 600       # how long we wait for YOU to finish a manual login
+BODY_SNIPPET = 200  # max chars of a response body to log
+CONTEXT_CHARS = 200  # max chars of parent text joined in front of a reply
+LOGIN_TIMEOUT_S = 45  # how long an automatic login may take
+MANUAL_TIMEOUT_S = 600  # how long we wait for YOU to finish a manual login
 
 REDDIT_SESSION_COOKIES = ("reddit_session", "token_v2")
 
@@ -202,6 +227,7 @@ def register_secrets(*values):
 
 class _LogFormatter(logging.Formatter):
     """UTC timestamps; blanks out any registered secret, also inside tracebacks."""
+
     converter = time.gmtime
 
     def format(self, record):
@@ -218,9 +244,13 @@ def setup_logging(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
-        path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8")
-    handler.setFormatter(_LogFormatter("%(asctime)s %(levelname)-7s %(message)s",
-                                       datefmt="%Y-%m-%dT%H:%M:%SZ"))
+        path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8"
+    )
+    handler.setFormatter(
+        _LogFormatter(
+            "%(asctime)s %(levelname)-7s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ"
+        )
+    )
     log.addHandler(handler)
     log.setLevel(logging.INFO)
     log.propagate = False
@@ -257,27 +287,36 @@ def _req_label(url: str, params: dict | None = None) -> str:
 def get_credentials() -> tuple[str, str]:
     """Read REDDIT_USERNAME / REDDIT_PASSWORD from the environment or a .env file."""
     try:
-        from dotenv import load_dotenv        # optional: pip install python-dotenv
-        env_file = Path(__file__).resolve().parent / ".env"     # .env next to this script
+        from dotenv import load_dotenv  # optional: pip install python-dotenv
+
+        env_file = Path(__file__).resolve().parent / ".env"  # .env next to this script
         # override=True: the .env file wins over any old REDDIT_* variable already set in
         # your shell. interpolate=False: a '$' in your password is kept literally.
         if env_file.exists():
             load_dotenv(env_file, override=True, interpolate=False)
             log.info("Credentials loaded from %s", env_file)
         else:
-            load_dotenv(override=True, interpolate=False)       # .env in current folder
+            load_dotenv(override=True, interpolate=False)  # .env in current folder
     except ImportError:
         log.info("python-dotenv not installed; using real environment variables only")
     username = os.environ.get("REDDIT_USERNAME", "").strip()
     password = os.environ.get("REDDIT_PASSWORD", "")
-    register_secrets(username, password)   # redacted from the log if they ever leak in
-    log.info("Loaded REDDIT_USERNAME (%d chars) and REDDIT_PASSWORD (%d chars)",
-             len(username), len(password))   # lengths only; a '#' can silently cut a password
-    missing = [n for n, v in (("REDDIT_USERNAME", username),
-                              ("REDDIT_PASSWORD", password)) if not v]
+    register_secrets(username, password)  # redacted from the log if they ever leak in
+    log.info(
+        "Loaded REDDIT_USERNAME (%d chars) and REDDIT_PASSWORD (%d chars)",
+        len(username),
+        len(password),
+    )  # lengths only; a '#' can silently cut a password
+    missing = [
+        n
+        for n, v in (("REDDIT_USERNAME", username), ("REDDIT_PASSWORD", password))
+        if not v
+    ]
     if missing:
-        die(f"ERROR: missing {' and '.join(missing)}. Set them as environment "
-                 f"variables or put them in a .env file (see .env.example).")
+        die(
+            f"ERROR: missing {' and '.join(missing)}. Set them as environment "
+            f"variables or put them in a .env file (see .env.example)."
+        )
     return username, password
 
 
@@ -322,7 +361,7 @@ def load_cookie_file(path: str) -> list[dict]:
         raise CookieFileError(f"cookie file is empty: {path}\n")
 
     raw: list[dict] = []
-    if text[0] in "[{":                                    # ---- JSON
+    if text[0] in "[{":  # ---- JSON
         try:
             obj = json.loads(text)
         except json.JSONDecodeError as e:
@@ -330,38 +369,58 @@ def load_cookie_file(path: str) -> list[dict]:
         items = obj.get("cookies", []) if isinstance(obj, dict) else obj
         for c in items:
             if isinstance(c, dict) and c.get("name"):
-                raw.append({
-                    "name": c["name"], "value": str(c.get("value", "")),
-                    "domain": c.get("domain") or ".reddit.com",
-                    "path": c.get("path") or "/",
-                    "secure": bool(c.get("secure", True)),
-                    "expires": _to_expiry(c.get("expirationDate", c.get("expires",
-                                                                      c.get("expiry")))),
-                })
+                raw.append(
+                    {
+                        "name": c["name"],
+                        "value": str(c.get("value", "")),
+                        "domain": c.get("domain") or ".reddit.com",
+                        "path": c.get("path") or "/",
+                        "secure": bool(c.get("secure", True)),
+                        "expires": _to_expiry(
+                            c.get("expirationDate", c.get("expires", c.get("expiry")))
+                        ),
+                    }
+                )
     else:
         lines = [ln.rstrip("\r") for ln in text.splitlines()]
         if any(len(ln.split("\t")) >= 7 for ln in lines):  # ---- Netscape cookies.txt
             for ln in lines:
                 ln = ln.strip()
                 if ln.startswith("#HttpOnly_"):
-                    ln = ln[len("#HttpOnly_"):]
+                    ln = ln[len("#HttpOnly_") :]
                 elif not ln or ln.startswith("#"):
                     continue
                 parts = ln.split("\t")
                 if len(parts) >= 7:
                     domain, _flag, cpath, secure, expiry, name, value = parts[:7]
-                    raw.append({
-                        "name": name, "value": value, "domain": domain,
-                        "path": cpath or "/", "secure": secure.strip().upper() == "TRUE",
-                        "expires": _to_expiry(expiry),
-                    })
-        else:                                              # ---- raw Cookie header
-            header = text.splitlines()[0] if "\n" not in text.strip() else text.replace("\n", ";")
+                    raw.append(
+                        {
+                            "name": name,
+                            "value": value,
+                            "domain": domain,
+                            "path": cpath or "/",
+                            "secure": secure.strip().upper() == "TRUE",
+                            "expires": _to_expiry(expiry),
+                        }
+                    )
+        else:  # ---- raw Cookie header
+            header = (
+                text.splitlines()[0]
+                if "\n" not in text.strip()
+                else text.replace("\n", ";")
+            )
             if header.lower().startswith("cookie:"):
-                header = header[len("cookie:"):]
+                header = header[len("cookie:") :]
             for c in parse_cookie_header(header):
-                raw.append({**c, "domain": ".reddit.com", "path": "/",
-                            "secure": True, "expires": None})
+                raw.append(
+                    {
+                        **c,
+                        "domain": ".reddit.com",
+                        "path": "/",
+                        "secure": True,
+                        "expires": None,
+                    }
+                )
 
     if not raw:
         raise CookieFileError(f"no cookies could be parsed from {path}\n")
@@ -371,17 +430,18 @@ def load_cookie_file(path: str) -> list[dict]:
     expired = 0
     for c in raw:
         if not c["domain"].lstrip(".").endswith("reddit.com"):
-            continue                                       # ignore other sites' cookies
+            continue  # ignore other sites' cookies
         if c["expires"] and c["expires"] < now:
             expired += 1
             continue
-        kept[(c["name"], c["domain"], c["path"])] = c      # later entries win
+        kept[(c["name"], c["domain"], c["path"])] = c  # later entries win
     if expired:
         print(f"note: ignored {expired} expired cookie(s) in {path}")
     if not kept:
         raise CookieFileError(
             f"{path} has no (unexpired) reddit.com cookies. Were you on a reddit.com "
-            f"tab, logged in, when you exported?\n")
+            f"tab, logged in, when you exported?\n"
+        )
     return list(kept.values())
 
 
@@ -391,7 +451,9 @@ def prepare_cookie_file(args) -> list[dict]:
         cookies = load_cookie_file(COOKIE_FILE)
     except CookieFileError as e:
         die(f"ERROR: {e}")
-    register_secrets(*(c["value"] for c in cookies))     # never let cookie values reach the log
+    register_secrets(
+        *(c["value"] for c in cookies)
+    )  # never let cookie values reach the log
     print(f"Loaded {len(cookies)} reddit.com cookies from {COOKIE_FILE}")
     cookie_names = sorted({c["name"] for c in cookies})
     if not set(cookie_names) & set(REDDIT_SESSION_COOKIES):
@@ -450,7 +512,9 @@ def _dismiss_consent_banner(page):
     """Reddit's cookie-consent popup can cover the form. Click it away if present."""
     try:
         # Targets a button whose text is 'Reject non-essential' or 'Accept all'
-        btn = page.get_by_role("button", name=re.compile(r"reject non-essential|accept all", re.I))
+        btn = page.get_by_role(
+            "button", name=re.compile(r"reject non-essential|accept all", re.I)
+        )
         if _visible(btn):
             btn.first.click(timeout=3000)
     except Exception:
@@ -460,13 +524,23 @@ def _dismiss_consent_banner(page):
 # Text Reddit shows for each situation. If Reddit rewords them, fix them here.
 BAD_CREDENTIALS = re.compile(
     r"incorrect username or password|invalid username or password|"
-    r"wrong username or password|couldn.t find an account", re.I)
-RATE_LIMITED = re.compile(r"too many (attempts|requests|tries)|try again later|rate.?limit", re.I)
+    r"wrong username or password|couldn.t find an account",
+    re.I,
+)
+RATE_LIMITED = re.compile(
+    r"too many (attempts|requests|tries)|try again later|rate.?limit", re.I
+)
 BLOCKED = re.compile(r"blocked by network security|whoa there, pardner", re.I)
-CAPTCHA_TEXT = re.compile(r"verify you are (a )?human|prove your humanity|"
-                          r"i.m not a robot|complete the captcha|security check", re.I)
-TWO_FACTOR_TEXT = re.compile(r"two-factor|2fa|verification code|authentication code|"
-                             r"6-digit|enter the code|we sent you a code", re.I)
+CAPTCHA_TEXT = re.compile(
+    r"verify you are (a )?human|prove your humanity|"
+    r"i.m not a robot|complete the captcha|security check",
+    re.I,
+)
+TWO_FACTOR_TEXT = re.compile(
+    r"two-factor|2fa|verification code|authentication code|"
+    r"6-digit|enter the code|we sent you a code",
+    re.I,
+)
 
 
 def _matched_text(page, pattern) -> str:
@@ -480,29 +554,42 @@ def _matched_text(page, pattern) -> str:
 def _check_hard_failure(page):
     """Raise LoginFailed if the page clearly says the login was refused."""
     if _visible_text(page, BAD_CREDENTIALS):
-        raise LoginFailed("Reddit rejected the username or password. Reddit's page said: "
-                          f"\"{_matched_text(page, BAD_CREDENTIALS)}\". Check REDDIT_USERNAME / "
-                          "REDDIT_PASSWORD in your .env (use single quotes around a password "
-                          "with $ # or \\ in it). Re-run with --debug-login to save a screenshot.")
+        raise LoginFailed(
+            "Reddit rejected the username or password. Reddit's page said: "
+            f'"{_matched_text(page, BAD_CREDENTIALS)}". Check REDDIT_USERNAME / '
+            "REDDIT_PASSWORD in your .env (use single quotes around a password "
+            "with $ # or \\ in it). Re-run with --debug-login to save a screenshot."
+        )
     if _visible_text(page, BLOCKED):
-        raise LoginFailed("Reddit blocked this connection ('network security' page). "
-                          "Wait a while, try another network, or use a --proxy.")
+        raise LoginFailed(
+            "Reddit blocked this connection ('network security' page). "
+            "Wait a while, try another network, or use a --proxy."
+        )
     if _visible_text(page, RATE_LIMITED):
-        raise LoginFailed("Reddit says there were too many login attempts. "
-                          "Wait 15-30 minutes and run again.")
+        raise LoginFailed(
+            "Reddit says there were too many login attempts. "
+            "Wait 15-30 minutes and run again."
+        )
 
 
 def _detect_challenge(page) -> str | None:
     """Return a short description if a captcha or 2FA prompt is showing, else None."""
     # A visible captcha iframe (ignoring Google's tiny invisible reCAPTCHA badge)
-    frames = page.locator("iframe[src*='captcha' i], iframe[title*='captcha' i], "
-                          "iframe[src*='arkoselabs' i]")
+    frames = page.locator(
+        "iframe[src*='captcha' i], iframe[title*='captcha' i], "
+        "iframe[src*='arkoselabs' i]"
+    )
     try:
         for i in range(frames.count()):
             fr = frames.nth(i)
             src = (fr.get_attribute("src") or "").lower()
             box = fr.bounding_box() if fr.is_visible() else None
-            if box and "size=invisible" not in src and box["width"] >= 200 and box["height"] >= 50:
+            if (
+                box
+                and "size=invisible" not in src
+                and box["width"] >= 200
+                and box["height"] >= 50
+            ):
                 return "a captcha"
     except Exception:
         pass
@@ -510,8 +597,14 @@ def _detect_challenge(page) -> str | None:
         return "a captcha / human check"
     # 2FA: a one-time-code input or the usual wording
     code_box = page.locator("input[autocomplete='one-time-code'], input[name='otp']")
-    code_label = page.get_by_label(re.compile(r"verification code|authentication code|one-time", re.I))
-    if _visible(code_box) or _visible(code_label) or _visible_text(page, TWO_FACTOR_TEXT):
+    code_label = page.get_by_label(
+        re.compile(r"verification code|authentication code|one-time", re.I)
+    )
+    if (
+        _visible(code_box)
+        or _visible(code_label)
+        or _visible_text(page, TWO_FACTOR_TEXT)
+    ):
         return "a two-factor (2FA) code prompt"
     return None
 
@@ -533,30 +626,45 @@ def _wait_for_login(page, manual_ok: bool):
                 # it by hand. (Headless: stop here with the clear error message.)
                 if not (manual_ok and _visible_text(page, BAD_CREDENTIALS)):
                     raise
-                challenge = ("Reddit rejected the username/password the script typed "
-                             "(retype them yourself in the window)")
+                challenge = (
+                    "Reddit rejected the username/password the script typed "
+                    "(retype them yourself in the window)"
+                )
         if challenge is None:
             challenge = _detect_challenge(page)
         # success = we left /login AND no password box is still showing
-        if (challenge is None and not _on_login_page(page)
-                and not _visible(page.locator("input[type='password']"))):
+        if (
+            challenge is None
+            and not _on_login_page(page)
+            and not _visible(page.locator("input[type='password']"))
+        ):
             return
         timed_out = time.monotonic() > deadline
         if (challenge or timed_out) and not waiting_for_human:
             reason = challenge or "the page did not finish logging in"
             if not manual_ok:
-                raise ManualStepNeeded(f"Reddit is showing {reason}" if challenge else reason)
+                raise ManualStepNeeded(
+                    f"Reddit is showing {reason}" if challenge else reason
+                )
             waiting_for_human = True
             deadline = time.monotonic() + MANUAL_TIMEOUT_S
-            log.warning("ACTION NEEDED: %s. In the browser window that is open, finish "
-                        "logging in by hand (solve the captcha / type the 2FA code / click "
-                        "Log In). The script continues by itself once you are in. "
-                        "Waiting up to %d minutes...", reason, MANUAL_TIMEOUT_S // 60)
-            print(f"ACTION NEEDED: {reason}. Finish logging in by hand in the browser "
-                  f"window that is open; the script continues by itself afterwards.")
+            log.warning(
+                "ACTION NEEDED: %s. In the browser window that is open, finish "
+                "logging in by hand (solve the captcha / type the 2FA code / click "
+                "Log In). The script continues by itself once you are in. "
+                "Waiting up to %d minutes...",
+                reason,
+                MANUAL_TIMEOUT_S // 60,
+            )
+            print(
+                f"ACTION NEEDED: {reason}. Finish logging in by hand in the browser "
+                f"window that is open; the script continues by itself afterwards."
+            )
         elif timed_out and waiting_for_human:
-            raise LoginFailed(f"Timed out after {MANUAL_TIMEOUT_S // 60} minutes waiting "
-                              f"for the manual login to finish.")
+            raise LoginFailed(
+                f"Timed out after {MANUAL_TIMEOUT_S // 60} minutes waiting "
+                f"for the manual login to finish."
+            )
         page.wait_for_timeout(500)
 
 
@@ -568,8 +676,9 @@ def _verify_logged_in(page) -> bool:
     # Targets old Reddit's header 'logout' form. It only exists when logged in
     # (logged-out visitors see 'want to join? log in or sign up' instead).
     try:
-        page.wait_for_selector("#header-bottom-right form.logout", state="attached",
-                              timeout=10_000)
+        page.wait_for_selector(
+            "#header-bottom-right form.logout", state="attached", timeout=10_000
+        )
         return True
     except Exception:
         return False
@@ -582,9 +691,16 @@ def _cookies_for_scraper(context) -> list[dict]:
         if not c["domain"].lstrip(".").endswith("reddit.com"):
             continue
         exp = c.get("expires", -1)
-        out.append({"name": c["name"], "value": c["value"], "domain": c["domain"],
-                    "path": c.get("path") or "/", "secure": bool(c.get("secure", True)),
-                    "expires": exp if exp and exp > 0 else None})   # -1 = session cookie
+        out.append(
+            {
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c["domain"],
+                "path": c.get("path") or "/",
+                "secure": bool(c.get("secure", True)),
+                "expires": exp if exp and exp > 0 else None,
+            }
+        )  # -1 = session cookie
     return out
 
 
@@ -605,8 +721,10 @@ def _save_debug_screenshot(page, debug: bool, tag: str):
 def _describe(box) -> str:
     """What kind of element we found, e.g. 'input type=password name=password'."""
     try:
-        return box.evaluate("e => e.tagName.toLowerCase() + ' type=' + (e.type || '-')"
-                            " + ' name=' + (e.name || '-')")
+        return box.evaluate(
+            "e => e.tagName.toLowerCase() + ' type=' + (e.type || '-')"
+            " + ' name=' + (e.name || '-')"
+        )
     except Exception:
         return "unknown element"
 
@@ -615,13 +733,15 @@ def _type_into(box, value: str, what: str, debug: bool):
     """Click the box and type key-by-key at a human-ish speed. If the box does not keep
     EXACTLY what we typed, clear it and fill it instantly instead.
     Values are only compared in memory; never printed or logged."""
+
     def kept() -> bool:
         try:
             return box.input_value() == value
         except Exception:
             return False
+
     box.click()
-    box.press_sequentially(value, delay=random.randint(55, 120))   # ms between keys
+    box.press_sequentially(value, delay=random.randint(55, 120))  # ms between keys
     method = "typed"
     if not kept():
         box.fill("")
@@ -633,25 +753,32 @@ def _type_into(box, value: str, what: str, debug: bool):
             n = len(box.input_value())
         except Exception:
             n = -1
-        print(f"[debug-login] {what} box = {_describe(box)}; it holds {n} characters, "
-              f"script typed {len(value)} ({method}): {'match' if ok else 'MISMATCH'}")
+        print(
+            f"[debug-login] {what} box = {_describe(box)}; it holds {n} characters, "
+            f"script typed {len(value)} ({method}): {'match' if ok else 'MISMATCH'}"
+        )
     if not ok:
         raise ManualStepNeeded(f"the {what} box did not keep the text the script typed")
 
 
-def _login_once(username, password, headed: bool, proxy, manual_ok: bool,
-                debug: bool = False) -> list[dict]:
+def _login_once(
+    username, password, headed: bool, proxy, manual_ok: bool, debug: bool = False
+) -> list[dict]:
     """One login attempt in a fresh, in-memory browser. Returns the session cookies."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        die("playwright is not installed. Run:  pip install playwright "
-                 "&& playwright install chromium")
+        die(
+            "playwright is not installed. Run:  pip install playwright "
+            "&& playwright install chromium"
+        )
     tag = "headed" if headed else "headless"
     log.info("Logging in to Reddit (%s browser)...", tag)
     with sync_playwright() as pw:
-        launch = {"headless": not headed,
-                  "args": ["--disable-blink-features=AutomationControlled"]}
+        launch = {
+            "headless": not headed,
+            "args": ["--disable-blink-features=AutomationControlled"],
+        }
         if proxy:
             launch["proxy"] = {"server": proxy}
         # Prefer the Chrome (or Edge) already installed on this computer: Reddit treats it
@@ -661,28 +788,40 @@ def _login_once(username, password, headed: bool, proxy, manual_ok: bool,
             try:
                 extra = {"channel": channel} if channel else {}
                 browser = pw.chromium.launch(
-                    ignore_default_args=["--enable-automation"],   # drops the 'automated' banner flag
-                    **launch, **extra)
+                    ignore_default_args=[
+                        "--enable-automation"
+                    ],  # drops the 'automated' banner flag
+                    **launch,
+                    **extra,
+                )
                 used = channel or "bundled-chromium"
                 break
             except Exception as e:
                 last_err = e
         if browser is None:
-            die(f"ERROR: could not start a browser ({str(last_err)[:150]}). "
-                f"Did you run:  playwright install chromium ?")
+            die(
+                f"ERROR: could not start a browser ({str(last_err)[:150]}). "
+                f"Did you run:  playwright install chromium ?"
+            )
         log.info("Login browser: %s", used)
         if debug:
             print(f"[debug-login] browser = {used}")
         page = None
         try:
             # new_context() is in-memory only: nothing is saved to disk
-            ctx_opts = dict(viewport={"width": 1366, "height": 900},
-                            locale="en-US", timezone_id="America/Los_Angeles")
+            ctx_opts = dict(
+                viewport={"width": 1366, "height": 900},
+                locale="en-US",
+                timezone_id="America/Los_Angeles",
+            )
             if used == "bundled-chromium" and not headed:
-                ctx_opts["user_agent"] = CHROME_UA   # only needed to hide 'HeadlessChrome'
+                ctx_opts["user_agent"] = (
+                    CHROME_UA  # only needed to hide 'HeadlessChrome'
+                )
             context = browser.new_context(**ctx_opts)
             context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
             page = context.new_page()
             page.set_default_timeout(20_000)
 
@@ -690,24 +829,36 @@ def _login_once(username, password, headed: bool, proxy, manual_ok: bool,
             _dismiss_consent_banner(page)
 
             # --- username box: the field labelled 'Email or username' ---
-            user_box = _find_first(page, [
-                page.get_by_label(re.compile(r"email or username|username", re.I)),
-                page.get_by_placeholder(re.compile(r"username", re.I)),
-                page.locator("input[name='username']"),        # last resort
-            ], "username box")
+            user_box = _find_first(
+                page,
+                [
+                    page.get_by_label(re.compile(r"email or username|username", re.I)),
+                    page.get_by_placeholder(re.compile(r"username", re.I)),
+                    page.locator("input[name='username']"),  # last resort
+                ],
+                "username box",
+            )
             _type_into(user_box, username, "username", debug)
 
             # --- password box: the field labelled 'Password' ---
-            pass_box = _find_first(page, [
-                page.get_by_label(re.compile(r"password", re.I)),
-                page.get_by_placeholder(re.compile(r"password", re.I)),
-                page.locator("input[type='password']"),        # last resort
-            ], "password box")
+            pass_box = _find_first(
+                page,
+                [
+                    page.get_by_label(re.compile(r"password", re.I)),
+                    page.get_by_placeholder(re.compile(r"password", re.I)),
+                    page.locator("input[type='password']"),  # last resort
+                ],
+                "password box",
+            )
             _type_into(pass_box, password, "password", debug)
 
-            page.wait_for_timeout(random.randint(500, 1100))   # brief pause, like a person
+            page.wait_for_timeout(
+                random.randint(500, 1100)
+            )  # brief pause, like a person
             # --- submit: the button whose text is 'Log In' (else press Enter) ---
-            submit = page.get_by_role("button", name=re.compile(r"^\s*log in\s*$", re.I))
+            submit = page.get_by_role(
+                "button", name=re.compile(r"^\s*log in\s*$", re.I)
+            )
             if _visible(submit):
                 submit.first.click()
             else:
@@ -716,20 +867,25 @@ def _login_once(username, password, headed: bool, proxy, manual_ok: bool,
             _wait_for_login(page, manual_ok)
 
             if not _verify_logged_in(page):
-                msg = ("login looked finished, but old.reddit.com does not show a "
-                       "logged-in user")
+                msg = (
+                    "login looked finished, but old.reddit.com does not show a "
+                    "logged-in user"
+                )
                 if manual_ok:
                     raise LoginFailed(msg.capitalize() + ".")
                 raise ManualStepNeeded(msg)
             cookies = _cookies_for_scraper(context)
             register_secrets(*(c["value"] for c in cookies))
-            log.info("Login confirmed on old.reddit.com; keeping %d reddit.com cookies "
-                     "in memory only (values never logged).", len(cookies))
+            log.info(
+                "Login confirmed on old.reddit.com; keeping %d reddit.com cookies "
+                "in memory only (values never logged).",
+                len(cookies),
+            )
             return cookies
         except (LoginFailed, ManualStepNeeded):
             _save_debug_screenshot(page, debug, tag)
             raise
-        except Exception as e:          # timeouts, navigation errors, closed window...
+        except Exception as e:  # timeouts, navigation errors, closed window...
             _save_debug_screenshot(page, debug, tag)
             detail = f"unexpected {type(e).__name__}: {str(e)[:150]}"
             raise (LoginFailed(detail) if manual_ok else ManualStepNeeded(detail))
@@ -737,24 +893,30 @@ def _login_once(username, password, headed: bool, proxy, manual_ok: bool,
             browser.close()
 
 
-def login_to_reddit(username, password, headed=False, proxy=None,
-                    debug=False) -> list[dict]:
+def login_to_reddit(
+    username, password, headed=False, proxy=None, debug=False
+) -> list[dict]:
     """
     Log in and return the session cookies (in memory only).
     Headless first; if a captcha / 2FA / unknown step appears, relaunch with a
     visible window and wait for the user. With --headed it starts visible.
     """
     try:
-        return _login_once(username, password, headed, proxy, manual_ok=headed,
-                           debug=debug)
+        return _login_once(
+            username, password, headed, proxy, manual_ok=headed, debug=debug
+        )
     except ManualStepNeeded as e:
-        if headed:                      # already visible: nothing more to relaunch
+        if headed:  # already visible: nothing more to relaunch
             raise LoginFailed(str(e))
-        log.warning("Automatic login could not finish: %s. Relaunching with a VISIBLE "
-                    "browser window so you can complete it.", e)
+        log.warning(
+            "Automatic login could not finish: %s. Relaunching with a VISIBLE "
+            "browser window so you can complete it.",
+            e,
+        )
         try:
-            return _login_once(username, password, True, proxy, manual_ok=True,
-                               debug=debug)
+            return _login_once(
+                username, password, True, proxy, manual_ok=True, debug=debug
+            )
         except ManualStepNeeded as e2:
             raise LoginFailed(str(e2))
 
@@ -769,17 +931,20 @@ class CurlBackend:
             die("curl_cffi is not installed. Run:  pip install curl_cffi")
         proxies = {"http": args.proxy, "https": args.proxy} if args.proxy else None
         # impersonate= sets browser-matching TLS, HTTP/2 settings and header order
-        self.session = AsyncSession(impersonate=args.impersonate, proxies=proxies,
-                                    timeout=30)
+        self.session = AsyncSession(
+            impersonate=args.impersonate, proxies=proxies, timeout=30
+        )
         cookies = getattr(args, "cookies", None) or []
         try:
             # jar cookies, so refreshed tokens from Set-Cookie replace the originals
             for c in cookies:
-                self.session.cookies.set(c["name"], c["value"],
-                                         domain=c["domain"], path=c["path"])
+                self.session.cookies.set(
+                    c["name"], c["value"], domain=c["domain"], path=c["path"]
+                )
         except Exception:
             self.session.headers["Cookie"] = "; ".join(
-                f"{c['name']}={c['value']}" for c in cookies)
+                f"{c['name']}={c['value']}" for c in cookies
+            )
 
     async def start(self):
         pass
@@ -809,8 +974,10 @@ class PlaywrightBackend:
         try:
             from playwright.async_api import async_playwright
         except ImportError:
-            die("playwright is not installed. Run:  pip install playwright "
-                     "&& playwright install chromium")
+            die(
+                "playwright is not installed. Run:  pip install playwright "
+                "&& playwright install chromium"
+            )
         self.pw = await async_playwright().start()
         launch = {
             "headless": not self.args.headed,
@@ -827,8 +994,13 @@ class PlaywrightBackend:
         )
         pw_cookies = []
         for c in getattr(self.args, "cookies", None) or []:
-            d = {"name": c["name"], "value": c["value"], "domain": c["domain"],
-                 "path": c["path"], "secure": c["secure"]}
+            d = {
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c["domain"],
+                "path": c["path"],
+                "secure": c["secure"],
+            }
             if c["expires"]:
                 d["expires"] = c["expires"]
             pw_cookies.append(d)
@@ -877,7 +1049,9 @@ class PlaywrightBackend:
 
 
 def make_backend(args):
-    return PlaywrightBackend(args) if args.backend == "playwright" else CurlBackend(args)
+    return (
+        PlaywrightBackend(args) if args.backend == "playwright" else CurlBackend(args)
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -890,26 +1064,26 @@ class Ctx:
     max_blocks: int
     max_posts: int | None
     retries: int = 6
-    stale_min_comments: int = 50   # older posts (from /hot) need this many comments
+    stale_min_comments: int = 50  # older posts (from /hot) need this many comments
 
     backend: Any = None
     sem: asyncio.Semaphore = None
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     stop_reason: str = ""
-    time_up: asyncio.Event = field(default_factory=asyncio.Event)   # --time reached
-    deadline: float | None = None    # time.monotonic() value from --time
+    time_up: asyncio.Event = field(default_factory=asyncio.Event)  # --time reached
+    deadline: float | None = None  # time.monotonic() value from --time
 
     consecutive_blocks: int = 0
     total_blocks: int = 0
     total_requests: int = 0
     cooldown_until: float = 0.0  # time.monotonic() value
     login_walls: int = 0
-    empty_comment_posts: int = 0    # posts that report comments but parsed 0
-    parsed_comment_posts: int = 0   # posts where at least one comment parsed
-    seen_ids: set = field(default_factory=set)   # post ids already registered
+    empty_comment_posts: int = 0  # posts that report comments but parsed 0
+    parsed_comment_posts: int = 0  # posts where at least one comment parsed
+    seen_ids: set = field(default_factory=set)  # post ids already registered
 
     posts: list = field(default_factory=list)
-    comments_total: int = 0         # comments parsed (their text is not kept)
+    comments_total: int = 0  # comments parsed (their text is not kept)
     sub_status: dict = field(default_factory=dict)
     posts_queued: int = 0
     posts_done: int = 0
@@ -917,14 +1091,14 @@ class Ctx:
     # scoring + results
     matcher: Any = None
     score_lock: asyncio.Lock = None
-    results: dict = field(default_factory=dict)      # {ticker: {item_id: score}}
-    item_keys: set = field(default_factory=set)      # (ticker, item_id) already handled
-    scored_ids: set = field(default_factory=set)     # distinct item ids that got a score
-    scoring_failures: int = 0                        # consecutive failed batches
-    text_seen: set = field(default_factory=set)      # (ticker, hash of text), no text kept
+    results: dict = field(default_factory=dict)  # {ticker: {item_id: score}}
+    item_keys: set = field(default_factory=set)  # (ticker, item_id) already handled
+    scored_ids: set = field(default_factory=set)  # distinct item ids that got a score
+    scoring_failures: int = 0  # consecutive failed batches
+    text_seen: set = field(default_factory=set)  # (ticker, hash of text), no text kept
     output_path: str = ""
-    tickers: set = field(default_factory=set)        # every queried ticker
-    saved_count: int = 0                             # items in the last checkpoint
+    tickers: set = field(default_factory=set)  # every queried ticker
+    saved_count: int = 0  # items in the last checkpoint
 
 
 def trip(ctx: Ctx, reason: str, level: int = logging.ERROR):
@@ -933,7 +1107,9 @@ def trip(ctx: Ctx, reason: str, level: int = logging.ERROR):
         ctx.stop_reason = reason
         ctx.stop.set()
         log.log(level, "stopping early: %s", reason)
-        print(f"\n!!! STOPPING EARLY: {reason}\n    Cancelling in-flight requests and saving...\n")
+        print(
+            f"\n!!! STOPPING EARLY: {reason}\n    Cancelling in-flight requests and saving...\n"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -948,10 +1124,14 @@ async def nap(ctx: Ctx, seconds: float):
     """Sleep, but wake immediately if the circuit breaker trips or time is up."""
     if seconds <= 0:
         return
-    waiters = {asyncio.ensure_future(ctx.stop.wait()),
-               asyncio.ensure_future(ctx.time_up.wait())}
+    waiters = {
+        asyncio.ensure_future(ctx.stop.wait()),
+        asyncio.ensure_future(ctx.time_up.wait()),
+    }
     try:
-        await asyncio.wait(waiters, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait(
+            waiters, timeout=seconds, return_when=asyncio.FIRST_COMPLETED
+        )
     finally:
         for w in waiters:
             w.cancel()
@@ -967,8 +1147,13 @@ async def time_limit(ctx: Ctx):
     ctx.time_up.set()
 
 
-async def fetch(ctx: Ctx, url: str, params: dict | None = None,
-                expect: str | None = "#siteTable", info: dict | None = None):
+async def fetch(
+    ctx: Ctx,
+    url: str,
+    params: dict | None = None,
+    expect: str | None = "#siteTable",
+    info: dict | None = None,
+):
     """
     GET a page and return a BeautifulSoup, or None on failure / stop.
 
@@ -1013,8 +1198,9 @@ async def fetch(ctx: Ctx, url: str, params: dict | None = None,
                     req = asyncio.ensure_future(ctx.backend.get(url, params))
                     stopper = asyncio.ensure_future(ctx.stop.wait())
                     try:
-                        await asyncio.wait({req, stopper},
-                                           return_when=asyncio.FIRST_COMPLETED)
+                        await asyncio.wait(
+                            {req, stopper}, return_when=asyncio.FIRST_COMPLETED
+                        )
                     finally:
                         stopper.cancel()
                         if not req.done():
@@ -1024,11 +1210,18 @@ async def fetch(ctx: Ctx, url: str, params: dict | None = None,
                     r = req.result()
                     latency = time.monotonic() - started
                 except Exception as e:  # network error, timeout, browser error...
-                    print(f"    network error ({type(e).__name__}: {str(e)[:80]}); "
-                          f"retry {attempt + 1}")
-                    log.warning("%s network error attempt=%d/%d: %s: %s", what,
-                                attempt + 1, ctx.retries, type(e).__name__,
-                                _scrub(str(e))[:BODY_SNIPPET])
+                    print(
+                        f"    network error ({type(e).__name__}: {str(e)[:80]}); "
+                        f"retry {attempt + 1}"
+                    )
+                    log.warning(
+                        "%s network error attempt=%d/%d: %s: %s",
+                        what,
+                        attempt + 1,
+                        ctx.retries,
+                        type(e).__name__,
+                        _scrub(str(e))[:BODY_SNIPPET],
+                    )
                     r = Resp(0, None, url, False, "")
         if throttled:
             continue  # doesn't use up a retry
@@ -1052,14 +1245,19 @@ async def fetch(ctx: Ctx, url: str, params: dict | None = None,
             moved = f" (redirected to {r.final_url})" if r.redirected else ""
             print(f"    unexpected page{moved}; title: {title!r}")
             soft = True
-            if "/login" in urlparse(r.final_url).path or title.startswith("Welcome to Reddit"):
+            if "/login" in urlparse(r.final_url).path or title.startswith(
+                "Welcome to Reddit"
+            ):
                 # A login wall is deterministic: retrying and cooling down won't help
                 ctx.login_walls += 1
                 if ctx.login_walls >= 3:
-                    trip(ctx, "Reddit is redirecting requests to its login page, so "
-                              "your session (cookie file or --login) was rejected, logged "
-                              "out or expired. Re-export a fresh cookie file from a "
-                              "logged-in browser (or re-run with --login) and try again")
+                    trip(
+                        ctx,
+                        "Reddit is redirecting requests to its login page, so "
+                        "your session (cookie file or --login) was rejected, logged "
+                        "out or expired. Re-export a fresh cookie file from a "
+                        "logged-in browser (or re-run with --login) and try again",
+                    )
                     return None
 
         if soft or r.status in (403, 429):
@@ -1067,8 +1265,10 @@ async def fetch(ctx: Ctx, url: str, params: dict | None = None,
             ctx.consecutive_blocks += 1
             ctx.total_blocks += 1
             label = "unexpected non-Reddit page" if soft else f"HTTP {r.status}"
-            print(f"    {label} (consecutive blocks: "
-                  f"{ctx.consecutive_blocks}/{ctx.max_blocks})")
+            print(
+                f"    {label} (consecutive blocks: "
+                f"{ctx.consecutive_blocks}/{ctx.max_blocks})"
+            )
             try:
                 cooldown = float(r.retry_after) if r.retry_after else None
             except ValueError:
@@ -1081,28 +1281,47 @@ async def fetch(ctx: Ctx, url: str, params: dict | None = None,
                 reason = "rate limited (HTTP 429)"
             else:
                 reason = f"blocked (HTTP {r.status})"
-            log.warning("%s %s attempt=%d/%d sleeping=%.0fs consecutive_blocks=%d/%d body=%s",
-                        what, reason, attempt, ctx.retries, cooldown,
-                        ctx.consecutive_blocks, ctx.max_blocks, _snippet(r.text))
+            log.warning(
+                "%s %s attempt=%d/%d sleeping=%.0fs consecutive_blocks=%d/%d body=%s",
+                what,
+                reason,
+                attempt,
+                ctx.retries,
+                cooldown,
+                ctx.consecutive_blocks,
+                ctx.max_blocks,
+                _snippet(r.text),
+            )
             if ctx.consecutive_blocks >= ctx.max_blocks:
-                trip(ctx, f"{ctx.consecutive_blocks} consecutive blocked responses "
-                          f"(403/429 or non-Reddit page)")
+                trip(
+                    ctx,
+                    f"{ctx.consecutive_blocks} consecutive blocked responses "
+                    f"(403/429 or non-Reddit page)",
+                )
                 return None
             ctx.cooldown_until = max(ctx.cooldown_until, time.monotonic() + cooldown)
             continue
 
         if r.status == 0 or r.status >= 500:
-            pause = min(60, 2 ** attempt * 3)
-            if r.status >= 500:   # status 0 (network error) was logged above
-                log.warning("%s server error status=%d attempt=%d/%d sleeping=%ds body=%s",
-                            what, r.status, attempt + 1, ctx.retries, pause,
-                            _snippet(r.text))
+            pause = min(60, 2**attempt * 3)
+            if r.status >= 500:  # status 0 (network error) was logged above
+                log.warning(
+                    "%s server error status=%d attempt=%d/%d sleeping=%ds body=%s",
+                    what,
+                    r.status,
+                    attempt + 1,
+                    ctx.retries,
+                    pause,
+                    _snippet(r.text),
+                )
             await nap(ctx, pause)
             attempt += 1
             continue
 
         print(f"    HTTP {r.status} for {url}; skipping")  # 404, 410, ...
-        log.error("%s request rejected status=%d body=%s", what, r.status, _snippet(r.text))
+        log.error(
+            "%s request rejected status=%d body=%s", what, r.status, _snippet(r.text)
+        )
         return None
 
     log.error("%s failed after %d attempts", what, ctx.retries)
@@ -1143,23 +1362,25 @@ def parse_listing(soup, subreddit, cutoff, keep_stale=False):
 
         title_a = t.select_one("a.title")
         flair_tag = t.select_one("span.linkflairlabel")
-        posts.append({
-            "subreddit": subreddit,
-            "post_id": t.get("data-fullname", "").replace("t3_", ""),
-            "title": title_a.get_text(strip=True) if title_a else "",
-            "author": t.get("data-author", ""),
-            "created_utc": created.isoformat(),
-            "score": t.get("data-score", ""),
-            "num_comments": t.get("data-comments-count", ""),
-            "flair": flair_tag.get_text(strip=True) if flair_tag else "",
-            "domain": t.get("data-domain", ""),
-            "url": t.get("data-url", ""),
-            "permalink": BASE + t.get("data-permalink", ""),
-            "selftext": "",
-            "comments_scraped": False,
-            "stickied": stickied,
-            "stale": stale,
-        })
+        posts.append(
+            {
+                "subreddit": subreddit,
+                "post_id": t.get("data-fullname", "").replace("t3_", ""),
+                "title": title_a.get_text(strip=True) if title_a else "",
+                "author": t.get("data-author", ""),
+                "created_utc": created.isoformat(),
+                "score": t.get("data-score", ""),
+                "num_comments": t.get("data-comments-count", ""),
+                "flair": flair_tag.get_text(strip=True) if flair_tag else "",
+                "domain": t.get("data-domain", ""),
+                "url": t.get("data-url", ""),
+                "permalink": BASE + t.get("data-permalink", ""),
+                "selftext": "",
+                "comments_scraped": False,
+                "stickied": stickied,
+                "stale": stale,
+            }
+        )
 
     nxt = soup.select_one("span.next-button a")
     return posts, reached_cutoff, (nxt["href"] if nxt else None)
@@ -1192,27 +1413,29 @@ def parse_search(soup, cutoff):
         if created is None:
             continue
         if created < cutoff:
-            reached_cutoff = True       # sort=new: everything after this is older
+            reached_cutoff = True  # sort=new: everything after this is older
             break
         author = t.select_one("a.author, span.author")
         flair = t.select_one("span.linkflairlabel")
-        posts.append({
-            "subreddit": m.group(1),
-            "post_id": m.group(2),
-            "title": a.get_text(strip=True),
-            "author": author.get_text(strip=True) if author is not None else "",
-            "created_utc": created.isoformat(),
-            "score": _first_int(t.select_one("span.search-score")),
-            "num_comments": _first_int(t.select_one("a.search-comments")),
-            "flair": flair.get_text(strip=True) if flair is not None else "",
-            "domain": "",
-            "url": "",
-            "permalink": BASE + urlparse(a["href"]).path,
-            "selftext": "",
-            "comments_scraped": False,
-            "stickied": False,
-            "stale": False,
-        })
+        posts.append(
+            {
+                "subreddit": m.group(1),
+                "post_id": m.group(2),
+                "title": a.get_text(strip=True),
+                "author": author.get_text(strip=True) if author is not None else "",
+                "created_utc": created.isoformat(),
+                "score": _first_int(t.select_one("span.search-score")),
+                "num_comments": _first_int(t.select_one("a.search-comments")),
+                "flair": flair.get_text(strip=True) if flair is not None else "",
+                "domain": "",
+                "url": "",
+                "permalink": BASE + urlparse(a["href"]).path,
+                "selftext": "",
+                "comments_scraped": False,
+                "stickied": False,
+                "stale": False,
+            }
+        )
 
     nxt = soup.select_one("span.next-button a")
     return posts, reached_cutoff, (nxt["href"] if nxt else None)
@@ -1239,7 +1462,9 @@ def comment_created(node, entry):
             return ts_to_dt(ts)
         except (ValueError, OverflowError):
             pass
-    t = entry.select_one("time.live-timestamp[datetime]") or entry.select_one("time[datetime]")
+    t = entry.select_one("time.live-timestamp[datetime]") or entry.select_one(
+        "time[datetime]"
+    )
     return _parse_iso(t["datetime"]) if t else None
 
 
@@ -1275,17 +1500,19 @@ def parse_post_page(soup, post, cutoff):
         parent = c.find_parent("div", class_="comment")
         parent_id = parent.get("data-fullname", "").replace("t1_", "") if parent else ""
 
-        comments.append({
-            "subreddit": post["subreddit"],
-            "post_id": post["post_id"],
-            "comment_id": c.get("data-fullname", "").replace("t1_", ""),
-            "parent_id": parent_id or post["post_id"],  # top-level -> post id
-            "author": c.get("data-author", ""),
-            "created_utc": created.isoformat() if created else "",
-            "score": score,
-            "body": md.get_text("\n", strip=True) if md else "",
-            "permalink": BASE + c.get("data-permalink", ""),
-        })
+        comments.append(
+            {
+                "subreddit": post["subreddit"],
+                "post_id": post["post_id"],
+                "comment_id": c.get("data-fullname", "").replace("t1_", ""),
+                "parent_id": parent_id or post["post_id"],  # top-level -> post id
+                "author": c.get("data-author", ""),
+                "created_utc": created.isoformat() if created else "",
+                "score": score,
+                "body": md.get_text("\n", strip=True) if md else "",
+                "permalink": BASE + c.get("data-permalink", ""),
+            }
+        )
 
     stubs = len(soup.select("div.commentarea div.thing.morechildren"))
     return selftext, comments, stubs, diag
@@ -1294,10 +1521,12 @@ def parse_post_page(soup, post, cutoff):
 # --------------------------------------------------------------------------- #
 # Tasks
 # --------------------------------------------------------------------------- #
-BIG_THREAD = 400   # posts with at least this many comments get a second sort
+BIG_THREAD = 400  # posts with at least this many comments get a second sort
 
 
-def register_post(ctx: Ctx, p: dict, queue: asyncio.Queue, discussion_only=False) -> bool:
+def register_post(
+    ctx: Ctx, p: dict, queue: asyncio.Queue, discussion_only=False
+) -> bool:
     """
     Add a post to the run (and the comment queue) unless it is a duplicate or
     not worth fetching. One shared `seen_ids` set keeps the crawl, the search and
@@ -1330,7 +1559,11 @@ def comment_sorts(post: dict) -> list[str]:
         n = int(post.get("num_comments") or 0)
     except ValueError:
         n = 0
-    if post.get("stickied") or is_discussion_title(post.get("title", "")) or n >= BIG_THREAD:
+    if (
+        post.get("stickied")
+        or is_discussion_title(post.get("title", ""))
+        or n >= BIG_THREAD
+    ):
         return ["new", "top"]
     return ["new"]
 
@@ -1339,22 +1572,40 @@ def _check_listing(soup, posts, reached_cutoff, what, page):
     """Scraper health check: the page loaded fine, but did the selectors find anything?"""
     raw = len(soup.select("div#siteTable > div.thing.link"))
     if raw == 0:
-        log.warning("%s page=%d loaded but selector 'div#siteTable > div.thing.link' "
-                    "matched nothing", what, page)
+        log.warning(
+            "%s page=%d loaded but selector 'div#siteTable > div.thing.link' "
+            "matched nothing",
+            what,
+            page,
+        )
     elif not posts and not reached_cutoff:
-        log.warning("%s page=%d has %d post blocks but none could be parsed "
-                    "(data-timestamp missing?)", what, page, raw)
+        log.warning(
+            "%s page=%d has %d post blocks but none could be parsed "
+            "(data-timestamp missing?)",
+            what,
+            page,
+            raw,
+        )
 
 
 def _check_search(soup, posts, reached_cutoff, what, page):
     raw = len(soup.select("div.search-result-link"))
     if raw == 0:
-        log.warning("%s page=%d loaded but selector 'div.search-result-link' found no "
-                    "results (normal for a quiet query, otherwise the selector may be "
-                    "stale)", what, page)
+        log.warning(
+            "%s page=%d loaded but selector 'div.search-result-link' found no "
+            "results (normal for a quiet query, otherwise the selector may be "
+            "stale)",
+            what,
+            page,
+        )
     elif not posts and not reached_cutoff:
-        log.warning("%s page=%d has %d results but none could be parsed "
-                    "(a.search-title / time[datetime] changed?)", what, page, raw)
+        log.warning(
+            "%s page=%d has %d results but none could be parsed "
+            "(a.search-title / time[datetime] changed?)",
+            what,
+            page,
+            raw,
+        )
 
 
 async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
@@ -1369,8 +1620,11 @@ async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
             soup = await fetch(ctx, url, params, info=info)
             if soup is None:
                 if not halted(ctx):
-                    log.error("listing r/%s/new page=%d failed, giving up on this "
-                              "listing", sub, page)
+                    log.error(
+                        "listing r/%s/new page=%d failed, giving up on this listing",
+                        sub,
+                        page,
+                    )
                 return
             posts, reached_cutoff, nxt = parse_listing(soup, sub, ctx.cutoff)
             _check_listing(soup, posts, reached_cutoff, what, page)
@@ -1383,9 +1637,14 @@ async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
                 if register_post(ctx, p, queue):
                     n += 1
 
-            log.info("listing ok r/%s/new page=%d posts=%d more=%s latency=%.2fs",
-                     sub, page, len(posts), "no" if reached_cutoff or not nxt else "yes",
-                     info["latency"])
+            log.info(
+                "listing ok r/%s/new page=%d posts=%d more=%s latency=%.2fs",
+                sub,
+                page,
+                len(posts),
+                "no" if reached_cutoff or not nxt else "yes",
+                info["latency"],
+            )
             print(f"  [r/{sub}] page {page}: {n} posts so far")
             if reached_cutoff or not nxt:
                 ctx.sub_status[sub] = "complete"
@@ -1393,12 +1652,23 @@ async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
             url, params = nxt, None
             page += 1
     finally:
-        log.info("listing done r/%s/new fetched=%d new=%d total=%d",
-                 sub, fetched, n, len(ctx.posts))
+        log.info(
+            "listing done r/%s/new fetched=%d new=%d total=%d",
+            sub,
+            fetched,
+            n,
+            len(ctx.posts),
+        )
 
 
-async def produce_listing(ctx: Ctx, sub: str, kind: str, pages: int,
-                          queue: asyncio.Queue, discussion_only: bool):
+async def produce_listing(
+    ctx: Ctx,
+    sub: str,
+    kind: str,
+    pages: int,
+    queue: asyncio.Queue,
+    discussion_only: bool,
+):
     """
     Read /r/<sub>/hot or /rising. Unlike /new this keeps posts older than the
     cutoff (pinned daily threads, long-running discussions): their comments are
@@ -1412,8 +1682,12 @@ async def produce_listing(ctx: Ctx, sub: str, kind: str, pages: int,
             soup = await fetch(ctx, url, params, info=info)
             if soup is None:
                 if not halted(ctx):
-                    log.error("listing r/%s/%s page=%d failed, giving up on this "
-                              "listing", sub, kind, page)
+                    log.error(
+                        "listing r/%s/%s page=%d failed, giving up on this listing",
+                        sub,
+                        kind,
+                        page,
+                    )
                 return
             posts, _, nxt = parse_listing(soup, sub, ctx.cutoff, keep_stale=True)
             _check_listing(soup, posts, False, what, page)
@@ -1424,17 +1698,29 @@ async def produce_listing(ctx: Ctx, sub: str, kind: str, pages: int,
                     break
                 if register_post(ctx, p, queue, discussion_only):
                     n += 1
-            log.info("listing ok r/%s/%s page=%d posts=%d more=%s latency=%.2fs",
-                     sub, kind, page, len(posts),
-                     "yes" if nxt and page < pages else "no", info["latency"])
+            log.info(
+                "listing ok r/%s/%s page=%d posts=%d more=%s latency=%.2fs",
+                sub,
+                kind,
+                page,
+                len(posts),
+                "yes" if nxt and page < pages else "no",
+                info["latency"],
+            )
             print(f"  [r/{sub}/{kind}] page {page}: {n} new posts")
             if not nxt:
                 return
             url, params = nxt, None
             page += 1
     finally:
-        log.info("listing done r/%s/%s fetched=%d new=%d total=%d",
-                 sub, kind, fetched, n, len(ctx.posts))
+        log.info(
+            "listing done r/%s/%s fetched=%d new=%d total=%d",
+            sub,
+            kind,
+            fetched,
+            n,
+            len(ctx.posts),
+        )
 
 
 def search_time_filter(cutoff: datetime) -> str:
@@ -1448,8 +1734,13 @@ def search_time_filter(cutoff: datetime) -> str:
 async def produce_search(ctx: Ctx, query: str, queue: asyncio.Queue, pages: int):
     """Search the tracked subreddits for one ticker/company query, newest first."""
     url = f"{BASE}/r/{'+'.join(SUBREDDITS)}/search"
-    params = {"q": query, "restrict_sr": "on", "sort": "new",
-              "t": search_time_filter(ctx.cutoff), "limit": 100}
+    params = {
+        "q": query,
+        "restrict_sr": "on",
+        "sort": "new",
+        "t": search_time_filter(ctx.cutoff),
+        "limit": 100,
+    }
     n, page, fetched = 0, 1, 0
     try:
         while url and page <= pages and not halted(ctx):
@@ -1459,8 +1750,11 @@ async def produce_search(ctx: Ctx, query: str, queue: asyncio.Queue, pages: int)
             soup = await fetch(ctx, url, params, expect="#header", info=info)
             if soup is None:
                 if not halted(ctx):
-                    log.error("search q=%s page=%d failed, giving up on this query",
-                              query, page)
+                    log.error(
+                        "search q=%s page=%d failed, giving up on this query",
+                        query,
+                        page,
+                    )
                 return
             posts, reached_cutoff, nxt = parse_search(soup, ctx.cutoff)
             _check_search(soup, posts, reached_cutoff, what, page)
@@ -1471,17 +1765,27 @@ async def produce_search(ctx: Ctx, query: str, queue: asyncio.Queue, pages: int)
                     break
                 if register_post(ctx, p, queue):
                     n += 1
-            log.info("search ok q=%s page=%d posts=%d more=%s latency=%.2fs", query, page,
-                     len(posts), "no" if reached_cutoff or not nxt or page >= pages else "yes",
-                     info["latency"])
+            log.info(
+                "search ok q=%s page=%d posts=%d more=%s latency=%.2fs",
+                query,
+                page,
+                len(posts),
+                "no" if reached_cutoff or not nxt or page >= pages else "yes",
+                info["latency"],
+            )
             print(f"  [search {query}] page {page}: {n} new posts")
             if reached_cutoff or not nxt:
                 return
             url, params = nxt, None
             page += 1
     finally:
-        log.info("search done q=%s fetched=%d new=%d total=%d",
-                 query, fetched, n, len(ctx.posts))
+        log.info(
+            "search done q=%s fetched=%d new=%d total=%d",
+            query,
+            fetched,
+            n,
+            len(ctx.posts),
+        )
 
 
 async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
@@ -1497,23 +1801,32 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
             stubs = 0
             for sort in comment_sorts(post):
                 info = {}
-                soup = await fetch(ctx, post["permalink"], {"limit": 500, "sort": sort},
-                                   info=info)
+                soup = await fetch(
+                    ctx, post["permalink"], {"limit": 500, "sort": sort}, info=info
+                )
                 if soup is None:
                     if halted(ctx):
                         break
-                    log.error("thread page post=%s sort=%s failed, skipping it",
-                              post["post_id"], sort)
+                    log.error(
+                        "thread page post=%s sort=%s failed, skipping it",
+                        post["post_id"],
+                        sort,
+                    )
                     continue
                 selftext, found, n_stubs, diag = parse_post_page(soup, post, ctx.cutoff)
-                log.info("thread page ok post=%s sort=%s comments=%d more=%s latency=%.2fs",
-                         post["post_id"], sort, len(found), "yes" if n_stubs else "no",
-                         info["latency"])
+                log.info(
+                    "thread page ok post=%s sort=%s comments=%d more=%s latency=%.2fs",
+                    post["post_id"],
+                    sort,
+                    len(found),
+                    "yes" if n_stubs else "no",
+                    info["latency"],
+                )
                 if first_soup is None:
                     first_soup, first_diag, stubs = soup, diag, n_stubs
                     post["selftext"] = selftext
                     post["comments_scraped"] = True
-                for c in found:                      # merge the sorts, no duplicates
+                for c in found:  # merge the sorts, no duplicates
                     if c["comment_id"] not in seen_cids:
                         seen_cids.add(c["comment_id"])
                         comments.append(c)
@@ -1522,11 +1835,13 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
 
             ctx.comments_total += len(comments)
             ctx.posts_done += 1
-            await score_thread(ctx, post, comments)   # one thread = one scoring batch
-            post["selftext"] = ""                     # text is not kept after scoring
+            await score_thread(ctx, post, comments)  # one thread = one scoring batch
+            post["selftext"] = ""  # text is not kept after scoring
             if stubs:
-                print(f"    note: {stubs} 'load more comments' stub(s) not expanded "
-                      f"({post['post_id']})")
+                print(
+                    f"    note: {stubs} 'load more comments' stub(s) not expanded "
+                    f"({post['post_id']})"
+                )
 
             # Health check: the post says it has comments, but we parsed none
             try:
@@ -1538,20 +1853,32 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
             elif expected > 0:
                 ctx.empty_comment_posts += 1
                 if ctx.empty_comment_posts <= 5:
-                    print(f"    warning: post {post['post_id']} reports {expected} "
-                          f"comments but 0 were parsed {first_diag}")
-                log.warning("thread page loaded but no comments parsed post=%s "
-                            "reported_comments=%d diag=%s url=%s", post["post_id"],
-                            expected, first_diag, _scrub(post["permalink"]))
+                    print(
+                        f"    warning: post {post['post_id']} reports {expected} "
+                        f"comments but 0 were parsed {first_diag}"
+                    )
+                log.warning(
+                    "thread page loaded but no comments parsed post=%s "
+                    "reported_comments=%d diag=%s url=%s",
+                    post["post_id"],
+                    expected,
+                    first_diag,
+                    _scrub(post["permalink"]),
+                )
                 if ctx.empty_comment_posts >= 10 and ctx.parsed_comment_posts == 0:
-                    trip(ctx, f"comment pages load, but no comments could be parsed from "
-                              f"{ctx.empty_comment_posts} posts that have comments. The "
-                              f"page layout probably differs from what the parser expects: "
-                              f"see the 'no comments parsed' warnings in the log")
+                    trip(
+                        ctx,
+                        f"comment pages load, but no comments could be parsed from "
+                        f"{ctx.empty_comment_posts} posts that have comments. The "
+                        f"page layout probably differs from what the parser expects: "
+                        f"see the 'no comments parsed' warnings in the log",
+                    )
 
             if ctx.posts_done % 20 == 0:
-                print(f"  progress: {ctx.posts_done}/{ctx.posts_queued} posts' comments "
-                      f"fetched, {ctx.comments_total} comments total")
+                print(
+                    f"  progress: {ctx.posts_done}/{ctx.posts_queued} posts' comments "
+                    f"fetched, {ctx.comments_total} comments total"
+                )
         finally:
             queue.task_done()
 
@@ -1587,7 +1914,9 @@ def item_ref(item: dict) -> tuple[str, str]:
 
 
 def _build_items(ctx: Ctx, post: dict, comments: list) -> list:
-    items, _stats = build_scoring_items([post], comments, ctx.matcher, cutoff=ctx.cutoff)
+    items, _stats = build_scoring_items(
+        [post], comments, ctx.matcher, cutoff=ctx.cutoff
+    )
     return items
 
 
@@ -1613,20 +1942,27 @@ async def score_thread(ctx: Ctx, post: dict, comments: list) -> None:
                 ctx.item_keys.add((ticker, item_id))
                 # Same text already seen for this ticker (e.g. copy-pasted spam in
                 # other threads): skip it. Only a short hash is kept, never the text.
-                digest = hashlib.blake2b(it["text"].encode("utf-8", "replace"),
-                                         digest_size=8).digest()
+                digest = hashlib.blake2b(
+                    it["text"].encode("utf-8", "replace"), digest_size=8
+                ).digest()
                 if (ticker, digest) in ctx.text_seen:
                     continue
                 ctx.text_seen.add((ticker, digest))
                 # score_texts takes plain strings, so the text being answered
                 # (parent comment / post title) is joined in front of the reply.
                 context = (it.get("context") or "").strip()[:CONTEXT_CHARS]
-                new.append((ticker, item_id,
-                            f"{context} {it['text']}" if context else it["text"]))
+                new.append(
+                    (
+                        ticker,
+                        item_id,
+                        f"{context} {it['text']}" if context else it["text"],
+                    )
+                )
             if new:
                 start = time.monotonic()
-                scores = await asyncio.to_thread(_score_texts_temp,
-                                                 [text for _, _, text in new])
+                scores = await asyncio.to_thread(
+                    _score_texts_temp, [text for _, _, text in new]
+                )
                 missing = 0
                 for ticker, item_id, text in new:
                     score = scores.get(text)
@@ -1636,20 +1972,35 @@ async def score_thread(ctx: Ctx, post: dict, comments: list) -> None:
                     ctx.results.setdefault(ticker, {})[item_id] = score
                     ctx.scored_ids.add(item_id)
                 if missing:
-                    log.warning("scorer returned no score for %d of %d items",
-                                missing, len(new))
-                log.info("scored batch items=%d elapsed=%.1fs", len(new),
-                         time.monotonic() - start)
+                    log.warning(
+                        "scorer returned no score for %d of %d items", missing, len(new)
+                    )
+                log.info(
+                    "scored batch items=%d elapsed=%.1fs",
+                    len(new),
+                    time.monotonic() - start,
+                )
         ctx.scoring_failures = 0
     except Exception:
         ctx.scoring_failures += 1
-        log.exception("scoring failed for thread post=%s (%d unique items scored so far)",
-                      post["post_id"], len(ctx.scored_ids))
+        log.exception(
+            "scoring failed for thread post=%s (%d unique items scored so far)",
+            post["post_id"],
+            len(ctx.scored_ids),
+        )
         if ctx.scoring_failures >= 3:
-            trip(ctx, "scoring failed for 3 threads in a row (see the traceback in the log)")
+            trip(
+                ctx,
+                "scoring failed for 3 threads in a row (see the traceback in the log)",
+            )
         return
-    log.info("thread done post=%s fetched=%d new=%d total=%d",
-             post["post_id"], fetched, len(new), len(ctx.scored_ids))
+    log.info(
+        "thread done post=%s fetched=%d new=%d total=%d",
+        post["post_id"],
+        fetched,
+        len(new),
+        len(ctx.scored_ids),
+    )
 
 
 def build_report(results, tickers):
@@ -1661,12 +2012,14 @@ def build_report(results, tickers):
     for ticker in sorted(tickers):
         items = results.get(ticker, {})
         average = round(sum(items.values()) / len(items), 2) if items else None
-        report.append({
-            "ticker": ticker,
-            "average_sentiment": average,
-            "post_count": len(items),
-            "posts": items,
-        })
+        report.append(
+            {
+                "ticker": ticker,
+                "average_sentiment": average,
+                "post_count": len(items),
+                "posts": items,
+            }
+        )
     return report
 
 
@@ -1682,9 +2035,13 @@ def write_results(path, results, tickers, final=True):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
-        log.info("%s written path=%s tickers=%d items=%d",
-                 "results" if final else "checkpoint", path, len(report),
-                 sum(r["post_count"] for r in report))
+        log.info(
+            "%s written path=%s tickers=%d items=%d",
+            "results" if final else "checkpoint",
+            path,
+            len(report),
+            sum(r["post_count"] for r in report),
+        )
         if final:
             print(f"Results saved to {path}")
     except Exception:
@@ -1702,7 +2059,9 @@ def save_checkpoint(ctx: Ctx) -> None:
     n = sum(len(items) for items in ctx.results.values())
     if n == 0 or n == ctx.saved_count:
         return
-    write_results(ctx.output_path, ctx.results, ctx.tickers | set(ctx.results), final=False)
+    write_results(
+        ctx.output_path, ctx.results, ctx.tickers | set(ctx.results), final=False
+    )
     ctx.saved_count = n
 
 
@@ -1721,7 +2080,9 @@ def run_summary(ctx: Ctx, mode: str = "crawl") -> dict:
         "total_requests": ctx.total_requests,
         "total_blocked_responses": ctx.total_blocks,
         "posts": len(ctx.posts),
-        "posts_with_comments_scraped": sum(1 for p in ctx.posts if p["comments_scraped"]),
+        "posts_with_comments_scraped": sum(
+            1 for p in ctx.posts if p["comments_scraped"]
+        ),
         "comments": ctx.comments_total,
         "subreddit_listing_status": ctx.sub_status,
     }
@@ -1740,7 +2101,9 @@ async def load_ticker_map():
     except Exception as e:
         raise RuntimeError(f"ticker fetch failed: {type(e).__name__}: {e}") from e
     if not companies:
-        raise RuntimeError("the ticker file is missing, unreadable or has no usable entries")
+        raise RuntimeError(
+            "the ticker file is missing, unreadable or has no usable entries"
+        )
     log.info("tickers loaded source=file count=%d", len(set(companies.values())))
     return dict(companies)
 
@@ -1754,39 +2117,62 @@ async def run(ctx: Ctx, args) -> None:
     print(f"Collecting items newer than {ctx.cutoff.isoformat()}")
     n_cookies = len(getattr(args, "cookies", None) or [])
     if n_cookies:
-        print(f"Using {n_cookies} reddit.com cookies "
-              f"({'automatic login' if args.login else 'cookie file'}; values not shown)")
-    print(f"backend={args.backend}  concurrency={args.concurrency}  "
-          f"delay~{args.delay}s  stop after {args.max_blocks} consecutive "
-          f"blocked responses (403/429/non-Reddit page)")
-    print(f"mode={args.mode}"
-          + (f"  search queries={len(args.search_queries)}" if args.search_queries else "")
-          + (f"  extra listings={','.join(args.listings)}" if args.listings else "")
-          + "\n")
+        print(
+            f"Using {n_cookies} reddit.com cookies "
+            f"({'automatic login' if args.login else 'cookie file'}; values not shown)"
+        )
+    print(
+        f"backend={args.backend}  concurrency={args.concurrency}  "
+        f"delay~{args.delay}s  stop after {args.max_blocks} consecutive "
+        f"blocked responses (403/429/non-Reddit page)"
+    )
+    print(
+        f"mode={args.mode}"
+        + (
+            f"  search queries={len(args.search_queries)}"
+            if args.search_queries
+            else ""
+        )
+        + (f"  extra listings={','.join(args.listings)}" if args.listings else "")
+        + "\n"
+    )
     backend = make_backend(args)
     ctx.backend = backend
     queue: asyncio.Queue = asyncio.Queue()
     workers, ckpt, work, timer = [], None, None, None
     try:
         await backend.start()
-        workers = [asyncio.create_task(comment_worker(ctx, queue))
-                   for _ in range(args.concurrency)]
+        workers = [
+            asyncio.create_task(comment_worker(ctx, queue))
+            for _ in range(args.concurrency)
+        ]
         ckpt = asyncio.create_task(checkpoint_loop(ctx, args.checkpoint_secs))
-        timer = (asyncio.create_task(time_limit(ctx)) if ctx.deadline is not None
-                 else None)
+        timer = (
+            asyncio.create_task(time_limit(ctx)) if ctx.deadline is not None else None
+        )
 
         async def crawl():
             jobs = []
             if args.mode in ("crawl", "both"):
                 jobs += [produce_posts(ctx, s, queue) for s in SUBREDDITS]
             if args.mode in ("search", "both"):
-                jobs += [produce_search(ctx, q, queue, args.search_pages)
-                         for q in args.search_queries]
-            for s in SUBREDDITS:                 # pinned daily threads, old-but-active posts
+                jobs += [
+                    produce_search(ctx, q, queue, args.search_pages)
+                    for q in args.search_queries
+                ]
+            for s in SUBREDDITS:  # pinned daily threads, old-but-active posts
                 for kind in args.listings:
                     pages = args.hot_pages if kind == "hot" else 1
-                    jobs.append(produce_listing(ctx, s, kind, pages, queue,
-                                                discussion_only=(args.mode == "search")))
+                    jobs.append(
+                        produce_listing(
+                            ctx,
+                            s,
+                            kind,
+                            pages,
+                            queue,
+                            discussion_only=(args.mode == "search"),
+                        )
+                    )
             await asyncio.gather(*jobs)
             await queue.join()
 
@@ -1814,63 +2200,139 @@ async def run(ctx: Ctx, args) -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--days", type=float, default=7,
-                    help="only keep posts / comments from the last N days (default 7)")
-    ap.add_argument("--time", type=float, default=None,
-                    help="stop making requests after this many minutes; threads already "
-                         "fetched are still scored and saved (default: no limit)")
-    ap.add_argument("--max-posts", type=int, default=None,
-                    help="cap posts per subreddit (for testing)")
-    ap.add_argument("--output", default=str(OUTPUT_FILE),
-                    help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} "
-                         f"next to this script; overwritten each run)")
-    ap.add_argument("--checkpoint-secs", type=float, default=60,
-                    help="refresh the results file this often while running (default 60)")
-    ap.add_argument("--log-file", default=str(LOG_FILE),
-                    help=f"where to write the log (default: {LOG_FILE.name} next to this script)")
+    ap.add_argument(
+        "--days",
+        type=float,
+        default=7,
+        help="only keep posts / comments from the last N days (default 7)",
+    )
+    ap.add_argument(
+        "--time",
+        type=float,
+        default=None,
+        help="stop making requests after this many minutes; threads already "
+        "fetched are still scored and saved (default: no limit)",
+    )
+    ap.add_argument(
+        "--max-posts",
+        type=int,
+        default=None,
+        help="cap posts per subreddit (for testing)",
+    )
+    ap.add_argument(
+        "--output",
+        default=str(OUTPUT_FILE),
+        help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} "
+        f"next to this script; overwritten each run)",
+    )
+    ap.add_argument(
+        "--checkpoint-secs",
+        type=float,
+        default=60,
+        help="refresh the results file this often while running (default 60)",
+    )
+    ap.add_argument(
+        "--log-file",
+        default=str(LOG_FILE),
+        help=f"where to write the log (default: {LOG_FILE.name} next to this script)",
+    )
     ap.add_argument("--backend", choices=["curl", "playwright"], default="curl")
-    ap.add_argument("--impersonate", default="chrome",
-                    help="curl_cffi browser to impersonate, e.g. chrome, chrome131, "
-                         "safari, edge (default: chrome)")
-    ap.add_argument("--login", action="store_true",
-                    help="log in with Playwright (REDDIT_USERNAME / REDDIT_PASSWORD) "
-                         "instead of reading the cookie file")
-    ap.add_argument("--headed", action="store_true",
-                    help="show the browser window, for --login and for "
-                         "--backend playwright (with --login a visible window also "
-                         "opens automatically if the login needs a captcha / 2FA)")
-    ap.add_argument("--debug-login", action="store_true",
-                    help="with --login: if the login fails, save a screenshot to debug/ "
-                         "(may show your username)")
-    ap.add_argument("--concurrency", type=int, default=3,
-                    help="max simultaneous requests/tabs (default 3)")
-    ap.add_argument("--delay", type=float, default=2.0,
-                    help="avg delay per request slot in seconds (default 2.0)")
-    ap.add_argument("--max-blocks", type=int, default=8,
-                    help="stop after this many consecutive blocked responses (default 8)")
-    ap.add_argument("--proxy", default=None,
-                    help="proxy URL, e.g. http://user:pass@host:port")
-    ap.add_argument("--aliases-file", default=None,
-                    help="optional JSON {alias: ticker or [tickers]}, e.g. "
-                         '{"the big tech": ["AAPL", "MSFT"]}')
-    ap.add_argument("--ambiguous-file", default=None,
-                    help="optional JSON list of extra symbols/names that need a finance "
-                         "word nearby to count as a ticker mention")
-    ap.add_argument("--mode", choices=["auto", "crawl", "search", "both"], default="auto",
-                    help="crawl = every subreddit's /new; search = one search per ticker; "
-                         "auto = search if the ticker list is small, else crawl (default)")
-    ap.add_argument("--search-threshold", type=int, default=40,
-                    help="auto mode: search when there are at most this many tickers")
-    ap.add_argument("--search-pages", type=int, default=2,
-                    help="result pages per search query (default 2)")
-    ap.add_argument("--extra-listings", default="hot,rising",
-                    help="comma list of extra listings to read for pinned/old-but-active "
-                         "threads: hot, rising (default both; empty to disable)")
-    ap.add_argument("--hot-pages", type=int, default=2,
-                    help="pages of /hot to read per subreddit (default 2)")
-    ap.add_argument("--stale-min-comments", type=int, default=50,
-                    help="posts older than the window are only fetched if pinned, a "
-                         "daily thread, or at least this many comments (default 50)")
+    ap.add_argument(
+        "--impersonate",
+        default="chrome",
+        help="curl_cffi browser to impersonate, e.g. chrome, chrome131, "
+        "safari, edge (default: chrome)",
+    )
+    ap.add_argument(
+        "--login",
+        action="store_true",
+        help="log in with Playwright (REDDIT_USERNAME / REDDIT_PASSWORD) "
+        "instead of reading the cookie file",
+    )
+    ap.add_argument(
+        "--headed",
+        action="store_true",
+        help="show the browser window, for --login and for "
+        "--backend playwright (with --login a visible window also "
+        "opens automatically if the login needs a captcha / 2FA)",
+    )
+    ap.add_argument(
+        "--debug-login",
+        action="store_true",
+        help="with --login: if the login fails, save a screenshot to debug/ "
+        "(may show your username)",
+    )
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=3,
+        help="max simultaneous requests/tabs (default 3)",
+    )
+    ap.add_argument(
+        "--delay",
+        type=float,
+        default=2.0,
+        help="avg delay per request slot in seconds (default 2.0)",
+    )
+    ap.add_argument(
+        "--max-blocks",
+        type=int,
+        default=8,
+        help="stop after this many consecutive blocked responses (default 8)",
+    )
+    ap.add_argument(
+        "--proxy", default=None, help="proxy URL, e.g. http://user:pass@host:port"
+    )
+    ap.add_argument(
+        "--aliases-file",
+        default=None,
+        help="optional JSON {alias: ticker or [tickers]}, e.g. "
+        '{"the big tech": ["AAPL", "MSFT"]}',
+    )
+    ap.add_argument(
+        "--ambiguous-file",
+        default=None,
+        help="optional JSON list of extra symbols/names that need a finance "
+        "word nearby to count as a ticker mention",
+    )
+    ap.add_argument(
+        "--mode",
+        choices=["auto", "crawl", "search", "both"],
+        default="auto",
+        help="crawl = every subreddit's /new; search = one search per ticker; "
+        "auto = search if the ticker list is small, else crawl (default)",
+    )
+    ap.add_argument(
+        "--search-threshold",
+        type=int,
+        default=40,
+        help="auto mode: search when there are at most this many tickers",
+    )
+    ap.add_argument(
+        "--search-pages",
+        type=int,
+        default=2,
+        help="result pages per search query (default 2)",
+    )
+    ap.add_argument(
+        "--extra-listings",
+        default="hot,rising",
+        help="comma list of extra listings to read for pinned/old-but-active "
+        "threads: hot, rising (default both; empty to disable)",
+    )
+    ap.add_argument(
+        "--hot-pages",
+        type=int,
+        default=2,
+        help="pages of /hot to read per subreddit (default 2)",
+    )
+    ap.add_argument(
+        "--stale-min-comments",
+        type=int,
+        default=50,
+        help="posts older than the window are only fetched if pinned, a "
+        "daily thread, or at least this many comments (default 50)",
+    )
     args = ap.parse_args()
     if args.days <= 0:
         ap.error("--days must be greater than 0")
@@ -1889,8 +2351,10 @@ def main():
     if args.login:
         username, password = get_credentials()
     else:
-        args.cookies = prepare_cookie_file(args)      # exits with a clear message if unusable
-    if args.proxy:   # proxy URLs can carry user:pass and show up in error messages
+        args.cookies = prepare_cookie_file(
+            args
+        )  # exits with a clear message if unusable
+    if args.proxy:  # proxy URLs can carry user:pass and show up in error messages
         register_secrets(args.proxy, urlparse(args.proxy).password)
 
     # Load the tickers BEFORE scraping, so a bad path fails now, not after an hour
@@ -1899,29 +2363,38 @@ def main():
     except RuntimeError as e:
         die(f"ERROR: could not load tickers: {e}")
     try:
-        matcher = TickerMatcher(companies,
-                                aliases=load_json_file(args.aliases_file, {}),
-                                extra_ambiguous=load_json_file(args.ambiguous_file, []))
+        matcher = TickerMatcher(
+            companies,
+            aliases=load_json_file(args.aliases_file, {}),
+            extra_ambiguous=load_json_file(args.ambiguous_file, []),
+        )
     except (OSError, ValueError) as e:
         die(f"ERROR: could not load tickers/aliases: {e}")
     if args.mode == "auto":
         args.mode = "search" if matcher.n_tickers <= args.search_threshold else "crawl"
-        print(f"auto mode -> {args.mode} ({matcher.n_tickers} tickers, search threshold "
-              f"{args.search_threshold})")
-    args.search_queries = (matcher.search_queries()
-                           if args.mode in ("search", "both") else [])
+        print(
+            f"auto mode -> {args.mode} ({matcher.n_tickers} tickers, search threshold "
+            f"{args.search_threshold})"
+        )
+    args.search_queries = (
+        matcher.search_queries() if args.mode in ("search", "both") else []
+    )
 
     # --login: log in with Playwright. Cookies stay in memory and go to the backend.
     if args.login:
         try:
-            args.cookies = login_to_reddit(username, password,
-                                           headed=args.headed, proxy=args.proxy,
-                                           debug=args.debug_login)
+            args.cookies = login_to_reddit(
+                username,
+                password,
+                headed=args.headed,
+                proxy=args.proxy,
+                debug=args.debug_login,
+            )
         except LoginFailed as e:
             die(f"ERROR: Reddit login failed: {e}")
         except KeyboardInterrupt:
             die("Interrupted during login.")
-        del password                  # don't keep it around any longer than needed
+        del password  # don't keep it around any longer than needed
 
     ctx = Ctx(
         stale_min_comments=args.stale_min_comments,
@@ -1935,11 +2408,20 @@ def main():
     tickers = set(companies.values())
     ctx.tickers, ctx.output_path = tickers, args.output
     run_start = time.monotonic()
-    log.info("run start tickers=%s days=%g since=%s mode=%s backend=%s concurrency=%d "
-             "delay=%.1fs max_posts=%s extra_listings=%s checkpoint=%ss",
-             sorted(tickers), args.days, ctx.cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
-             args.mode, args.backend, args.concurrency, args.delay, args.max_posts,
-             ",".join(args.listings) or "-", args.checkpoint_secs)
+    log.info(
+        "run start tickers=%s days=%g since=%s mode=%s backend=%s concurrency=%d "
+        "delay=%.1fs max_posts=%s extra_listings=%s checkpoint=%ss",
+        sorted(tickers),
+        args.days,
+        ctx.cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        args.mode,
+        args.backend,
+        args.concurrency,
+        args.delay,
+        args.max_posts,
+        ",".join(args.listings) or "-",
+        args.checkpoint_secs,
+    )
     try:
         asyncio.run(run(ctx, args))
     except KeyboardInterrupt:
@@ -1952,23 +2434,32 @@ def main():
         write_results(args.output, ctx.results, tickers | set(ctx.results))
 
     s = run_summary(ctx, args.mode)
-    log.info("run finished unique_items=%d elapsed=%.1fs requests=%d blocked=%d",
-             len(ctx.scored_ids), time.monotonic() - run_start,
-             s["total_requests"], s["total_blocked_responses"])
-    print(f"\nDone. {s['posts']} posts "
-          f"({s['posts_with_comments_scraped']} with comments scraped), "
-          f"{s['comments']} comments, {len(ctx.scored_ids)} unique items scored "
-          f"-> {args.output}")
+    log.info(
+        "run finished unique_items=%d elapsed=%.1fs requests=%d blocked=%d",
+        len(ctx.scored_ids),
+        time.monotonic() - run_start,
+        s["total_requests"],
+        s["total_blocked_responses"],
+    )
+    print(
+        f"\nDone. {s['posts']} posts "
+        f"({s['posts_with_comments_scraped']} with comments scraped), "
+        f"{s['comments']} comments, {len(ctx.scored_ids)} unique items scored "
+        f"-> {args.output}"
+    )
 
     if s["stopped_early"]:
-        incomplete = [k for k, v in s["subreddit_listing_status"].items()
-                      if v != "complete"]
+        incomplete = [
+            k for k, v in s["subreddit_listing_status"].items() if v != "complete"
+        ]
         print(f"Stopped early: {s['stop_reason']}")
         if incomplete:
             print(f"Subreddit listings not fully crawled: {', '.join(incomplete)}")
         sys.exit(2)
     if s["time_limit_reached"]:
-        print("Time limit reached: stopped making requests; everything fetched was scored.")
+        print(
+            "Time limit reached: stopped making requests; everything fetched was scored."
+        )
 
 
 if __name__ == "__main__":

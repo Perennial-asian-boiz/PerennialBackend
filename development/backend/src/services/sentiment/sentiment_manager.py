@@ -48,17 +48,21 @@ from datetime import datetime
 from pathlib import Path
 
 SENTIMENT_DIR = Path(__file__).resolve().parent
-BACKEND_DIR = SENTIMENT_DIR.parents[2]          # sentiment -> services -> src -> backend
+BACKEND_DIR = SENTIMENT_DIR.parents[2]  # sentiment -> services -> src -> backend
 PACKAGE = "src.services.sentiment"
 
-GRACE_SECONDS = 60      # after Ctrl+C: how long a script may take to save before it is terminated
+GRACE_SECONDS = (
+    60  # after Ctrl+C: how long a script may take to save before it is terminated
+)
 
 
 @dataclass(frozen=True)
 class Script:
-    name: str           # label used in the console prefix and the summary
-    folder: str         # sub-folder of sentiment/ (also the working directory)
-    module: str         # file name without .py; rename here if your files are named differently
+    name: str  # label used in the console prefix and the summary
+    folder: str  # sub-folder of sentiment/ (also the working directory)
+    module: (
+        str  # file name without .py; rename here if your files are named differently
+    )
 
     @property
     def dotted(self):
@@ -77,7 +81,9 @@ SOURCES = (
     # Script("reddit", "reddit", "reddit"),
     Script("youtube", "youtube", "youtube"),
 )
-SERVERS_FILE = MASTODON.cwd / "mastodon_servers.json"   # written by the crawler, read by the fetcher
+SERVERS_FILE = (
+    MASTODON.cwd / "mastodon_servers.json"
+)  # written by the crawler, read by the fetcher
 
 WIDTH = max(len(s.name) for s in (CRAWLER, *SOURCES))
 
@@ -85,7 +91,7 @@ WIDTH = max(len(s.name) for s in (CRAWLER, *SOURCES))
 @dataclass
 class Result:
     name: str
-    status: str         # "ok", "failed", "skipped", "stopped" (Ctrl+C)
+    status: str  # "ok", "failed", "skipped", "stopped" (Ctrl+C)
     seconds: float = 0.0
     note: str = ""
 
@@ -130,8 +136,10 @@ def child_env():
     env = os.environ.copy()
     paths = [str(BACKEND_DIR)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
     env["PYTHONPATH"] = os.pathsep.join(paths)
-    env["PYTHONUNBUFFERED"] = "1"       # stream output live instead of in 8 KB blocks
-    env["PYTHONIOENCODING"] = "utf-8"   # so the runner can decode every line the same way
+    env["PYTHONUNBUFFERED"] = "1"  # stream output live instead of in 8 KB blocks
+    env["PYTHONIOENCODING"] = (
+        "utf-8"  # so the runner can decode every line the same way
+    )
     return env
 
 
@@ -159,8 +167,11 @@ async def run_script(script, args=()):
     start = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_exec(
-            *cmd, cwd=script.cwd, env=child_env(),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            *cmd,
+            cwd=script.cwd,
+            env=child_env(),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
     except OSError as e:
         say(script.name, f"could not start: {e}")
@@ -178,10 +189,14 @@ async def run_script(script, args=()):
             await asyncio.wait_for(pump_task, 5)
         except asyncio.TimeoutError:
             pump_task.cancel()
-        return Result(script.name, "stopped", time.monotonic() - start,
-                      f"interrupted, exit code {proc.returncode}")
+        return Result(
+            script.name,
+            "stopped",
+            time.monotonic() - start,
+            f"interrupted, exit code {proc.returncode}",
+        )
     try:
-        await asyncio.wait_for(pump_task, 10)   # flush the last lines
+        await asyncio.wait_for(pump_task, 10)  # flush the last lines
     except asyncio.TimeoutError:
         pump_task.cancel()
 
@@ -208,12 +223,22 @@ async def run_all(days, minutes):
     sources = list(SOURCES)
     if crawl.status != "ok":
         if SERVERS_FILE.is_file():
-            when = datetime.fromtimestamp(SERVERS_FILE.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            say(MASTODON.name, f"crawler failed; using the existing server list from {when}")
+            when = datetime.fromtimestamp(SERVERS_FILE.stat().st_mtime).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            say(
+                MASTODON.name,
+                f"crawler failed; using the existing server list from {when}",
+            )
         else:
-            say(MASTODON.name, "crawler failed and there is no existing server list; skipping")
+            say(
+                MASTODON.name,
+                "crawler failed and there is no existing server list; skipping",
+            )
             sources.remove(MASTODON)
-            results.append(Result(MASTODON.name, "skipped", note="no mastodon_servers.json"))
+            results.append(
+                Result(MASTODON.name, "skipped", note="no mastodon_servers.json")
+            )
 
     # 2. the source scripts, in parallel, all with the same --days / --time
     args = []
@@ -230,7 +255,9 @@ async def run_all(days, minutes):
             if t.done() and not t.cancelled() and isinstance(t.result(), Result):
                 results.append(t.result())
             elif t.done() and not t.cancelled():
-                results.append(Result(s.name, "failed", note=f"runner error: {t.result()!r}"))
+                results.append(
+                    Result(s.name, "failed", note=f"runner error: {t.result()!r}")
+                )
         print_summary(results, time.monotonic() - run_start)
 
     if any(r.status == "stopped" for r in results):
@@ -257,16 +284,28 @@ def positive(value):
 def main():
     ap = argparse.ArgumentParser(
         description="Run the Mastodon server crawler, then the Bluesky, Mastodon, Reddit and "
-                    "YouTube sentiment scripts in parallel.")
-    ap.add_argument("--days", type=positive, default=None,
-                    help="Only keep data from the last N days (default: each script's own, 7)")
-    ap.add_argument("--time", type=positive, default=None, metavar="T",
-                    help="Minutes. After T minutes the scripts stop making requests, then finish "
-                         "scoring and saving. Starts after the crawler. (default: no limit)")
+        "YouTube sentiment scripts in parallel."
+    )
+    ap.add_argument(
+        "--days",
+        type=positive,
+        default=None,
+        help="Only keep data from the last N days (default: each script's own, 7)",
+    )
+    ap.add_argument(
+        "--time",
+        type=positive,
+        default=None,
+        metavar="T",
+        help="Minutes. After T minutes the scripts stop making requests, then finish "
+        "scoring and saving. Starts after the crawler. (default: no limit)",
+    )
     args = ap.parse_args()
 
     try:
-        sys.stdout.reconfigure(errors="replace")   # never crash on a character the console can't show
+        sys.stdout.reconfigure(
+            errors="replace"
+        )  # never crash on a character the console can't show
     except AttributeError:
         pass
 

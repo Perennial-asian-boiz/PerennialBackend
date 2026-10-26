@@ -59,7 +59,7 @@ def _forward(args, tokenizer, model, device):
         *args,
         return_tensors="pt",
         padding=True,
-        truncation=True,          # pairs: trims the longer sequence first
+        truncation=True,  # pairs: trims the longer sequence first
         max_length=MAX_LENGTH,
     )
     inputs = {k: v.to(device) for k, v in inputs.items()}
@@ -82,8 +82,12 @@ def _batch_probs(texts, contexts, tokenizer, model, device):
         for i, p in zip(single, probs):
             out[i] = p
     if paired:
-        probs = _forward(([contexts[i] for i in paired], [texts[i] for i in paired]),
-                         tokenizer, model, device)
+        probs = _forward(
+            ([contexts[i] for i in paired], [texts[i] for i in paired]),
+            tokenizer,
+            model,
+            device,
+        )
         for i, p in zip(paired, probs):
             out[i] = p
     return out
@@ -91,8 +95,8 @@ def _batch_probs(texts, contexts, tokenizer, model, device):
 
 def _summarize(p, bullish_idx, bearish_idx, neutral_idx):
     pb, pr, pn = p[bullish_idx].item(), p[bearish_idx].item(), p[neutral_idx].item()
-    net = pb - pr                                   # -1 .. 1
-    return round(5.5 + 4.5 * net, 2), pb, pr, pn    # score 1 .. 10
+    net = pb - pr  # -1 .. 1
+    return round(5.5 + 4.5 * net, 2), pb, pr, pn  # score 1 .. 10
 
 
 def _handle_oom(device, batch_size):
@@ -151,7 +155,7 @@ def score_texts(texts, filename, batch_size=BATCH_SIZE, resume=True):
     with open(filename, mode, encoding="utf-8") as f:
         pos = 0
         while pos < len(todo):
-            batch = todo[pos:pos + batch_size]
+            batch = todo[pos : pos + batch_size]
 
             try:
                 probs = _batch_probs(batch, [""] * len(batch), tokenizer, model, device)
@@ -159,8 +163,9 @@ def score_texts(texts, filename, batch_size=BATCH_SIZE, resume=True):
                 batch_size = _handle_oom(device, batch_size)
                 continue  # retry the same position with a smaller batch
 
-            scores = [_summarize(p, bullish_idx, bearish_idx, neutral_idx)[0]
-                      for p in probs]
+            scores = [
+                _summarize(p, bullish_idx, bearish_idx, neutral_idx)[0] for p in probs
+            ]
 
             # One write call per batch, then force it to disk.
             lines = "".join(
@@ -227,11 +232,16 @@ def score_items(items, filename, batch_size=BATCH_SIZE, resume=True):
     with open(filename, mode, encoding="utf-8") as f:
         pos = 0
         while pos < len(todo):
-            batch = todo[pos:pos + batch_size]
+            batch = todo[pos : pos + batch_size]
 
             try:
-                probs = _batch_probs([b[1] for b in batch], [b[2] for b in batch],
-                                     tokenizer, model, device)
+                probs = _batch_probs(
+                    [b[1] for b in batch],
+                    [b[2] for b in batch],
+                    tokenizer,
+                    model,
+                    device,
+                )
             except torch.cuda.OutOfMemoryError:
                 batch_size = _handle_oom(device, batch_size)
                 continue
@@ -239,9 +249,18 @@ def score_items(items, filename, batch_size=BATCH_SIZE, resume=True):
             lines = []
             for (key, _t, _c), p in zip(batch, probs):
                 score, pb, pr, pn = _summarize(p, bullish_idx, bearish_idx, neutral_idx)
-                lines.append(json.dumps(
-                    {"id": key, "score": score, "bullish": round(pb, 4),
-                     "bearish": round(pr, 4), "neutral": round(pn, 4)}) + "\n")
+                lines.append(
+                    json.dumps(
+                        {
+                            "id": key,
+                            "score": score,
+                            "bullish": round(pb, 4),
+                            "bearish": round(pr, 4),
+                            "neutral": round(pn, 4),
+                        }
+                    )
+                    + "\n"
+                )
             f.write("".join(lines))
             f.flush()
             os.fsync(f.fileno())

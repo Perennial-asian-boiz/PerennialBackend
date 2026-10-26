@@ -73,7 +73,7 @@ def api_get(session, url, params=None, max_retries=5):
         try:
             resp = session.get(url, params=params, timeout=20)
         except requests.RequestException as exc:
-            wait = 2 ** attempt
+            wait = 2**attempt
             print(f"Network error ({exc}); retrying in {wait}s...", file=sys.stderr)
             time.sleep(wait)
             continue
@@ -84,7 +84,9 @@ def api_get(session, url, params=None, max_retries=5):
             if reset:
                 try:
                     reset_dt = datetime.fromisoformat(reset.replace("Z", "+00:00"))
-                    wait = max(1, (reset_dt - datetime.now(timezone.utc)).total_seconds() + 1)
+                    wait = max(
+                        1, (reset_dt - datetime.now(timezone.utc)).total_seconds() + 1
+                    )
                 except ValueError:
                     pass
             print(f"Rate limited; sleeping {wait:.0f}s...", file=sys.stderr)
@@ -92,14 +94,16 @@ def api_get(session, url, params=None, max_retries=5):
             continue
 
         if resp.status_code >= 500:
-            time.sleep(2 ** attempt)
+            time.sleep(2**attempt)
             continue
 
         if resp.status_code == 404:
             sys.exit(f"Not found: {url}")
         if resp.status_code in (401, 403):
-            sys.exit(f"Access denied ({resp.status_code}). This server may require a token: "
-                     "set MASTODON_TOKEN.")
+            sys.exit(
+                f"Access denied ({resp.status_code}). This server may require a token: "
+                "set MASTODON_TOKEN."
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -127,13 +131,19 @@ def simplify(status):
         "favourites_count": source.get("favourites_count"),
         "tags": [t["name"] for t in source.get("tags", [])],
         "media": [
-            {"type": m.get("type"), "url": m.get("url"), "description": m.get("description")}
+            {
+                "type": m.get("type"),
+                "url": m.get("url"),
+                "description": m.get("description"),
+            }
             for m in source.get("media_attachments", [])
         ],
     }
 
 
-def fetch_posts(session, base, account_id, max_posts, since, exclude_replies, exclude_reblogs):
+def fetch_posts(
+    session, base, account_id, max_posts, since, exclude_replies, exclude_reblogs
+):
     url = f"{base}/api/v1/accounts/{account_id}/statuses"
     params = {
         "limit": PAGE_SIZE,
@@ -148,7 +158,9 @@ def fetch_posts(session, base, account_id, max_posts, since, exclude_replies, ex
             break
 
         for status in page:
-            created = datetime.fromisoformat(status["created_at"].replace("Z", "+00:00"))
+            created = datetime.fromisoformat(
+                status["created_at"].replace("Z", "+00:00")
+            )
             # Pinned posts can appear out of order, but the main timeline is newest-first,
             # so once we pass the cutoff we can stop.
             if since and created < since:
@@ -166,8 +178,13 @@ def fetch_posts(session, base, account_id, max_posts, since, exclude_replies, ex
 def main():
     ap = argparse.ArgumentParser(description="Pull posts from a Mastodon account.")
     ap.add_argument("-a", "--account", default="@stocks@mastodon.social")
-    ap.add_argument("-n", "--max-posts", type=int, default=100,
-                    help="max posts to fetch (0 = everything available; default: 100)")
+    ap.add_argument(
+        "-n",
+        "--max-posts",
+        type=int,
+        default=100,
+        help="max posts to fetch (0 = everything available; default: 100)",
+    )
     ap.add_argument("--since", help="only posts on/after this date (YYYY-MM-DD)")
     ap.add_argument("--no-replies", action="store_true", help="exclude replies")
     ap.add_argument("--no-reblogs", action="store_true", help="exclude boosts")
@@ -185,11 +202,21 @@ def main():
         session.headers["Authorization"] = f"Bearer {token}"
 
     account = api_get(session, f"{base}/api/v1/accounts/lookup", {"acct": user})
-    print(f"Found {account['acct']}@{server} (id={account['id']}, "
-          f"{account['statuses_count']} total posts)", file=sys.stderr)
+    print(
+        f"Found {account['acct']}@{server} (id={account['id']}, "
+        f"{account['statuses_count']} total posts)",
+        file=sys.stderr,
+    )
 
-    posts = fetch_posts(session, base, account["id"], args.max_posts, since,
-                        args.no_replies, args.no_reblogs)
+    posts = fetch_posts(
+        session,
+        base,
+        account["id"],
+        args.max_posts,
+        since,
+        args.no_replies,
+        args.no_reblogs,
+    )
     print(file=sys.stderr)
 
     output = {

@@ -35,12 +35,12 @@ import aiohttp
 # Settings (edit here; the script takes no command-line arguments)
 # ---------------------------------------------------------------------------
 OUTPUT_FILE = "mastodon_servers.json"
-CONCURRENCY = 300        # simultaneous workers / connections
-MAX_DEPTH = 1            # peer-crawl hops: 0 = seeds only, 1 = seeds' peers, 2+ = deeper
-MAX_SERVERS = 0          # stop after this many servers (0 = no limit)
-TIME_LIMIT = 60          # hard stop in seconds (0 = no limit)
+CONCURRENCY = 300  # simultaneous workers / connections
+MAX_DEPTH = 1  # peer-crawl hops: 0 = seeds only, 1 = seeds' peers, 2+ = deeper
+MAX_SERVERS = 0  # stop after this many servers (0 = no limit)
+TIME_LIMIT = 60  # hard stop in seconds (0 = no limit)
 SOFTWARE = {"mastodon"}  # nodeinfo software names to accept
-EXTRA_SEEDS = ()         # additional seed domains, e.g. ("example.social",)
+EXTRA_SEEDS = ()  # additional seed domains, e.g. ("example.social",)
 # ---------------------------------------------------------------------------
 
 SEED_API_URLS = (
@@ -57,15 +57,23 @@ FALLBACK_SEEDS = (
 )
 
 USER_AGENT = "mastodon-server-discovery/1.0 (+async crawler)"
-MAX_NODEINFO_BYTES = 1 << 20      # 1 MiB
-MAX_PEERS_BYTES = 64 << 20        # 64 MiB (peer lists of big servers are large)
+MAX_NODEINFO_BYTES = 1 << 20  # 1 MiB
+MAX_PEERS_BYTES = 64 << 20  # 64 MiB (peer lists of big servers are large)
 
 DOMAIN_RE = re.compile(
     r"^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$"
 )
 BAD_SUFFIXES = (
-    ".onion", ".i2p", ".local", ".localhost", ".internal",
-    ".test", ".invalid", ".example", ".lan", ".home.arpa",
+    ".onion",
+    ".i2p",
+    ".local",
+    ".localhost",
+    ".internal",
+    ".test",
+    ".invalid",
+    ".example",
+    ".lan",
+    ".home.arpa",
 )
 
 
@@ -81,7 +89,11 @@ def normalize_domain(raw):
         d = d.encode("idna").decode("ascii")  # unicode domains -> punycode
     except UnicodeError:
         return None
-    if not DOMAIN_RE.match(d) or d.endswith(BAD_SUFFIXES) or d.rsplit(".", 1)[-1].isdigit():
+    if (
+        not DOMAIN_RE.match(d)
+        or d.endswith(BAD_SUFFIXES)
+        or d.rsplit(".", 1)[-1].isdigit()
+    ):
         return None
     return d
 
@@ -144,7 +156,10 @@ class Crawler:
         if not isinstance(data, dict):
             return None
         sw = data.get("software")
-        if not isinstance(sw, dict) or str(sw.get("name", "")).lower() not in self.software:
+        if (
+            not isinstance(sw, dict)
+            or str(sw.get("name", "")).lower() not in self.software
+        ):
             return None
         users = (data.get("usage") or {}).get("users") or {}
         return {
@@ -191,7 +206,9 @@ class Crawler:
             print(
                 f"\r[{time.monotonic() - start:6.0f}s] found={len(self.results):<6} "
                 f"checked={self.checked:<7} queued={self.queue.qsize():<7}",
-                end="", file=sys.stderr, flush=True,
+                end="",
+                file=sys.stderr,
+                flush=True,
             )
 
 
@@ -221,7 +238,7 @@ def quiet_network_errors(loop, context):
     """
     exc = context.get("exception")
     if isinstance(exc, (OSError, aiohttp.ClientError, asyncio.TimeoutError)):
-        return   # socket.gaierror is an OSError
+        return  # socket.gaierror is an OSError
     loop.default_exception_handler(context)
 
 
@@ -254,8 +271,11 @@ async def main():
         print("Fetching seed servers...", file=sys.stderr)
         for seed in await fetch_seeds(session):
             crawler.enqueue(seed, 0)
-        print(f"Seeded {crawler.queue.qsize()} domains; crawling with "
-              f"{CONCURRENCY} workers (depth={MAX_DEPTH})", file=sys.stderr)
+        print(
+            f"Seeded {crawler.queue.qsize()} domains; crawling with "
+            f"{CONCURRENCY} workers (depth={MAX_DEPTH})",
+            file=sys.stderr,
+        )
 
         workers = [asyncio.create_task(crawler.worker()) for _ in range(CONCURRENCY)]
         ticker = asyncio.create_task(crawler.progress())
@@ -263,8 +283,10 @@ async def main():
         try:
             await asyncio.wait_for(crawler.queue.join(), timeout=remaining)
         except asyncio.TimeoutError:
-            print(f"\nTime limit of {TIME_LIMIT}s reached; stopping discovery.",
-                  file=sys.stderr)
+            print(
+                f"\nTime limit of {TIME_LIMIT}s reached; stopping discovery.",
+                file=sys.stderr,
+            )
         finally:
             crawler.stop.set()
             ticker.cancel()
@@ -274,8 +296,11 @@ async def main():
 
     print(file=sys.stderr)
     write_json_atomic(OUTPUT_FILE, crawler.results)
-    print(f"Wrote {len(crawler.results)} Mastodon servers to {OUTPUT_FILE} "
-          f"({crawler.checked} domains checked)", file=sys.stderr)
+    print(
+        f"Wrote {len(crawler.results)} Mastodon servers to {OUTPUT_FILE} "
+        f"({crawler.checked} domains checked)",
+        file=sys.stderr,
+    )
 
 
 if __name__ == "__main__":
