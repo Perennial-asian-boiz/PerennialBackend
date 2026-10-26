@@ -1,6 +1,7 @@
 """Live-collector wrappers against a fake HTTP session: explicit outcomes, no partial success, no leaks."""
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import requests
@@ -9,6 +10,9 @@ from src.ingestion import collectors
 from src.ingestion.diagnostics import render_summary, safe_diagnostics
 
 SECRET = "SYNTHETIC_SECRET_7f3a"
+# ARK funds older than the publish limit are excluded (test_ark_stale_funds.py),
+# so the default fixture date stays fresh: yesterday, UTC.
+ARK_DAY = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
 NO_SLEEP = lambda seconds: None  # noqa: E731
 
 
@@ -39,7 +43,7 @@ class FakeSession:
         return self.handler(url, params or {})
 
 
-def holding(ticker, weight=1.0, price=10.0, day="2026-09-30"):
+def holding(ticker, weight=1.0, price=10.0, day=ARK_DAY):
     return {
         "ticker": ticker,
         "company": f"Synthetic {ticker}",
@@ -86,7 +90,7 @@ def test_ark_success_merges_funds_and_reads_provider_date():
     assert outcome.succeeded and outcome.mode == "live"
     zzaa = next(h for h in outcome.records if h["ticker"] == "ZZAA")
     assert zzaa["fund_count"] == 4 and zzaa["total_weight"] == 10.0
-    assert str(outcome.source_as_of) == "2026-09-30"
+    assert str(outcome.source_as_of) == ARK_DAY
     assert outcome.diagnostics["attempted"] == outcome.diagnostics["completed"] == 4
 
 
@@ -121,10 +125,11 @@ def test_ark_one_bad_fund_fails_whole_collection(bad, code):
 def test_ark_funds_on_different_dates_take_the_oldest_fund_date():
     # Staging run 19: funds report different dates. The batch is as old as its
     # stalest fund (test_ark_as_of.py has the full per-fund rule).
+    older = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat()
     session = ark_session(
-        {"ARKQ": FakeResponse(body={"holdings": [holding("ZZAA", day="2026-09-29")]})}
+        {"ARKQ": FakeResponse(body={"holdings": [holding("ZZAA", day=older)]})}
     )
-    assert str(collectors.collect_ark(session, sleep=NO_SLEEP).source_as_of) == "2026-09-29"
+    assert str(collectors.collect_ark(session, sleep=NO_SLEEP).source_as_of) == older
 
 
 def test_streamed_body_over_cap_is_rejected(monkeypatch):
