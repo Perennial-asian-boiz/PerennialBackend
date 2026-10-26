@@ -16,7 +16,12 @@ from sqlalchemy.engine import Engine
 
 from src.api import read
 from src.api.accounts import get_engine, router
-from src.api.dashboard import DashboardResponse, dashboard_response_from_publication
+from src.api.dashboard import (
+    DashboardResponse,
+    Display,
+    dashboard_response_from_publication,
+    publication_tickers,
+)
 from src.api.dashboard_fixture import temporary_dashboard_response
 from src.api.read import StartupRefused, check_startup
 from src.api.supabase_auth import AuthProviderError
@@ -196,6 +201,17 @@ def dashboard_watchlist(
             .mappings()
             .first()
         )
-    return dashboard_response_from_publication(
-        dict(publication) if publication is not None else None
-    )
+        published = dict(publication) if publication is not None else None
+        tickers = publication_tickers(published)
+        # Name and sector from the security and its profile, for every ticker in
+        # one statement. Granted columns only: never legal_name.
+        s, p = models.securities, models.company_profiles
+        display = {
+            row.symbol: Display(name=row.name, sector=row.sector)
+            for row in connection.execute(
+                select(s.c.symbol, s.c.name, p.c.sector)
+                .select_from(s.outerjoin(p, p.c.id == s.c.company_profile_id))
+                .where(s.c.symbol.in_(tickers))
+            )
+        }
+    return dashboard_response_from_publication(published, display)
