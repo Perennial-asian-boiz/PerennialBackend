@@ -34,8 +34,8 @@ from pathlib import Path
 import aiohttp
 
 # Make `src.utils` importable no matter where/how this file is launched.
-# File lives at backend/src/services/sentiment/mastodon/, so backend/ is parents[4].
-BACKEND_DIR = Path(__file__).resolve().parents[4]
+# File lives at backend/sentiment/mastodon/, so backend/ is parents[2].
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 

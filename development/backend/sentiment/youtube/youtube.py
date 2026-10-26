@@ -57,7 +57,7 @@ from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 from googleapiclient.errors import HttpError
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 UTILS_DIR = BACKEND_DIR / "src" / "utils"
 COOKIES_FILE = "youtube_cookies.txt"
 DATA_DIR = BACKEND_DIR / "data"
@@ -93,8 +93,9 @@ MIN_TAIL_WORDS = 25  # a final chunk shorter than this is merged into the previo
 # Adjust this path if the scorer lives somewhere else.
 if str(UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_DIR))
-from ....utils.console import stdout_logger  # noqa: E402
-from ....utils.fetch_tickers import fetch_ticker_map  # noqa: E402
+from src.utils.console import stdout_logger  # noqa: E402
+from src.utils.fetch_tickers import fetch_ticker_map  # noqa: E402
+
 from ..sentiment_scorer import load_scores, score_texts  # noqa: E402
 
 _out = stdout_logger()  # console lines (print() is banned in src/)

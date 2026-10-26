@@ -6,10 +6,10 @@ Order:
     2. bluesky, mastodon_stock_fetcher, reddit, youtube
                                  run at the same time, each in its own process
 
-Every script runs as a separate subprocess (`python -m src.services.sentiment.<folder>.<file>`)
+Every script runs as a separate subprocess (`python -m sentiment.<folder>.<file>`)
 with its own folder as the working directory, so files it reads/writes by relative path
 (cookie files, mastodon_servers.json) live next to it. backend/ is put on PYTHONPATH so the
-shared `src.utils.fetch_tickers` and `src.services.sentiment.sentiment_scorer` imports work.
+shared `src.utils.fetch_tickers` and `sentiment.sentiment_scorer` imports work.
 Each script keeps writing its own results JSON and its own log file, exactly as when it is
 run on its own.
 
@@ -28,9 +28,9 @@ Console output of all scripts is streamed live, each line prefixed with the scri
 Ctrl+C reaches every script (they save their partial results) and the runner waits for
 them to exit.
 
-Run (from backend/, or anywhere):
-    python -m src.services.sentiment.run_sentiment (default)
-    python -m development.backend.src.services.sentiment.sentiment_manager --days 2 --time 7 (quick test)
+Run (from backend/):
+    python -m sentiment.sentiment_manager (default)
+    python -m sentiment.sentiment_manager --days 2 --time 7 (quick test)
 
 NOTE:
  - make sure tickers.json is in the sentiment directory
@@ -47,13 +47,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ...utils.console import stdout_logger
+from src.utils.console import stdout_logger
 
 _out = stdout_logger()  # console lines (print() is banned in src/)
 
 SENTIMENT_DIR = Path(__file__).resolve().parent
-BACKEND_DIR = SENTIMENT_DIR.parents[2]  # sentiment -> services -> src -> backend
-PACKAGE = "src.services.sentiment"
+BACKEND_DIR = SENTIMENT_DIR.parent  # sentiment -> backend
+PACKAGE = "sentiment"
 
 GRACE_SECONDS = (
     60  # after Ctrl+C: how long a script may take to save before it is terminated

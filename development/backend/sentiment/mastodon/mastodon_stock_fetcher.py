@@ -37,10 +37,10 @@ a rotating log file (default: mastodon.log next to this script, override with
 --log-file). Timestamps are UTC. Post text is never logged.
 
 Usage (run from the backend/ directory, as a module, so `src.*` resolves):
-    python -m src.services.sentiment.mastodon.mastodon_stock_fetcher
-    python -m src.services.sentiment.mastodon.mastodon_stock_fetcher --workers 10
-    python -m src.services.sentiment.mastodon.mastodon_stock_fetcher --output out.json --log-file run.log
-    python -m src.services.sentiment.mastodon.mastodon_stock_fetcher --days 3 --time 30
+    python -m sentiment.mastodon.mastodon_stock_fetcher
+    python -m sentiment.mastodon.mastodon_stock_fetcher --workers 10
+    python -m sentiment.mastodon.mastodon_stock_fetcher --output out.json --log-file run.log
+    python -m sentiment.mastodon.mastodon_stock_fetcher --days 3 --time 30
 
 --days N  only keeps posts from the last N days (default: DAYS).
 --time T  stops making requests (timelines and comments) after T minutes; what
@@ -92,8 +92,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 # Make `src.*` importable no matter where/how this file is launched.
-# File lives at backend/src/services/sentiment/mastodon/, so backend/ is parents[4].
-BACKEND_DIR = Path(__file__).resolve().parents[4]
+# File lives at backend/sentiment/mastodon/, so backend/ is parents[2].
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
@@ -1267,7 +1267,7 @@ def _score_items_temp(items):
     temporary directory that is deleted as soon as the scores are read back
     (also on error). Imported here so fetching doesn't need torch/transformers.
     """
-    from src.services.sentiment.sentiment_scorer import load_score_records, score_items
+    from sentiment.sentiment_scorer import load_score_records, score_items
 
     with tempfile.TemporaryDirectory(prefix="mastodon_scores_") as tmp:
         path = os.path.join(tmp, "scores.jsonl")

@@ -27,10 +27,10 @@ Setup:
         BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx   # create at bsky.app/settings/app-passwords
 
 Run from the backend/ directory, as a module (so `src.utils` resolves):
-    python -m src.services.sentiment.bluesky.bluesky_query                      # last 7 days
-    python -m src.services.sentiment.bluesky.bluesky_query --since 2026-10-01 --until 2026-10-08
-    python -m src.services.sentiment.bluesky.bluesky_query --tickers NVDA Apple --since 2026-10-20 --window-hours 6
-    python -m src.services.sentiment.bluesky.bluesky_query --days 3 --time 30      # last 3 days, stop fetching after 30 min
+    python -m sentiment.bluesky.bluesky_query                      # last 7 days
+    python -m sentiment.bluesky.bluesky_query --since 2026-10-01 --until 2026-10-08
+    python -m sentiment.bluesky.bluesky_query --tickers NVDA Apple --since 2026-10-20 --window-hours 6
+    python -m sentiment.bluesky.bluesky_query --days 3 --time 30      # last 3 days, stop fetching after 30 min
 
 --days N  looks back N days from --until (ignored when --since is given).
 --time T  stops making API requests after T minutes; posts already fetched are
@@ -54,8 +54,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Make `src.utils` importable no matter where/how this file is launched.
-# File lives at backend/src/services/sentiment/bluesky/, so backend/ is parents[4].
-BACKEND_DIR = Path(__file__).resolve().parents[4]
+# File lives at backend/sentiment/bluesky/, so backend/ is parents[2].
+BACKEND_DIR = Path(__file__).resolve().parents[2]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
@@ -63,7 +63,7 @@ import httpx  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
 # NOTE: adjust this import path to wherever sentiment_scorer.py lives in your project.
-from src.services.sentiment.sentiment_scorer import (  # noqa: E402
+from sentiment.sentiment_scorer import (  # noqa: E402
     load_scores,
     score_texts,
 )
