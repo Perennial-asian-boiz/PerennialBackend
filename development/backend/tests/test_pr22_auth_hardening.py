@@ -1730,9 +1730,10 @@ def test_ah9b_l4_two_clients_block_recovery_for_everyone_while_login_works(
     pr22_roles,  # noqa: F811
     monkeypatch,
 ):
-    """The trade-off, pinned at the defaults (25, 6, 6, 3): two clients spending
-    their shares on forgot-password use up recovery's hour for every address."""
-    with budgeted(engine, pr22_roles, monkeypatch) as (_, provider, app):
+    """Pin the shared-recovery-budget trade-off independently of production defaults."""
+    with budgeted(
+        engine, pr22_roles, monkeypatch, total=25, recovery=6, signup=6, share=3
+    ) as (_, provider, app):
         emails = users(provider, 7)
         for n, batch in ((1, emails[0:3]), (2, emails[3:6])):
             for email in batch:
