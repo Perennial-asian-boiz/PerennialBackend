@@ -637,3 +637,169 @@ RECORDS_KEY = {
 
 # Sources whose rows are one-per-security (unique (batch_id, security_id)).
 ONE_ROW_PER_SECURITY = frozenset({"ark_holdings", "short_interest", "market_caps"})
+
+
+# ── Pattern evaluation (src/services/fundamentals) ───────
+
+
+def _signed_decimal(places: int, digits: int) -> Callable[[Any], Optional[Decimal]]:
+    """Like _decimal_validator, but negative values are valid (losses, margins)."""
+    quantum = Decimal(1).scaleb(-places)
+    bound = Decimal(10) ** (digits - places)
+
+    def validate(value: Any) -> Optional[Decimal]:
+        dec = _optional_decimal(value)
+        if dec is None:
+            return None
+        try:
+            dec = dec.quantize(quantum, rounding=ROUND_HALF_EVEN)
+        except InvalidOperation:
+            raise ValueError("number is out of range") from None
+        if abs(dec) >= bound:
+            raise ValueError("number is out of range")
+        return dec
+
+    return validate
+
+
+def _required_signed(places: int, digits: int) -> Callable[[Any], Decimal]:
+    optional = _signed_decimal(places, digits)
+
+    def validate(value: Any) -> Decimal:
+        dec = optional(value)
+        if dec is None:
+            raise ValueError("number is required")
+        return dec
+
+    return validate
+
+
+_LINE_ITEMS = frozenset(
+    {
+        "revenue",
+        "revenue_net_of_interest",
+        "gross_profit",
+        "cost_of_revenue",
+        "operating_income",
+        "pretax_income",
+        "net_income",
+        "operating_cash_flow",
+        "assets",
+        "current_assets",
+        "current_liabilities",
+        "liabilities",
+        "long_term_debt",
+        "equity",
+        "diluted_shares",
+        "noninterest_expense",
+    }
+)
+_MISSING_CODES = frozenset({"no_revenue", "not_enough_data", "insufficient_history"})
+SignedRatio = Annotated[Optional[Decimal], BeforeValidator(_signed_decimal(6, 16))]
+
+
+class FundamentalLine(SourceRecord):
+    """One annual line item for one security from SEC EDGAR companyfacts."""
+
+    DB_COLUMNS = (
+        "fiscal_year_end",
+        "line_item",
+        "value",
+        "unit",
+        "concept",
+        "form",
+        "filed",
+    )
+
+    fiscal_year_end: RequiredDate
+    line_item: Annotated[str, BeforeValidator(_text_validator(32, required=True))]
+    value: Annotated[Decimal, BeforeValidator(_required_signed(2, 24))]
+    unit: Annotated[str, BeforeValidator(_text_validator(8, required=True))]
+    concept: Annotated[str, BeforeValidator(_text_validator(160, required=True))]
+    form: Annotated[str, BeforeValidator(_text_validator(8, required=True))]
+    filed: RequiredDate
+
+    @field_validator("line_item")
+    @classmethod
+    def _known_line_item(cls, v: str) -> str:
+        if v not in _LINE_ITEMS:
+            raise ValueError("unknown line item")
+        return v
+
+    @field_validator("unit")
+    @classmethod
+    def _unit(cls, v: str) -> str:
+        if v != "shares" and not re.fullmatch(r"[A-Z]{3}", v):
+            raise ValueError("unit must be a currency code or shares")
+        return v
+
+
+class FundamentalScore(SourceRecord):
+    """Derived: one security's fundamentals score under one score_version."""
+
+    DB_COLUMNS = (
+        "fiscal_year_end",
+        "model",
+        "score",
+        "missing",
+        "revenue_growth_3y",
+        "operating_margin",
+        "operating_margin_trend",
+        "return_on_equity",
+        "efficiency_ratio",
+        "profit_source",
+        "gross_margin",
+        "piotroski_score",
+        "piotroski_signals",
+        "score_version",
+    )
+
+    fiscal_year_end: OptionalDate = None
+    model: Optional[str] = None
+    score: Annotated[Optional[Decimal], BeforeValidator(_decimal_validator(1, 4))] = (
+        None
+    )
+    missing: List[str] = Field(default_factory=list)
+    revenue_growth_3y: SignedRatio = None
+    operating_margin: SignedRatio = None
+    operating_margin_trend: SignedRatio = None
+    return_on_equity: SignedRatio = None
+    efficiency_ratio: SignedRatio = None
+    profit_source: Optional[str] = None
+    gross_margin: SignedRatio = None
+    piotroski_score: Optional[int] = Field(default=None, ge=0, le=9, strict=True)
+    piotroski_signals: int = Field(ge=0, le=9, strict=True)
+    score_version: Annotated[str, BeforeValidator(_text_validator(32, required=True))]
+
+    @field_validator("model")
+    @classmethod
+    def _model(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("general", "bank"):
+            raise ValueError("unknown score model")
+        return v
+
+    @field_validator("profit_source")
+    @classmethod
+    def _profit_source(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("operating_income", "pretax_income"):
+            raise ValueError("unknown profit source")
+        return v
+
+    @field_validator("missing")
+    @classmethod
+    def _missing(cls, v: List[str]) -> List[str]:
+        if any(c not in _MISSING_CODES for c in v) or len(set(v)) != len(v):
+            raise ValueError("unknown or repeated missing code")
+        return v
+
+    @model_validator(mode="after")
+    def _scored_or_explained(self) -> "FundamentalScore":
+        if self.score is None and not self.missing:
+            raise ValueError("an unscored security needs a missing code")
+        if self.score is not None and self.model is None:
+            raise ValueError("a scored security needs a model")
+        return self
+
+
+RECORD_MODELS.update(fundamentals=FundamentalLine, fundamental_scores=FundamentalScore)
+ONE_ROW_PER_SECURITY = ONE_ROW_PER_SECURITY | {"fundamental_scores"}

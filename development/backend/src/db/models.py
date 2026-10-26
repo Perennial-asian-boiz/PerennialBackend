@@ -53,9 +53,14 @@ SUBJECTLESS_SOURCES: tuple[str, ...] = (
 # Sources a publication pins row by row (publication_market_cap_rows), not by
 # one batch in publication_sources. Not watchlist sources (M4 MC-A).
 PINNED_ROW_SOURCES: tuple[str, ...] = ("market_caps",)
+# Pattern evaluation (src/services/fundamentals): SEC EDGAR annual figures and the
+# derived fundamentals score. Per security, never part of the watchlist publication.
+FUNDAMENTALS_SOURCES: tuple[str, ...] = ("fundamentals", "fundamental_scores")
 # The closed source vocabulary (CHECKs, CLI, locks). Append only; lifecycle lock
 # keys are explicit per source (SOURCE_LOCK_KEYS).
-SOURCES = WATCHLIST_SOURCES + SUBJECTLESS_SOURCES + PINNED_ROW_SOURCES
+SOURCES = (
+    WATCHLIST_SOURCES + SUBJECTLESS_SOURCES + PINNED_ROW_SOURCES + FUNDAMENTALS_SOURCES
+)
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live", "derived")
 PUBLICATION_EVENT_KINDS = ("quality_passed", "quality_override", "degraded", "rollback")
@@ -876,3 +881,93 @@ publication_history_watermarks = Table(
     CheckConstraint("source = 'congress_trades'", name="source"),
     CheckConstraint("through_history_id >= 0", name="through_history_id"),
 )
+
+# Pattern evaluation (docs/work-items/pattern-evaluation-design.md): SEC EDGAR
+# annual line items per security, and the derived fundamentals score.
+FUNDAMENTAL_LINE_ITEMS = (
+    "revenue",
+    "revenue_net_of_interest",
+    "gross_profit",
+    "cost_of_revenue",
+    "operating_income",
+    "pretax_income",
+    "net_income",
+    "operating_cash_flow",
+    "assets",
+    "current_assets",
+    "current_liabilities",
+    "liabilities",
+    "long_term_debt",
+    "equity",
+    "diluted_shares",
+    "noninterest_expense",
+)
+FUNDAMENTAL_SCORE_MODELS = ("general", "bank")
+FUNDAMENTAL_MISSING_CODES = (
+    "no_revenue",
+    "not_enough_data",
+    "insufficient_history",
+)
+
+fundamentals = Table(
+    "fundamentals",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("fiscal_year_end", Date, nullable=False),
+    Column("line_item", String(32), nullable=False),
+    Column("value", Numeric(24, 2), nullable=False),  # signed: losses are negative
+    Column("unit", String(8), nullable=False),  # ISO currency, or "shares"
+    Column("concept", String(160), nullable=False),  # the XBRL concept it came from
+    Column("form", String(8), nullable=False),
+    Column("filed", Date, nullable=False),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "security_id", "fiscal_year_end", "line_item"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(_in("line_item", FUNDAMENTAL_LINE_ITEMS), name="line_item"),
+    CheckConstraint("unit ~ '^([A-Z]{3}|shares)$'", name="unit"),
+)
+Index("ix_fundamentals_security_id", fundamentals.c.security_id)
+
+fundamental_scores = Table(
+    "fundamental_scores",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("fiscal_year_end", Date),
+    Column("model", String(8)),
+    Column("score", Numeric(4, 1)),  # NULL: not scored; see missing
+    Column("missing", ARRAY(String(32)), nullable=False),
+    Column("revenue_growth_3y", Numeric(16, 6)),
+    Column("operating_margin", Numeric(16, 6)),
+    Column("operating_margin_trend", Numeric(16, 6)),
+    Column("return_on_equity", Numeric(16, 6)),
+    Column("efficiency_ratio", Numeric(16, 6)),
+    Column("profit_source", String(24)),
+    Column("gross_margin", Numeric(16, 6)),
+    Column("piotroski_score", SmallInteger),
+    Column("piotroski_signals", SmallInteger, nullable=False),
+    Column("score_version", String(32), nullable=False),
+    UniqueConstraint("batch_id", "security_id"),
+    CheckConstraint(
+        f"model IS NULL OR {_in('model', FUNDAMENTAL_SCORE_MODELS)}", name="model"
+    ),
+    CheckConstraint("score IS NULL OR (score >= 0 AND score <= 100)", name="score"),
+    CheckConstraint(
+        "missing <@ ARRAY["
+        + ", ".join(f"'{c}'" for c in FUNDAMENTAL_MISSING_CODES)
+        + "]::varchar[]",
+        name="missing_codes",
+    ),
+    CheckConstraint(
+        "piotroski_signals BETWEEN 0 AND 9 AND (piotroski_score IS NULL OR "
+        "piotroski_score BETWEEN 0 AND piotroski_signals)",
+        name="piotroski",
+    ),
+)
+Index("ix_fundamental_scores_security_id", fundamental_scores.c.security_id)
+
+SOURCE_TABLES.update(fundamentals=fundamentals, fundamental_scores=fundamental_scores)

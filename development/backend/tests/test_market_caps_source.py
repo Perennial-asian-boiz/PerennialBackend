@@ -184,11 +184,9 @@ def test_market_caps_is_appended_to_the_vocabulary_without_moving_anything():
     from src.pipeline.lifecycle import SOURCE_LOCK_KEYS
 
     assert models.PINNED_ROW_SOURCES == ("market_caps",)
-    assert models.SOURCES == (
-        models.WATCHLIST_SOURCES + models.SUBJECTLESS_SOURCES + models.PINNED_ROW_SOURCES
-    )
     assert models.SOURCES[: len(PRIOR_SOURCES)] == PRIOR_SOURCES
-    assert models.SOURCES[len(PRIOR_SOURCES) :] == ("market_caps",)
+    # Later sources may follow (append only); market_caps keeps its position.
+    assert models.SOURCES[len(PRIOR_SOURCES)] == "market_caps"
     assert "market_caps" not in models.WATCHLIST_SOURCES
     assert models.SOURCE_TABLES["market_caps"] is models.market_caps
     assert {k: SOURCE_LOCK_KEYS[k] for k in PRIOR_LOCK_KEYS} == PRIOR_LOCK_KEYS
