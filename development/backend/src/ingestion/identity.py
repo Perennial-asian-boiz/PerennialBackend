@@ -44,6 +44,8 @@ PROVIDERS = frozenset({*SOURCE_PROVIDERS.values()})
 CANONICAL_ONLY_SOURCES = frozenset({"market_caps"})
 # Pattern evaluation plans from the published watchlist's canonical symbols.
 CANONICAL_ONLY_SOURCES |= {"fundamentals", "fundamental_scores"}
+# S1-03 news ingestion plans from the same published watchlist.
+CANONICAL_ONLY_SOURCES |= {"news_articles"}
 
 UNRESOLVED = "unresolved"
 INACTIVE = "inactive_security"

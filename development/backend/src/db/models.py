@@ -56,10 +56,16 @@ PINNED_ROW_SOURCES: tuple[str, ...] = ("market_caps",)
 # Pattern evaluation (src/services/fundamentals): SEC EDGAR annual figures and the
 # derived fundamentals score. Per security, never part of the watchlist publication.
 FUNDAMENTALS_SOURCES: tuple[str, ...] = ("fundamentals", "fundamental_scores")
+# S1-03 news ingestion (src/services/news): articles per security from Finnhub.
+NEWS_SOURCES: tuple[str, ...] = ("news_articles",)
 # The closed source vocabulary (CHECKs, CLI, locks). Append only; lifecycle lock
 # keys are explicit per source (SOURCE_LOCK_KEYS).
 SOURCES = (
-    WATCHLIST_SOURCES + SUBJECTLESS_SOURCES + PINNED_ROW_SOURCES + FUNDAMENTALS_SOURCES
+    WATCHLIST_SOURCES
+    + SUBJECTLESS_SOURCES
+    + PINNED_ROW_SOURCES
+    + FUNDAMENTALS_SOURCES
+    + NEWS_SOURCES
 )
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live", "derived")
@@ -971,3 +977,69 @@ fundamental_scores = Table(
 Index("ix_fundamental_scores_security_id", fundamental_scores.c.security_id)
 
 SOURCE_TABLES.update(fundamentals=fundamentals, fundamental_scores=fundamental_scores)
+
+# S1-03 news ingestion (docs/work-items/news-ingestion-design-note.md). A batch holds
+# only the (security, article) pairs first seen in that run, so the unique
+# (security_id, finnhub_id) constraint makes a duplicate impossible across runs.
+NEWS_CONTENT_RETRIEVED = ("headline_and_summary", "headline_only")
+NEWS_MATCH_RULES = ("ticker", "name")
+NEWS_COVERAGE_STATUSES = ("covered", "no_coverage", "error")
+
+news_articles = Table(
+    "news_articles",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("finnhub_id", BigInteger, nullable=False),
+    Column("url", String(2048), nullable=False),
+    Column("headline", String(500), nullable=False),
+    Column("outlet", String(100), nullable=False),
+    Column("published_at", DateTime(timezone=True), nullable=False),
+    Column("content_retrieved", String(24), nullable=False),
+    Column("match_rule", String(8), nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("security_id", "finnhub_id"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint("finnhub_id > 0", name="finnhub_id"),
+    CheckConstraint("url ~ '^https?://'", name="url_scheme"),
+    CheckConstraint(
+        _in("content_retrieved", NEWS_CONTENT_RETRIEVED), name="content_retrieved"
+    ),
+    CheckConstraint(_in("match_rule", NEWS_MATCH_RULES), name="match_rule"),
+    CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash"),
+)
+Index("ix_news_articles_published_at", news_articles.c.published_at)
+
+# One row per (run, security): the article counts, or why there were none.
+news_coverage = Table(
+    "news_coverage",
+    metadata,
+    _id(),
+    Column(
+        "run_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.ingestion_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    _security_fk(),
+    Column("status", String(16), nullable=False),
+    Column("articles_found", Integer, nullable=False),
+    Column("articles_new", Integer, nullable=False),
+    Column("error_code", String(64)),
+    UniqueConstraint("run_id", "security_id"),
+    CheckConstraint(_in("status", NEWS_COVERAGE_STATUSES), name="status"),
+    CheckConstraint(
+        "articles_found >= 0 AND articles_new >= 0 AND articles_new <= articles_found",
+        name="counts",
+    ),
+    CheckConstraint("(status = 'error') = (error_code IS NOT NULL)", name="error_code"),
+    CheckConstraint(
+        "status <> 'no_coverage' OR articles_found = 0", name="no_coverage_empty"
+    ),
+)
+Index("ix_news_coverage_security_id", news_coverage.c.security_id)
+
+SOURCE_TABLES.update(news_articles=news_articles)

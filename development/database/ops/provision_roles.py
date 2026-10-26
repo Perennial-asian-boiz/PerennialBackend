@@ -38,6 +38,7 @@ REFERENCE = ("company_profiles",)
 # M4 market caps through the ingestion contract: batch rows and publication pins.
 IMMUTABLE += ("market_caps", "publication_market_cap_rows")
 IMMUTABLE += ("fundamentals", "fundamental_scores")  # pattern evaluation
+IMMUTABLE += ("news_articles", "news_coverage")  # S1-03 news ingestion
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # M5 read API (perennial_api): published data only, never raw source tables,
 # runs or operator text. Two grants are column-level, so code selects columns.
