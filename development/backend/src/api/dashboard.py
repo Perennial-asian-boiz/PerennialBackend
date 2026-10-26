@@ -2,12 +2,55 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict
 
 DashboardSentiment = Literal["Positive", "Neutral", "Watch"]
+
+UNCLASSIFIED = "Unclassified"
+# The frontend's own sector list: it filters the dashboard by exact name.
+FRONTEND_SECTORS = (
+    "Technology",
+    "Healthcare",
+    "Financials",
+    "Industrials",
+    "Consumer Discretionary",
+    "Consumer Staples",
+    "Energy",
+    "Utilities",
+    "Materials",
+    "Communication Services",
+    "Real Estate",
+)
+_SECTOR_NAMES = {
+    **{sector: sector for sector in FRONTEND_SECTORS},
+    # FMP's names for the profile sectors (company_profiles.sector).
+    "Financial Services": "Financials",
+    "Consumer Cyclical": "Consumer Discretionary",
+    "Consumer Defensive": "Consumer Staples",
+    "Basic Materials": "Materials",
+    # GICS names that differ from the frontend's.
+    "Information Technology": "Technology",
+    "Health Care": "Healthcare",
+}
+
+
+def dashboard_sector(value: str | None) -> str:
+    """A stored profile sector as one of the frontend's sectors, or Unclassified."""
+    if not isinstance(value, str):
+        return UNCLASSIFIED
+    return _SECTOR_NAMES.get(value, UNCLASSIFIED)
+
+
+@dataclass(frozen=True)
+class Display:
+    """What the database says about a ticker: securities.name and the profile sector."""
+
+    name: str | None
+    sector: str | None
 
 
 class DashboardCompanyResponse(BaseModel):
@@ -56,12 +99,30 @@ def _reason(bucket: str, signals: Mapping[str, Any], warnings: list[Any]) -> str
     return reason
 
 
-def company_from_record(
-    record: Mapping[str, Any], bucket: str
-) -> DashboardCompanyResponse:
-    """Convert one internal ranking record without changing its source data."""
+def _ticker(record: Mapping[str, Any]) -> str:
+    return str(record.get("ticker") or "").strip().upper()
 
-    ticker = str(record.get("ticker") or "").strip().upper()
+
+def company_from_record(
+    record: Mapping[str, Any],
+    bucket: str,
+    display: Mapping[str, Display] | None = None,
+) -> DashboardCompanyResponse:
+    """Convert one internal ranking record without changing its source data.
+
+    With ``display`` (the database lookup), name and sector come from the
+    security and its profile, and a ticker it lacks is Unclassified. Without
+    it, a record-carried name and sector are kept.
+    """
+
+    ticker = _ticker(record)
+    if display is None:
+        name = str(record.get("name") or ticker)
+        sector = str(record.get("sector") or UNCLASSIFIED)
+    else:
+        found = display.get(ticker)
+        name = (found.name if found else None) or ticker
+        sector = dashboard_sector(found.sector if found else None)
     signals = record.get("signals")
     if not isinstance(signals, Mapping):
         signals = {}
@@ -77,9 +138,9 @@ def company_from_record(
     has_signal = any(value is not None for value in signals.values())
 
     return DashboardCompanyResponse(
-        name=str(record.get("name") or ticker),
+        name=name,
         ticker=ticker,
-        sector=str(record.get("sector") or "Unclassified"),
+        sector=sector,
         price=_number(record.get("price", ark_price)),
         change_percent=_number(record.get("change_percent")),
         confidence_score=_number(record.get("confidence_score")),
@@ -88,8 +149,27 @@ def company_from_record(
     )
 
 
+DASHBOARD_BUCKETS = ("affordable_growing", "popular_stable")
+
+
+def publication_tickers(publication: Mapping[str, Any] | None) -> list[str]:
+    """The tickers the dashboard shows, from both of its buckets."""
+    output = publication.get("output") if publication is not None else None
+    if not isinstance(output, Mapping):
+        return []
+    tickers = {
+        _ticker(record)
+        for bucket in DASHBOARD_BUCKETS
+        if isinstance(output.get(bucket), list)
+        for record in output[bucket]
+        if isinstance(record, Mapping)
+    }
+    return sorted(t for t in tickers if t)
+
+
 def dashboard_response_from_publication(
     publication: Mapping[str, Any] | None,
+    display: Mapping[str, Display] | None = None,
 ) -> DashboardResponse:
     """Build a stable response from the current publication, including no-data state."""
 
@@ -110,7 +190,7 @@ def dashboard_response_from_publication(
         if not isinstance(records, list):
             return []
         return [
-            company_from_record(record, name)
+            company_from_record(record, name, display)
             for record in records
             if isinstance(record, Mapping)
         ]
