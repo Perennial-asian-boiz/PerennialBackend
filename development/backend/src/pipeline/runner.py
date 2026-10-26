@@ -312,7 +312,7 @@ def collect_market_caps(
     max_seconds: float = 300,
 ) -> dict[str, dict[str, Any]]:
     """A missing profile is an explicit null; transport/parse failures abort publication."""
-    from src.ingestion.collectors import _fetcher, _get_json
+    from src.ingestion.collectors import FMP_MAX_402_SHARE, _fetcher, _get_json
 
     key = api_key if api_key is not None else _fetcher("fmp").FMP_API_KEY
     if not key or key.lower().startswith("your_"):
@@ -322,6 +322,7 @@ def collect_market_caps(
     deadline = time.monotonic() + max_seconds
     observations = {}
     try:
+        premium = 0  # 402: not on the free plan (decision 84)
         for symbol in symbols:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -335,9 +336,20 @@ def collect_market_caps(
             )
             if time.monotonic() >= deadline:
                 raise PublicationError("market-cap collection deadline exceeded")
-            if not response.ok:
+            if not response.ok and response.code == "http_402":
+                premium += 1
+                if premium > FMP_MAX_402_SHARE * len(symbols):
+                    logger.warning(
+                        "market caps fmp_402=%d of %d planned: over the share",
+                        premium,
+                        len(symbols),
+                    )
+                    raise PublicationError("market-cap collection failed")
+                payload: Any = []  # unavailable, exactly like FMP's empty answer
+            elif not response.ok:
                 raise PublicationError("market-cap collection failed")
-            payload = response.data
+            else:
+                payload = response.data
             if not isinstance(payload, list) or len(payload) > 1:
                 raise PublicationError("market-cap response is malformed")
             value = sector = industry = None
@@ -372,6 +384,16 @@ def collect_market_caps(
                 "sector": sector,
                 "industry": industry,
             }
+        if premium:
+            # Every symbol 402ing is the plan or the key, not premium symbols.
+            if premium == len(symbols):
+                logger.warning("market caps fmp_402=%d of %d: all", premium, premium)
+                raise PublicationError("market-cap collection failed")
+            logger.info(
+                "market caps fmp_402=%d of %d unavailable (premium-only symbols)",
+                premium,
+                len(symbols),
+            )
         return observations
     finally:
         if owned:

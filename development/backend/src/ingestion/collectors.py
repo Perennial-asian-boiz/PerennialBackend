@@ -94,6 +94,11 @@ RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
 # tickers 404ing, or every one, looks like an outage or a changed endpoint and
 # fails the source instead.
 SHORT_INTEREST_MAX_404_SHARE = 0.05
+# FMP's free plan answers 402 for a premium-only symbol (BRK.B): that symbol
+# only is unavailable (decision 84). More than this share of the requested
+# symbols, or every one, is a plan or key problem and fails as before. Used by
+# market caps (runner.collect_market_caps) and company summaries.
+FMP_MAX_402_SHARE = 0.25
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 UpstreamRows = Dict[str, List[Dict[str, Any]]]
 

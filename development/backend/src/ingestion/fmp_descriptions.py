@@ -20,7 +20,11 @@ from typing import Any
 import requests
 
 from src.ingestion.collectors import _fetcher, _get_json
-from src.ingestion.company_summaries import Description, DescriptionAdapterError
+from src.ingestion.company_summaries import (
+    Description,
+    DescriptionAdapterError,
+    DescriptionNotEntitled,
+)
 
 PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
 # Decision 78 (a): the source link is FMP's public home page for every symbol,
@@ -84,6 +88,9 @@ class FmpProfileDescriptions:
             params={"symbol": symbol, "apikey": key},
             timeout=REQUEST_TIMEOUT,
         )
+        if not response.ok and response.code == "http_402":
+            # Premium-only on this plan (decision 84): this symbol only.
+            raise DescriptionNotEntitled("http_402")
         if not response.ok:
             raise DescriptionAdapterError(_transport_code(response.code))
         payload: Any = response.data
