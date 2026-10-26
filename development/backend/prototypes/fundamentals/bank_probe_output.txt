@@ -1,0 +1,9 @@
+annual years reported per concept
+JPM   SIC 6021 National Commercial Banks              | net_income=19 equity=18 noninterest_expense=19 revenue_net_of_interest=19 net_interest_income=19 noninterest_income=19 provision_credit_losses=19 tier1_ratio=1
+BAC   SIC 6021 National Commercial Banks              | net_income=19 equity=20 noninterest_expense=19 revenue_net_of_interest=19 net_interest_income=19 noninterest_income=19 provision_credit_losses=13 tier1_ratio=0
+GS    SIC 6211 Security Brokers, Dealers & Flotation  | net_income=20 equity=20 noninterest_expense=20 revenue_net_of_interest=15 net_interest_income=15 noninterest_income=15 provision_credit_losses=12 tier1_ratio=5
+MS    SIC 6211 Security Brokers, Dealers & Flotation  | net_income=19 equity=18 noninterest_expense=19 revenue_net_of_interest=19 net_interest_income=19 noninterest_income=19 provision_credit_losses=13 tier1_ratio=16
+SOFI  SIC 6199 Finance Services                       | net_income=7 equity=9 noninterest_expense=7 revenue_net_of_interest=7 net_interest_income=7 noninterest_income=7 provision_credit_losses=0 tier1_ratio=0
+BLK   SIC 6211 Security Brokers, Dealers & Flotation  | net_income=4 equity=3 noninterest_expense=0 revenue_net_of_interest=3 net_interest_income=0 noninterest_income=0 provision_credit_losses=0 tier1_ratio=3
+COIN  SIC 6199 Finance Services                       | net_income=7 equity=8 noninterest_expense=0 revenue_net_of_interest=7 net_interest_income=0 noninterest_income=0 provision_credit_losses=0 tier1_ratio=0
+HOOD  SIC 6211 Security Brokers, Dealers & Flotation  | net_income=7 equity=7 noninterest_expense=0 revenue_net_of_interest=7 net_interest_income=7 noninterest_income=0 provision_credit_losses=0 tier1_ratio=0

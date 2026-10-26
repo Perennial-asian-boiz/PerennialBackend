@@ -37,6 +37,7 @@ IMMUTABLE += ("security_identifiers",)
 REFERENCE = ("company_profiles",)
 # M4 market caps through the ingestion contract: batch rows and publication pins.
 IMMUTABLE += ("market_caps", "publication_market_cap_rows")
+IMMUTABLE += ("fundamentals", "fundamental_scores")  # pattern evaluation
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # M5 read API (perennial_api): published data only, never raw source tables,
 # runs or operator text. Two grants are column-level, so code selects columns.
@@ -166,13 +167,16 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
     if phase == "bootstrap":
         return
     actual = {r[0] for r in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname='perennial'")}
-    if actual != set(TABLES):
+    # Every table must have an explicit policy. A policy for a table a later migration
+    # creates is fine: newer code provisioning a database not yet upgraded (MO-2).
+    if actual - set(TABLES):
         raise ValueError("Application table policy differs from migrated schema; update explicit grants")
+    present = [t for t in TABLES if t in actual]
     # Objects the owner doesn't own yet (after a restore, the admin's) move to the owner first.
     # Read from the catalog: a regclass lookup would need USAGE on the owner's schema.
     relation_owner = ("SELECT pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n"
                       " ON n.oid=c.relnamespace WHERE n.nspname=%s AND c.relname=%s")
-    for table in TABLES:
+    for table in present:
         _give_to_owner(conn, owner, "TABLE", sql.Identifier("perennial", table),
                        relation_owner, ("perennial", table))
     if conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()[0]:
@@ -180,7 +184,7 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
                        relation_owner, ("public", "alembic_version"))
     groups = sql.SQL(", ").join(sql.Identifier(r) for r in (importer, reader, api))
     with _as_owner(conn, owner):
-        for table in TABLES:
+        for table in present:
             ident = sql.Identifier("perennial", table)
             conn.execute(sql.SQL("REVOKE ALL ON TABLE {} FROM PUBLIC, {}").format(ident, groups))
             columns = [sql.Identifier(r[0]) for r in conn.execute(
