@@ -194,9 +194,13 @@ It summarizes the current production publication's consensus members: one FMP
 `/stable/profile` call per member with a company profile, on the same daily
 FMP quota as market caps and Congress. Output on stdout:
 - Success, exit 0: `{"members": N, "with_summary": A, "unavailable": B}`. `A`
-  members now have a stored 2–4 sentence excerpt at grade 8 or below. `B`
-  show "Summary not available" (no description, no readable window, or no
-  company profile). A rerun with unchanged descriptions rewrites nothing.
+  members now have a stored 2–4 sentence excerpt at Flesch–Kincaid grade 13
+  or below (8 until 2026-10-26, decision 88). `B` show "Summary not
+  available" (no description, no readable window, or no company profile). A
+  rerun with unchanged descriptions rewrites nothing. The grade limit and the
+  selector version are part of each row's description digest, so the first
+  run after either changes re-checks every stored row once, including those
+  stored "unavailable", with the usual one FMP call per profile.
 - Failure, exit 1: `{"error_code": "..."}`. `missing_credential` means
   `FMP_API_KEY` isn't set. `collection_failed` means an FMP request failed (the
   stderr log names the symbol and a fixed code). Nothing is written on
