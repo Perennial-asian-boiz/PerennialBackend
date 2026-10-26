@@ -29,7 +29,19 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
 import aiohttp
+
+# Make `src.utils` importable no matter where/how this file is launched.
+# File lives at backend/src/services/sentiment/mastodon/, so backend/ is parents[4].
+BACKEND_DIR = Path(__file__).resolve().parents[4]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from src.utils.console import stderr_logger  # noqa: E402
+
+_err = stderr_logger()  # console lines (print() is banned in src/)
 
 # ---------------------------------------------------------------------------
 # Settings (edit here; the script takes no command-line arguments)
@@ -203,12 +215,10 @@ class Crawler:
         start = time.monotonic()
         while True:
             await asyncio.sleep(interval)
-            print(
+            _err.info(
                 f"\r[{time.monotonic() - start:6.0f}s] found={len(self.results):<6} "
                 f"checked={self.checked:<7} queued={self.queue.qsize():<7}",
-                end="",
-                file=sys.stderr,
-                flush=True,
+                extra={"end": ""},
             )
 
 
@@ -268,13 +278,12 @@ async def main():
         except (NotImplementedError, RuntimeError):
             pass  # e.g. Windows
 
-        print("Fetching seed servers...", file=sys.stderr)
+        _err.info("Fetching seed servers...")
         for seed in await fetch_seeds(session):
             crawler.enqueue(seed, 0)
-        print(
+        _err.info(
             f"Seeded {crawler.queue.qsize()} domains; crawling with "
-            f"{CONCURRENCY} workers (depth={MAX_DEPTH})",
-            file=sys.stderr,
+            f"{CONCURRENCY} workers (depth={MAX_DEPTH})"
         )
 
         workers = [asyncio.create_task(crawler.worker()) for _ in range(CONCURRENCY)]
@@ -283,10 +292,7 @@ async def main():
         try:
             await asyncio.wait_for(crawler.queue.join(), timeout=remaining)
         except asyncio.TimeoutError:
-            print(
-                f"\nTime limit of {TIME_LIMIT}s reached; stopping discovery.",
-                file=sys.stderr,
-            )
+            _err.info(f"\nTime limit of {TIME_LIMIT}s reached; stopping discovery.")
         finally:
             crawler.stop.set()
             ticker.cancel()
@@ -294,12 +300,11 @@ async def main():
                 w.cancel()
             await asyncio.gather(ticker, *workers, return_exceptions=True)
 
-    print(file=sys.stderr)
+    _err.info("")
     write_json_atomic(OUTPUT_FILE, crawler.results)
-    print(
+    _err.info(
         f"Wrote {len(crawler.results)} Mastodon servers to {OUTPUT_FILE} "
-        f"({crawler.checked} domains checked)",
-        file=sys.stderr,
+        f"({crawler.checked} domains checked)"
     )
 
 

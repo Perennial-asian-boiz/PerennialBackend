@@ -1,8 +1,8 @@
 # sentiment_scorer.py
-from functools import lru_cache
 import json
 import os
 import warnings
+from functools import lru_cache
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -23,7 +23,7 @@ def _load_model():
 
     # Prefer the model's own label mapping; fall back to the documented
     # order (0 = neutral, 1 = bullish, 2 = bearish).
-    labels = {i: str(l).lower() for i, l in model.config.id2label.items()}
+    labels = {i: str(label).lower() for i, label in model.config.id2label.items()}
     by_name = {name: i for i, name in labels.items()}
     bullish_idx = by_name.get("bullish", 1)
     bearish_idx = by_name.get("bearish", 2)

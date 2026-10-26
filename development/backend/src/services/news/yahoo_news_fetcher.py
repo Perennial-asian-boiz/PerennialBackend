@@ -31,14 +31,18 @@ except ImportError:  # older versions: define a stand-in so `except` clauses sti
 
 # YfData contains session information and must be reset to fetch new results from the API
 try:  # internals used by the spy and the session reset; both degrade gracefully if missing
-    from yfinance.data import YfData, SingletonMeta
+    from yfinance.data import SingletonMeta, YfData
 except ImportError:
     YfData = SingletonMeta = None
 
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[2])
 )  # insert src dir in path so utils dir can be accessed
-from utils.fetch_tickers import fetch_tickers
+from utils.console import stderr_logger, stdout_logger  # noqa: E402
+from utils.fetch_tickers import fetch_tickers  # noqa: E402
+
+_out = stdout_logger()  # console lines (print() is banned in src/)
+_err = stderr_logger()
 
 MAX_CONCURRENCY = 5  # simultaneous in-flight requests
 MIN_INTERVAL = 2.0  # minimum seconds between request *starts* (global)
@@ -126,12 +130,12 @@ def _spy_log(message: str) -> None:
 
 def _install_search_spy() -> None:
     if YfData is None:
-        print("[spy] yfinance.data.YfData not available; spy disabled", file=sys.stderr)
+        _err.info("[spy] yfinance.data.YfData not available; spy disabled")
         return
     if getattr(YfData, "_yn_spy_installed", False):
         return
     _setup_spy_logger()
-    print(f"[spy] logging search responses to {SPY_LOG_FILE}", file=sys.stderr)
+    _err.info(f"[spy] logging search responses to {SPY_LOG_FILE}")
     original_get = YfData.get
 
     def spy_get(self, url, *args, **kwargs):
@@ -221,9 +225,8 @@ def _close_retired_sessions() -> None:
         try:
             session.close()
         except Exception as e:
-            print(
-                f"[yfinance] error closing retired session: {type(e).__name__}: {e}",
-                file=sys.stderr,
+            _err.info(
+                f"[yfinance] error closing retired session: {type(e).__name__}: {e}"
             )
 
 
@@ -451,20 +454,18 @@ async def fetch_news(
                     0, 2
                 )
                 limiter.penalize(delay)
-                print(
+                _err.info(
                     f"[{ticker}] rate limited, pausing {delay:.1f}s "
-                    f"(retry {attempt + 1}/{MAX_RETRIES})",
-                    file=sys.stderr,
+                    f"(retry {attempt + 1}/{MAX_RETRIES})"
                 )
             else:
                 # timeouts / connection hiccups: shorter, per-ticker backoff
                 delay = min(
                     BACKOFF_CAP, TRANSIENT_BACKOFF * (2**attempt)
                 ) + random.uniform(0, 1)
-                print(
+                _err.info(
                     f"[{ticker}] {type(e).__name__}: {e}; retrying in {delay:.1f}s "
-                    f"(retry {attempt + 1}/{MAX_RETRIES})",
-                    file=sys.stderr,
+                    f"(retry {attempt + 1}/{MAX_RETRIES})"
                 )
                 await asyncio.sleep(delay)
             continue
@@ -472,23 +473,19 @@ async def fetch_news(
         if not raw:  # 0 raw articles: retry (at most MAX_RETRIES times) on a NEW session, never the same one
             # Retrying on the same session just replays Yahoo's cached empty response.
             if attempt == MAX_RETRIES:
-                print(
-                    f"[{ticker}] Yahoo returned empty news after all retries",
-                    file=sys.stderr,
-                )
+                _err.info(f"[{ticker}] Yahoo returned empty news after all retries")
                 return []
 
             delay = min(BACKOFF_CAP, TRANSIENT_BACKOFF * (2**attempt))
             note = f"; session {_reset_yf_state(gen)}" if RESET_SESSION_ON_EMPTY else ""
-            print(
+            _err.info(
                 f"[{ticker}] Yahoo returned empty news (gen {gen}){note}; "
-                f"retrying in {delay:.1f}s (retry {attempt + 1}/{MAX_RETRIES})",
-                file=sys.stderr,
+                f"retrying in {delay:.1f}s (retry {attempt + 1}/{MAX_RETRIES})"
             )
             await asyncio.sleep(delay)
             continue
 
-        print(f"[{ticker}] raw articles: {len(raw)}", file=sys.stderr)  # diagnostic
+        _err.info(f"[{ticker}] raw articles: {len(raw)}")  # diagnostic
         articles = []
         for item in raw:
             try:
@@ -496,7 +493,7 @@ async def fetch_news(
             except (
                 Exception
             ) as e:  # one malformed item shouldn't discard the whole response
-                print(f"[{ticker}] skipped malformed article: {e}", file=sys.stderr)
+                _err.info(f"[{ticker}] skipped malformed article: {e}")
                 continue
             if art and art["published"] >= since:  # local date filter
                 articles.append(art)
@@ -507,17 +504,19 @@ async def fetch_news(
 
 def print_report(by_ticker: dict[str, list[dict]]) -> None:
     for tk, arts in by_ticker.items():
-        print(f"=== {tk} ({len(arts)} article{'s' if len(arts) != 1 else ''}) ===")
+        _out.info(f"=== {tk} ({len(arts)} article{'s' if len(arts) != 1 else ''}) ===")
         for a in arts:
-            print(f"- [{a['published']:%Y-%m-%d %H:%M} UTC] {a['title']}")
-            print(f"  {a['publisher'] or 'Unknown source'} | {a['url'] or 'no link'}")
-        print()
+            _out.info(f"- [{a['published']:%Y-%m-%d %H:%M} UTC] {a['title']}")
+            _out.info(
+                f"  {a['publisher'] or 'Unknown source'} | {a['url'] or 'no link'}"
+            )
+        _out.info("")
 
 
 async def main() -> dict[str, list[dict]]:
     tickers = await fetch_tickers()
     if not tickers:
-        print("No tickers found")
+        _out.info("No tickers found")
         return {}
 
     if SPY_SEARCH_RESPONSES:
@@ -542,7 +541,7 @@ async def main() -> dict[str, list[dict]]:
     by_ticker: dict[str, list[dict]] = {}
     for tk, res in zip(tickers, results):
         if isinstance(res, BaseException):
-            print(f"[{tk}] fetch failed: {res}", file=sys.stderr)
+            _err.info(f"[{tk}] fetch failed: {res}")
             by_ticker[tk] = []
         else:
             by_ticker[tk] = res

@@ -29,33 +29,33 @@ rotating log file (default: youtube.log next to this script, override with --log
 Timestamps are UTC. Item text, credentials and cookies are never logged.
 """
 
-import os
-import sys
-import json
-import html
-import googleapiclient.discovery
-from googleapiclient.errors import HttpError
-import httplib2
-import yt_dlp
-from faster_whisper import WhisperModel
+import argparse
+import asyncio
 import glob
-import random
-import re
-from dotenv import load_dotenv
-from datetime import datetime, timezone
-from dateutil.relativedelta import relativedelta
-from collections import deque
-from pathlib import Path
+import html
+import json
 import logging
 import logging.handlers
-import asyncio
-import threading
-from dataclasses import dataclass, field
+import os
+import random
+import re
 import shutil
+import sys
 import tempfile
-import argparse
+import threading
 import time
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 
+import googleapiclient.discovery
+import httplib2
+import yt_dlp
+from dateutil.relativedelta import relativedelta
+from dotenv import load_dotenv
+from faster_whisper import WhisperModel
+from googleapiclient.errors import HttpError
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent.parent.parent.parent
 UTILS_DIR = BACKEND_DIR / "src" / "utils"
@@ -93,8 +93,11 @@ MIN_TAIL_WORDS = 25  # a final chunk shorter than this is merged into the previo
 # Adjust this path if the scorer lives somewhere else.
 if str(UTILS_DIR) not in sys.path:
     sys.path.insert(0, str(UTILS_DIR))
-from ..sentiment_scorer import score_texts, load_scores
-from ....utils.fetch_tickers import fetch_ticker_map
+from ....utils.console import stdout_logger  # noqa: E402
+from ....utils.fetch_tickers import fetch_ticker_map  # noqa: E402
+from ..sentiment_scorer import load_scores, score_texts  # noqa: E402
+
+_out = stdout_logger()  # console lines (print() is banned in src/)
 
 log = logging.getLogger("youtube")
 
@@ -613,7 +616,7 @@ def parse_vtt(path):
     previous = None
     for block in re.split(r"\n\s*\n", content):
         lines = block.splitlines()
-        timing = next((i for i, l in enumerate(lines) if "-->" in l), None)
+        timing = next((i for i, line in enumerate(lines) if "-->" in line), None)
         if timing is None:
             continue
         for line in lines[timing + 1 :]:
@@ -826,7 +829,7 @@ async def discover_one_page(name, state, youtube, ctx):
     def quota_hit():
         if not ctx.quota_event.is_set():
             ctx.quota_event.set()
-            print(
+            _out.info(
                 f"[{name}] YouTube API quota exhausted: stopping discovery, "
                 f"continuing with the videos already found"
             )
@@ -854,7 +857,7 @@ async def discover_one_page(name, state, youtube, ctx):
                 log.exception(
                     "%s: unexpected error during API search", ticker
                 )  # others were logged by api_call
-            print(f"[{name}] {ticker}: API search failed ({api_error_reason(e)})")
+            _out.info(f"[{name}] {ticker}: API search failed ({api_error_reason(e)})")
             stop_discovery("error")
         return
 
@@ -880,7 +883,7 @@ async def discover_one_page(name, state, youtube, ctx):
         new,
         len(ctx.video_tickers),
     )
-    print(
+    _out.info(
         f"[{name}] {ticker}: page {state.pages}, {len(ids)} videos "
         f"({len(state.video_ids)} total)"
     )
@@ -1250,7 +1253,7 @@ async def transcript_worker(name, ctx):
                     state.ticker,
                     len(ctx.video_scores),
                 )
-                print(f"[{name}] {state.ticker}: transcript gathering failed ({e})")
+                _out.info(f"[{name}] {state.ticker}: transcript gathering failed ({e})")
 
             if state.pending and not ctx.stop_event.is_set():
                 ctx.ready_queue.put_nowait(state)  # back of the line
@@ -1264,7 +1267,7 @@ async def transcript_worker(name, ctx):
                         state.ticker,
                         state.completed,
                     )
-                    print(
+                    _out.info(
                         f"[{name}] {state.ticker}: transcripts finished "
                         f"({state.completed} new this run)"
                     )
@@ -1322,7 +1325,7 @@ async def scoring_worker(ctx):
         chunks = list(dict.fromkeys(c for cs in by_video.values() for c in cs))
         if not chunks:
             return
-        print(f"[scoring] {len(chunks)} chunk(s) from {len(ids)} video(s)...")
+        _out.info(f"[scoring] {len(chunks)} chunk(s) from {len(ids)} video(s)...")
         start = time.monotonic()
         try:
             scores = await asyncio.to_thread(_score_texts_temp, chunks)
@@ -1333,7 +1336,7 @@ async def scoring_worker(ctx):
                 len(ids),
                 len(chunks),
             )
-            print(f"[scoring] batch failed ({e}); these videos will not be scored")
+            _out.info(f"[scoring] batch failed ({e}); these videos will not be scored")
             return
         for id, vid_chunks in by_video.items():
             score, _n = video_score(vid_chunks, scores)
@@ -1402,10 +1405,10 @@ def write_results(path, results, tickers):
             len(report),
             sum(r["post_count"] for r in report),
         )
-        print(f"Results saved to {path}")
+        _out.info(f"Results saved to {path}")
     except Exception:
         log.exception("failed to write results to %s", path)
-        print(f"Failed to write results to {path} (see log).")
+        _out.info(f"Failed to write results to {path} (see log).")
         try:
             tmp.unlink()
         except OSError:
@@ -1418,7 +1421,7 @@ async def stop_after(minutes, stop_event):
     log.info(
         "time limit of %g minute(s) reached, finishing videos in progress", minutes
     )
-    print(
+    _out.info(
         f"\nTime limit of {minutes:g} minute(s) reached. Finishing the videos currently "
         f"in progress, saving, then shutting down..."
     )
@@ -1432,9 +1435,9 @@ def print_summary(states, stopped_early, quota_hit):
         notes.append("stopped by time limit")
     if quota_hit:
         notes.append("API quota exhausted")
-    print("\nSummary" + (f" ({', '.join(notes)})" if notes else "") + ":")
+    _out.info("\nSummary" + (f" ({', '.join(notes)})" if notes else "") + ":")
     for s in states:
-        print(
+        _out.info(
             f"  {s.ticker}: {len(s.video_ids)} videos found over {s.pages} page(s), "
             f"{s.completed} transcribed this run, {len(s.pending)} video(s) left for next run"
         )
@@ -1467,7 +1470,7 @@ async def async_main(
         )
     log.info("tickers loaded source=file count=%d", len(tickers))
     log.info("auth: YouTube API key and cookies file are present (values not logged)")
-    print(
+    _out.info(
         f"Searching for {len(tickers)} tickers: {', '.join(tickers)} "
         f"(videos from the last {days:g} day(s))"
     )
@@ -1509,7 +1512,7 @@ async def async_main(
                 states.append(build_ticker_state(ticker, tmp_root))
             except Exception as e:
                 log.exception("%s: setup failed, skipping this ticker", ticker)
-                print(f"{ticker}: setup failed ({e}); skipping this ticker")
+                _out.info(f"{ticker}: setup failed ({e}); skipping this ticker")
         if not states:
             log.error("no ticker could be set up, nothing to do")
             return None
@@ -1541,7 +1544,7 @@ async def async_main(
             ctx.discovery_queue.put_nowait(None)
         await asyncio.gather(*api_tasks)
         if ctx.quota_event.is_set():
-            print(
+            _out.info(
                 "\nDiscovery stopped (API quota). Transcribing everything found so far..."
             )
 
@@ -1585,13 +1588,13 @@ async def async_main(
         time.monotonic() - run_start,
     )
     if not video_scores:
-        print("\nNo transcripts available to score.")
+        _out.info("\nNo transcripts available to score.")
         return None
 
-    print()
+    _out.info("")
     for ticker in sorted(results):
         scores = results[ticker]
-        print(
+        _out.info(
             f"  {ticker}: {round(sum(scores.values()) / len(scores), 2)} "
             f"(avg of {len(scores)} video(s))"
         )
@@ -1670,7 +1673,7 @@ def main():
         return run(args.time, args.days, args.output, args.log_file, args.status_file)
     except KeyboardInterrupt:
         log.info("run stopped by user")
-        print("Stopped.")
+        _out.info("Stopped.")
 
 
 if __name__ == "__main__":

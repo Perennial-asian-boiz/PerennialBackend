@@ -47,6 +47,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from ...utils.console import stdout_logger
+
+_out = stdout_logger()  # console lines (print() is banned in src/)
+
 SENTIMENT_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = SENTIMENT_DIR.parents[2]  # sentiment -> services -> src -> backend
 PACKAGE = "src.services.sentiment"
@@ -98,7 +102,7 @@ class Result:
 
 # ---- console ------------------------------------------------------------------------------
 def say(name, text):
-    print(f"[{name:<{WIDTH}}] {text}", flush=True)
+    _out.info(f"[{name:<{WIDTH}}] {text}")
 
 
 def fmt_secs(seconds):
@@ -268,10 +272,10 @@ async def run_all(days, minutes):
 def print_summary(results, total):
     order = [CRAWLER.name] + [s.name for s in SOURCES]
     results = sorted(results, key=lambda r: order.index(r.name))
-    print(f"\nSummary ({fmt_secs(total)} total)")
+    _out.info(f"\nSummary ({fmt_secs(total)} total)")
     for r in results:
         took = fmt_secs(r.seconds) if r.seconds else "-"
-        print(f"  {r.name:<{WIDTH}}  {r.status:<7}  {took:>11}  {r.note}".rstrip())
+        _out.info(f"  {r.name:<{WIDTH}}  {r.status:<7}  {took:>11}  {r.note}".rstrip())
 
 
 def positive(value):
@@ -312,7 +316,7 @@ def main():
     try:
         code = asyncio.run(run_all(args.days, args.time))
     except KeyboardInterrupt:
-        print("\nStopped.")
+        _out.info("\nStopped.")
         code = 130
     sys.exit(code)
 

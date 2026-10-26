@@ -97,9 +97,11 @@ BACKEND_DIR = Path(__file__).resolve().parents[4]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-import requests
+import requests  # noqa: E402
+from src.utils.console import stdout_logger  # noqa: E402
+from src.utils.fetch_tickers import fetch_ticker_map  # noqa: E402
 
-from src.utils.fetch_tickers import fetch_ticker_map
+_out = stdout_logger()  # console lines (print() is banned in src/)
 
 # ---- Settings (edit here) ----
 SERVERS_FILE = "mastodon_servers.json"  # Mastodon server list JSON
@@ -331,7 +333,9 @@ def time_up():
         if not _time_up_noted:
             _time_up_noted = True
             log.info("time limit reached, no more requests; scoring what was fetched")
-            print("Time limit reached: no more requests, scoring what was fetched...")
+            _out.info(
+                "Time limit reached: no more requests, scoring what was fetched..."
+            )
     return True
 
 
@@ -410,7 +414,7 @@ def parse_tickers(data):
         symbol = symbol.strip().upper().lstrip("$")
         if not SYMBOL_RE.match(symbol) or not any(c.isalpha() for c in symbol):
             log.warning("skipping invalid ticker %r", symbol)
-            print(f"  ! skipping invalid ticker: {symbol!r}")
+            _out.info(f"  ! skipping invalid ticker: {symbol!r}")
             continue
         if symbol in seen:
             continue
@@ -437,7 +441,7 @@ def load_tickers():
             log.warning("ticker file missing, unreadable or empty; using fallback")
     except Exception as e:
         log.warning("ticker fetch failed, using fallback: %s: %s", type(e).__name__, e)
-        print(f"Ticker fetch failed, using fallback: {e}")
+        _out.info(f"Ticker fetch failed, using fallback: {e}")
     if not tickers:
         tickers = parse_tickers(FALLBACK_TICKERS)
         source = "fallback"
@@ -508,10 +512,10 @@ def write_results(path, results, tickers):
             len(report),
             sum(r["post_count"] for r in report),
         )
-        print(f"Results saved to {path}")
+        _out.info(f"Results saved to {path}")
     except Exception:
         log.exception("failed to write results to %s", path)
-        print(f"Failed to write results to {path} (see log).")
+        _out.info(f"Failed to write results to {path} (see log).")
         try:
             tmp.unlink()
         except OSError:
@@ -797,7 +801,7 @@ def get_with_retry(session, url, params=None, tag_timeline=False, failure=None):
             )
             if attempt == MAX_RETRIES:
                 log.error("GET %s failed after %d attempts", label, MAX_RETRIES)
-                print(f"  ! {url}: {e}")
+                _out.info(f"  ! {url}: {e}")
                 return None
             polite_sleep(2**attempt)
             continue
@@ -878,7 +882,7 @@ def get_with_retry(session, url, params=None, tag_timeline=False, failure=None):
             )
         if failure is not None:
             failure["status"] = resp.status_code
-        print(f"  ! {url}: HTTP {resp.status_code}")
+        _out.info(f"  ! {url}: HTTP {resp.status_code}")
         return None
 
     log.error("GET %s failed after %d attempts (rate limited)", label, MAX_RETRIES)
@@ -1221,11 +1225,13 @@ def fetch_all_comments(posts, workers):
                 _, result, stats = fut.result()
             except Exception as e:  # never let one server kill the run
                 log.exception("comment fetch crashed server=%s", domain)
-                print(f"[{domain}] comment fetch failed: {e}")
+                _out.info(f"[{domain}] comment fetch failed: {e}")
                 continue
             comments_by_post.update(result)
             total.update(stats)
-            print(f"[{domain}] comments kept: {sum(len(v) for v in result.values())}")
+            _out.info(
+                f"[{domain}] comments kept: {sum(len(v) for v in result.values())}"
+            )
     return comments_by_post, total
 
 
@@ -1366,7 +1372,7 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
                 _, posts, stats = fut.result()
             except Exception as e:  # never let one server kill the run
                 log.exception("server fetch crashed server=%s", domain)
-                print(f"[{domain}] failed: {e}")
+                _out.info(f"[{domain}] failed: {e}")
                 continue
             fetched[domain] = posts
             refused_status = stats.pop("tag_timeline_refused", None)
@@ -1378,10 +1384,10 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
                     domain,
                     refused_status,
                 )
-                print(f"[{domain}] unavailable, skipped")
+                _out.info(f"[{domain}] unavailable, skipped")
             elif stats["server_unavailable"]:
                 log.warning("server unavailable, skipped server=%s", domain)
-                print(f"[{domain}] unavailable, skipped")
+                _out.info(f"[{domain}] unavailable, skipped")
             else:
                 dropped = ", ".join(f"{r}={stats[r]}" for r in DROP_REASONS if stats[r])
                 log.info(
@@ -1391,7 +1397,7 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
                     len(posts),
                     dropped or "none",
                 )
-                print(
+                _out.info(
                     f"[{domain}] kept {len(posts)} of {stats['seen']} posts"
                     + (f" (dropped: {dropped})" if dropped else "")
                 )
@@ -1409,11 +1415,11 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
             unique.append(p)
 
     unique.sort(key=lambda p: p["created_at"], reverse=True)
-    print(
+    _out.info(
         f"\nSeen {total_stats['seen']} posts; dropped "
         + ", ".join(f"{r}={total_stats[r]}" for r in DROP_REASONS)
     )
-    print(f"{len(unique)} unique posts kept after de-duplication.")
+    _out.info(f"{len(unique)} unique posts kept after de-duplication.")
     log.info(
         "fetch done seen=%d kept=%d unique=%d dropped=%s servers_unavailable=%d "
         "servers_refused_tag_timelines=%d",
@@ -1431,7 +1437,7 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
 
     excluded = summarize_author_exclusions(total_stats)
     if excluded["by_reason"]:
-        print(
+        _out.info(
             "Excluded authors by reason: "
             + ", ".join(f"{r}={n}" for r, n in excluded["by_reason"].items())
         )
@@ -1439,13 +1445,13 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
 
     unique, prolific = drop_prolific_authors(unique)
     if prolific:
-        print(
+        _out.info(
             f"Dropped posts from {len(prolific)} prolific authors "
             f"(> {MAX_POSTS_PER_AUTHOR} posts each): "
             + ", ".join(f"{h} ({c})" for h, c in list(prolific.items())[:5])
             + (" ..." if len(prolific) > 5 else "")
         )
-        print(f"{len(unique)} posts remain.")
+        _out.info(f"{len(unique)} posts remain.")
         log.info(
             "prolific authors dropped count=%d limit=%d authors=%s remaining_posts=%d",
             len(prolific),
@@ -1455,14 +1461,14 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
         )
 
     if not unique:
-        print("Nothing to score.")
+        _out.info("Nothing to score.")
         log.info("nothing to score")
         return False
 
     # ---- comments ----
     comments_by_post, comment_stats = {}, Counter()
     if FETCH_COMMENTS:
-        print("Fetching comments...")
+        _out.info("Fetching comments...")
         comments_by_post, comment_stats = fetch_all_comments(unique, workers)
         comment_excluded = summarize_author_exclusions(comment_stats)
         log.info(
@@ -1484,7 +1490,7 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
     total_comments = sum(len(v) for v in comments_by_post.values())
 
     # ---- sentiment: one batch per source server ----
-    print(
+    _out.info(
         f"Scoring {len(unique) + total_comments} items ({len(unique)} posts + "
         f"{total_comments} comments)..."
     )
@@ -1508,7 +1514,7 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
 
     if missing:
         log.warning("%d posts had no score record and were skipped", missing)
-        print(f"  ! {missing} posts had no score record and were skipped")
+        _out.info(f"  ! {missing} posts had no score record and were skipped")
     return True
 
 
@@ -1523,7 +1529,7 @@ def run(workers, output_path, days=DAYS, time_limit_minutes=None, deadline=None)
     tickers = load_tickers()
     if not tickers:
         log.error("no tickers loaded; nothing to do")
-        print("No tickers loaded; nothing to do.")
+        _out.info("No tickers loaded; nothing to do.")
         return
     index = TickerIndex(tickers)
     symbols = [t["symbol"] for t in tickers]
@@ -1538,7 +1544,7 @@ def run(workers, output_path, days=DAYS, time_limit_minutes=None, deadline=None)
         raise
     if not domains:
         log.warning("server list %s has no usable servers", SERVERS_FILE)
-    print(
+    _out.info(
         f"Loaded {len(tickers)} tickers and {len(domains)} servers; "
         f"fetching posts since {cutoff.isoformat()}"
     )
@@ -1577,7 +1583,7 @@ def run(workers, output_path, days=DAYS, time_limit_minutes=None, deadline=None)
         time.monotonic() - run_start,
     )
     if completed:
-        print(
+        _out.info(
             f"\nDone. {progress['posts_scored']} posts and "
             f"{progress['comments_scored']} comments scored."
         )
@@ -1632,7 +1638,7 @@ def main():
         run(args.workers, args.output, days=args.days, deadline=deadline)
     except KeyboardInterrupt:
         log.info("run stopped by user")
-        print("Stopped.")
+        _out.info("Stopped.")
 
 
 if __name__ == "__main__":

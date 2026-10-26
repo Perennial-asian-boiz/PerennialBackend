@@ -104,7 +104,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[4]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from src.utils.fetch_tickers import fetch_ticker_map
+from src.utils.console import stdout_logger  # noqa: E402
+from src.utils.fetch_tickers import fetch_ticker_map  # noqa: E402
 
 try:
     from ..sentiment_scorer import load_scores, score_texts  # as a package
@@ -116,13 +117,15 @@ try:
     )
 except ImportError:  # run as a script
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from sentiment_scorer import load_scores, score_texts
     from reddit_processing import (
         TickerMatcher,
         build_scoring_items,
         is_discussion_title,
         load_json_file,
     )
+    from sentiment_scorer import load_scores, score_texts
+
+_out = stdout_logger()  # console lines (print() is banned in src/)
 
 SUBREDDITS = [
     "stocks",
@@ -436,7 +439,7 @@ def load_cookie_file(path: str) -> list[dict]:
             continue
         kept[(c["name"], c["domain"], c["path"])] = c  # later entries win
     if expired:
-        print(f"note: ignored {expired} expired cookie(s) in {path}")
+        _out.info(f"note: ignored {expired} expired cookie(s) in {path}")
     if not kept:
         raise CookieFileError(
             f"{path} has no (unexpired) reddit.com cookies. Were you on a reddit.com "
@@ -454,7 +457,7 @@ def prepare_cookie_file(args) -> list[dict]:
     register_secrets(
         *(c["value"] for c in cookies)
     )  # never let cookie values reach the log
-    print(f"Loaded {len(cookies)} reddit.com cookies from {COOKIE_FILE}")
+    _out.info(f"Loaded {len(cookies)} reddit.com cookies from {COOKIE_FILE}")
     cookie_names = sorted({c["name"] for c in cookies})
     if not set(cookie_names) & set(REDDIT_SESSION_COOKIES):
         msg = (
@@ -656,7 +659,7 @@ def _wait_for_login(page, manual_ok: bool):
                 reason,
                 MANUAL_TIMEOUT_S // 60,
             )
-            print(
+            _out.info(
                 f"ACTION NEEDED: {reason}. Finish logging in by hand in the browser "
                 f"window that is open; the script continues by itself afterwards."
             )
@@ -713,9 +716,9 @@ def _save_debug_screenshot(page, debug: bool, tag: str):
         Path("debug").mkdir(exist_ok=True)
         path = Path("debug") / f"login_{time.strftime('%Y%m%d_%H%M%S')}_{tag}.png"
         page.screenshot(path=str(path), full_page=True)
-        print(f"Saved login screenshot: {path}")
+        _out.info(f"Saved login screenshot: {path}")
     except Exception as e:
-        print(f"Could not save login screenshot ({type(e).__name__})")
+        _out.info(f"Could not save login screenshot ({type(e).__name__})")
 
 
 def _describe(box) -> str:
@@ -753,7 +756,7 @@ def _type_into(box, value: str, what: str, debug: bool):
             n = len(box.input_value())
         except Exception:
             n = -1
-        print(
+        _out.info(
             f"[debug-login] {what} box = {_describe(box)}; it holds {n} characters, "
             f"script typed {len(value)} ({method}): {'match' if ok else 'MISMATCH'}"
         )
@@ -805,7 +808,7 @@ def _login_once(
             )
         log.info("Login browser: %s", used)
         if debug:
-            print(f"[debug-login] browser = {used}")
+            _out.info(f"[debug-login] browser = {used}")
         page = None
         try:
             # new_context() is in-memory only: nothing is saved to disk
@@ -1107,7 +1110,7 @@ def trip(ctx: Ctx, reason: str, level: int = logging.ERROR):
         ctx.stop_reason = reason
         ctx.stop.set()
         log.log(level, "stopping early: %s", reason)
-        print(
+        _out.info(
             f"\n!!! STOPPING EARLY: {reason}\n    Cancelling in-flight requests and saving...\n"
         )
 
@@ -1143,7 +1146,9 @@ async def time_limit(ctx: Ctx):
     await asyncio.sleep(max(0.0, ctx.deadline - time.monotonic()))
     if not ctx.stop.is_set():
         log.info("time limit reached, no more requests; scoring what was fetched")
-        print("\nTime limit reached: no more requests, scoring what was fetched...\n")
+        _out.info(
+            "\nTime limit reached: no more requests, scoring what was fetched...\n"
+        )
     ctx.time_up.set()
 
 
@@ -1210,7 +1215,7 @@ async def fetch(
                     r = req.result()
                     latency = time.monotonic() - started
                 except Exception as e:  # network error, timeout, browser error...
-                    print(
+                    _out.info(
                         f"    network error ({type(e).__name__}: {str(e)[:80]}); "
                         f"retry {attempt + 1}"
                     )
@@ -1243,7 +1248,7 @@ async def fetch(
                 return soup
             title = soup.title.get_text(strip=True) if soup.title else "(no title)"
             moved = f" (redirected to {r.final_url})" if r.redirected else ""
-            print(f"    unexpected page{moved}; title: {title!r}")
+            _out.info(f"    unexpected page{moved}; title: {title!r}")
             soft = True
             if "/login" in urlparse(r.final_url).path or title.startswith(
                 "Welcome to Reddit"
@@ -1265,7 +1270,7 @@ async def fetch(
             ctx.consecutive_blocks += 1
             ctx.total_blocks += 1
             label = "unexpected non-Reddit page" if soft else f"HTTP {r.status}"
-            print(
+            _out.info(
                 f"    {label} (consecutive blocks: "
                 f"{ctx.consecutive_blocks}/{ctx.max_blocks})"
             )
@@ -1318,7 +1323,7 @@ async def fetch(
             attempt += 1
             continue
 
-        print(f"    HTTP {r.status} for {url}; skipping")  # 404, 410, ...
+        _out.info(f"    HTTP {r.status} for {url}; skipping")  # 404, 410, ...
         log.error(
             "%s request rejected status=%d body=%s", what, r.status, _snippet(r.text)
         )
@@ -1645,7 +1650,7 @@ async def produce_posts(ctx: Ctx, sub: str, queue: asyncio.Queue):
                 "no" if reached_cutoff or not nxt else "yes",
                 info["latency"],
             )
-            print(f"  [r/{sub}] page {page}: {n} posts so far")
+            _out.info(f"  [r/{sub}] page {page}: {n} posts so far")
             if reached_cutoff or not nxt:
                 ctx.sub_status[sub] = "complete"
                 return
@@ -1707,7 +1712,7 @@ async def produce_listing(
                 "yes" if nxt and page < pages else "no",
                 info["latency"],
             )
-            print(f"  [r/{sub}/{kind}] page {page}: {n} new posts")
+            _out.info(f"  [r/{sub}/{kind}] page {page}: {n} new posts")
             if not nxt:
                 return
             url, params = nxt, None
@@ -1773,7 +1778,7 @@ async def produce_search(ctx: Ctx, query: str, queue: asyncio.Queue, pages: int)
                 "no" if reached_cutoff or not nxt or page >= pages else "yes",
                 info["latency"],
             )
-            print(f"  [search {query}] page {page}: {n} new posts")
+            _out.info(f"  [search {query}] page {page}: {n} new posts")
             if reached_cutoff or not nxt:
                 return
             url, params = nxt, None
@@ -1838,7 +1843,7 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
             await score_thread(ctx, post, comments)  # one thread = one scoring batch
             post["selftext"] = ""  # text is not kept after scoring
             if stubs:
-                print(
+                _out.info(
                     f"    note: {stubs} 'load more comments' stub(s) not expanded "
                     f"({post['post_id']})"
                 )
@@ -1853,7 +1858,7 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
             elif expected > 0:
                 ctx.empty_comment_posts += 1
                 if ctx.empty_comment_posts <= 5:
-                    print(
+                    _out.info(
                         f"    warning: post {post['post_id']} reports {expected} "
                         f"comments but 0 were parsed {first_diag}"
                     )
@@ -1875,7 +1880,7 @@ async def comment_worker(ctx: Ctx, queue: asyncio.Queue):
                     )
 
             if ctx.posts_done % 20 == 0:
-                print(
+                _out.info(
                     f"  progress: {ctx.posts_done}/{ctx.posts_queued} posts' comments "
                     f"fetched, {ctx.comments_total} comments total"
                 )
@@ -2043,10 +2048,10 @@ def write_results(path, results, tickers, final=True):
             sum(r["post_count"] for r in report),
         )
         if final:
-            print(f"Results saved to {path}")
+            _out.info(f"Results saved to {path}")
     except Exception:
         log.exception("failed to write results to %s", path)
-        print(f"Failed to write results to {path} (see log).")
+        _out.info(f"Failed to write results to {path} (see log).")
         try:
             tmp.unlink()
         except OSError:
@@ -2114,19 +2119,19 @@ async def load_ticker_map():
 async def run(ctx: Ctx, args) -> None:
     ctx.sem = asyncio.Semaphore(args.concurrency)
     ctx.score_lock = asyncio.Lock()
-    print(f"Collecting items newer than {ctx.cutoff.isoformat()}")
+    _out.info(f"Collecting items newer than {ctx.cutoff.isoformat()}")
     n_cookies = len(getattr(args, "cookies", None) or [])
     if n_cookies:
-        print(
+        _out.info(
             f"Using {n_cookies} reddit.com cookies "
             f"({'automatic login' if args.login else 'cookie file'}; values not shown)"
         )
-    print(
+    _out.info(
         f"backend={args.backend}  concurrency={args.concurrency}  "
         f"delay~{args.delay}s  stop after {args.max_blocks} consecutive "
         f"blocked responses (403/429/non-Reddit page)"
     )
-    print(
+    _out.info(
         f"mode={args.mode}"
         + (
             f"  search queries={len(args.search_queries)}"
@@ -2372,7 +2377,7 @@ def main():
         die(f"ERROR: could not load tickers/aliases: {e}")
     if args.mode == "auto":
         args.mode = "search" if matcher.n_tickers <= args.search_threshold else "crawl"
-        print(
+        _out.info(
             f"auto mode -> {args.mode} ({matcher.n_tickers} tickers, search threshold "
             f"{args.search_threshold})"
         )
@@ -2441,7 +2446,7 @@ def main():
         s["total_requests"],
         s["total_blocked_responses"],
     )
-    print(
+    _out.info(
         f"\nDone. {s['posts']} posts "
         f"({s['posts_with_comments_scraped']} with comments scraped), "
         f"{s['comments']} comments, {len(ctx.scored_ids)} unique items scored "
@@ -2452,12 +2457,12 @@ def main():
         incomplete = [
             k for k, v in s["subreddit_listing_status"].items() if v != "complete"
         ]
-        print(f"Stopped early: {s['stop_reason']}")
+        _out.info(f"Stopped early: {s['stop_reason']}")
         if incomplete:
-            print(f"Subreddit listings not fully crawled: {', '.join(incomplete)}")
+            _out.info(f"Subreddit listings not fully crawled: {', '.join(incomplete)}")
         sys.exit(2)
     if s["time_limit_reached"]:
-        print(
+        _out.info(
             "Time limit reached: stopped making requests; everything fetched was scored."
         )
 

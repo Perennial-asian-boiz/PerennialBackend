@@ -18,8 +18,19 @@ import sys
 import time
 from datetime import datetime, timezone
 from html.parser import HTMLParser
+from pathlib import Path
 
 import requests
+
+# Make `src.utils` importable no matter where/how this file is launched.
+# File lives at backend/src/services/sentiment/mastodon/, so backend/ is parents[4].
+BACKEND_DIR = Path(__file__).resolve().parents[4]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from src.utils.console import stderr_logger  # noqa: E402
+
+_err = stderr_logger()  # console lines (print() is banned in src/)
 
 PAGE_SIZE = 40  # Mastodon's maximum per request
 
@@ -74,7 +85,7 @@ def api_get(session, url, params=None, max_retries=5):
             resp = session.get(url, params=params, timeout=20)
         except requests.RequestException as exc:
             wait = 2**attempt
-            print(f"Network error ({exc}); retrying in {wait}s...", file=sys.stderr)
+            _err.info(f"Network error ({exc}); retrying in {wait}s...")
             time.sleep(wait)
             continue
 
@@ -89,7 +100,7 @@ def api_get(session, url, params=None, max_retries=5):
                     )
                 except ValueError:
                     pass
-            print(f"Rate limited; sleeping {wait:.0f}s...", file=sys.stderr)
+            _err.info(f"Rate limited; sleeping {wait:.0f}s...")
             time.sleep(min(wait, 900))
             continue
 
@@ -170,7 +181,7 @@ def fetch_posts(
                 return posts
 
         params["max_id"] = page[-1]["id"]  # page backwards through older posts
-        print(f"\rFetched {len(posts)} posts...", end="", file=sys.stderr, flush=True)
+        _err.info(f"\rFetched {len(posts)} posts...", extra={"end": ""})
 
     return posts
 
@@ -202,10 +213,9 @@ def main():
         session.headers["Authorization"] = f"Bearer {token}"
 
     account = api_get(session, f"{base}/api/v1/accounts/lookup", {"acct": user})
-    print(
+    _err.info(
         f"Found {account['acct']}@{server} (id={account['id']}, "
-        f"{account['statuses_count']} total posts)",
-        file=sys.stderr,
+        f"{account['statuses_count']} total posts)"
     )
 
     posts = fetch_posts(
@@ -217,7 +227,7 @@ def main():
         args.no_replies,
         args.no_reblogs,
     )
-    print(file=sys.stderr)
+    _err.info("")
 
     output = {
         "account": f"@{user}@{server}",
@@ -230,7 +240,7 @@ def main():
     }
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
-    print(f"Wrote {len(posts)} posts to {args.output}", file=sys.stderr)
+    _err.info(f"Wrote {len(posts)} posts to {args.output}")
 
 
 if __name__ == "__main__":

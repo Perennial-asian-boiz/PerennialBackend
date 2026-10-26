@@ -47,11 +47,10 @@ import logging
 import logging.handlers
 import os
 import re
+import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
-
-import sys
 from pathlib import Path
 
 # Make `src.utils` importable no matter where/how this file is launched.
@@ -60,13 +59,18 @@ BACKEND_DIR = Path(__file__).resolve().parents[4]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-import httpx
-from dotenv import load_dotenv
-
-from src.utils.fetch_tickers import fetch_ticker_map
+import httpx  # noqa: E402
+from dotenv import load_dotenv  # noqa: E402
 
 # NOTE: adjust this import path to wherever sentiment_scorer.py lives in your project.
-from src.services.sentiment.sentiment_scorer import score_texts, load_scores
+from src.services.sentiment.sentiment_scorer import (  # noqa: E402
+    load_scores,
+    score_texts,
+)
+from src.utils.console import stdout_logger  # noqa: E402
+from src.utils.fetch_tickers import fetch_ticker_map  # noqa: E402
+
+_out = stdout_logger()  # console lines (print() is banned in src/)
 
 load_dotenv()  # reads BSKY_HANDLE / BSKY_APP_PASSWORD from a .env file next to the script
 
@@ -238,10 +242,10 @@ def write_results(path, results, tickers):
             len(report),
             sum(r["post_count"] for r in report),
         )
-        print(f"Results saved to {path}")
+        _out.info(f"Results saved to {path}")
     except Exception:
         log.exception("failed to write results to %s", path)
-        print(f"Failed to write results to {path} (see log).")
+        _out.info(f"Failed to write results to {path} (see log).")
         try:
             tmp.unlink()
         except OSError:
@@ -353,7 +357,7 @@ class BlueskyClient:
                     attempt,
                     retries,
                 )
-                print(f"Rate limited, sleeping {wait}s")
+                _out.info(f"Rate limited, sleeping {wait}s")
                 await self._sleep(wait)
                 continue
             if r.status_code >= 500:
@@ -497,10 +501,12 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
                     kept,
                     count,
                 )
-                print(f"  {ticker} {iso(w_start)} -> {iso(w_end)} done (total {count})")
+                _out.info(
+                    f"  {ticker} {iso(w_start)} -> {iso(w_end)} done (total {count})"
+                )
     except TimeUp:
         log.info("time limit reached, no more API requests (%d posts scored)", count)
-        print(f"Time limit reached: stopped fetching ({count} posts scored).")
+        _out.info(f"Time limit reached: stopped fetching ({count} posts scored).")
     except Exception:
         log.exception("run aborted after %d posts", count)
         raise
@@ -513,7 +519,7 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
         count,
         time.monotonic() - run_start,
     )
-    print(f"Finished: {count} unique posts.")
+    _out.info(f"Finished: {count} unique posts.")
 
 
 # ---------- Ticker loading ----------
@@ -546,7 +552,7 @@ def parse_companies(raw):
                 name,
                 sym,
             )
-            print(
+            _out.info(
                 f"Skipping {name!r}: {sym!r} is not a valid ticker symbol (1-5 letters)."
             )
     return out
@@ -567,7 +573,7 @@ async def load_tickers(cli_tickers):
             companies = parse_companies(fetched)
     except Exception as e:
         log.warning("ticker fetch failed, using fallback: %s: %s", type(e).__name__, e)
-        print(f"Ticker fetch failed, using fallback: {e}")
+        _out.info(f"Ticker fetch failed, using fallback: {e}")
     if not companies:
         companies = dict(FALLBACK_COMPANIES)
         source = "fallback"
@@ -649,14 +655,14 @@ def main():
 
     async def go():
         tickers = await load_tickers(args.tickers)
-        print(f"Querying {sorted(tickers)} from {iso(since)} to {iso(until)}")
+        _out.info(f"Querying {sorted(tickers)} from {iso(since)} to {iso(until)}")
         await run_query(tickers, since, until, args.window_hours, args.output, deadline)
 
     try:
         asyncio.run(go())
     except KeyboardInterrupt:
         log.info("run stopped by user")
-        print("Stopped.")
+        _out.info("Stopped.")
 
 
 if __name__ == "__main__":
