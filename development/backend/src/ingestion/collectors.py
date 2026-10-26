@@ -17,7 +17,8 @@ page, ticker) as completed or failed. Policy:
     partial results. A unit whose data would be dropped by such a swallowed
     error fails instead.
   * A collection that completed every unit with zero records is a successful
-    empty result (e.g. no insider buys in the window).
+    empty result (e.g. no insider buys in the window), except short interest:
+    an entirely empty Nasdaq universe fails with empty_short_interest.
   * Insider and short-interest plans use explicit upstream={trades, holdings}
     rows from pinned database batches. Only callers omitting upstream use the
     legacy bounded file fallback. Malformed supplied rows or missing/malformed
@@ -35,9 +36,13 @@ page, ticker) as completed or failed. Policy:
   * Failure details are unit names and fixed codes. URLs, query strings (the
     FMP key travels in one) and exception messages are never recorded or printed.
 
-Congress: any parsed trade without an ISO transaction date fails the
-collection (parse_error) before fmp.filter_recent, which would otherwise drop
-it silently. filter_recent's two-year window itself is kept as is.
+Congress: the free FMP plan serves only page 0 (20 rows) per chamber, so a
+run reads at most settings.fmp_max_pages pages (default 1) and a full final
+page ends the chamber instead of failing. Stored history accumulates across
+runs and possible gaps are detected there (src/pipeline/congress_history.py).
+Trades of every age are stored (D13); the 2-year window is applied in ranking.
+Any parsed trade without an ISO transaction date fails the collection
+(parse_error).
 
 The production database scheduler calls this COLLECTORS interface through
 src.pipeline.runner. The legacy JSON scheduler and fetchers' file run() entry
@@ -61,6 +66,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
+from src.ingestion.adapters import (
+    ArkAdapter,
+    Collector,
+    FmpAdapter,
+    InsiderAdapter,
+    ShortInterestAdapter,
+)
 from src.ingestion.files import read_json_bounded
 from src.ingestion.importer import CollectionOutcome
 from src.services.consensus_watchlist.paths import PACKAGE_DIR
@@ -77,6 +89,11 @@ MAX_HTTP_RETRIES = 2
 HTTP_DEADLINE_SECONDS = 60.0
 MAX_RETRY_DELAY_SECONDS = 10.0
 RETRYABLE_HTTP_STATUSES = frozenset({429, 500, 502, 503, 504})
+# Nasdaq answers 404 for a ticker it has no quote for (delisted, renamed): no
+# record, like its explicit empty answer. More than this share of the requested
+# tickers 404ing, or every one, looks like an outage or a changed endpoint and
+# fails the source instead.
+SHORT_INTEREST_MAX_404_SHARE = 0.05
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 UpstreamRows = Dict[str, List[Dict[str, Any]]]
 
@@ -190,8 +207,13 @@ def _get_json(
     monotonic: Callable[[], float] = time.monotonic,
     wall_time: Callable[[], float] = time.time,
     deadline_seconds: float = HTTP_DEADLINE_SECONDS,
+    raw: bool = False,
 ) -> _Response:
-    """Bound one HTTP unit, close every response before waiting, never expose input text."""
+    """Bound one HTTP unit, close every response before waiting, never expose input text.
+
+    With raw=True the capped body is returned as bytes instead of parsed JSON
+    (House Clerk ZIP indexes and PTR PDFs).
+    """
     deadline = monotonic() + min(deadline_seconds, HTTP_DEADLINE_SECONDS)
     retries = min(MAX_HTTP_RETRIES, max(0, max_retries))
     for attempt in range(retries + 1):
@@ -224,6 +246,8 @@ def _get_json(
                     return _Response(False, status=status, code="deadline_exceeded")
                 if body is None:
                     return _Response(False, status=status, code="response_too_large")
+                if raw:
+                    return _Response(True, status=status, data=body)
                 try:
                     data = json.loads(body)
                 except (ValueError, RecursionError):
@@ -325,6 +349,17 @@ def _single_iso_date(values: List[Any]) -> Optional[date]:
     return date.fromisoformat(values[0])
 
 
+def _latest_iso_date(values: List[Any]) -> Optional[date]:
+    """Latest retained content date; empty or incomplete dates stay unknown.
+
+    Never substitute collection time: the date participates in batch identity.
+    Mixed settlement dates use the latest, retaining each row's own date.
+    """
+    if not values or not all(_is_iso_date(value) for value in values):
+        return None
+    return max(date.fromisoformat(value) for value in values)
+
+
 def _read_upstream(
     source: str, data_dir: Path
 ) -> Tuple[Optional[UpstreamRows], Optional[CollectionOutcome]]:
@@ -385,8 +420,10 @@ def _upstream_row_ok(key: str, row: Any) -> bool:
     )
 
 
-def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]:
-    """Same selection as insider.load_congress_tickers / load_ark_tickers / run()."""
+def _insider_plan(
+    insider: InsiderAdapter, upstream: UpstreamRows
+) -> List[Tuple[str, str]]:
+    """Same selection as insider.legacy_load_congress_tickers / legacy_load_ark_tickers / legacy_run()."""
     purchases = [
         t["ticker"]
         for t in upstream["trades"]
@@ -405,8 +442,8 @@ def _insider_plan(insider: Any, upstream: UpstreamRows) -> List[Tuple[str, str]]
     ]
 
 
-def _short_interest_plan(si: Any, upstream: UpstreamRows) -> List[str]:
-    """Same universe as short_interest.get_candidate_tickers()."""
+def _short_interest_plan(si: ShortInterestAdapter, upstream: UpstreamRows) -> List[str]:
+    """Same universe as short_interest.legacy_get_candidate_tickers()."""
     tickers = {
         si.normalize_ticker(r["ticker"])
         for r in upstream["trades"] + upstream["holdings"]
@@ -445,7 +482,7 @@ def collect_ark(
     session: Optional[requests.Session] = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> CollectionOutcome:
-    ark = _fetcher("ark")
+    ark: ArkAdapter = _fetcher("ark")
     session = session or requests.Session()
     tracker = _Tracker("ARK funds", planned=len(ark.ARK_FUNDS))
     all_raw: Dict[str, List[Dict[str, Any]]] = {}
@@ -494,7 +531,9 @@ def collect_ark(
     )
 
 
-# ── Congress (FMP) ───────────────────────────────────────
+# ── Congress (House Clerk + FMP) ─────────────────────────
+
+FREE_PLAN_PAGES = 1  # the free plan answers deeper pages with HTTP 402
 
 
 def _string_fields_ok(item: Dict[str, Any], keys: Tuple[str, ...]) -> bool:
@@ -514,36 +553,29 @@ _FMP_KEYS = (
     "district",
     "link",
 )
+_CLERK_TERMINAL = ("parsed", "scanned")
 
 
-def collect_congress(
-    session: Optional[requests.Session] = None,
-    api_key: Optional[str] = None,
-    sleep: Callable[[float], None] = time.sleep,
-    *,
-    settings: Optional[Settings] = None,
-) -> CollectionOutcome:
-    fmp = _fetcher("fmp")
-    if api_key is not None:
-        key = api_key
-    elif settings is not None and settings.fmp_api_key is not None:
-        key = settings.fmp_api_key.get_secret_value()
-    else:
-        key = fmp.FMP_API_KEY
-    if not key or key.lower().startswith("your_"):
-        return CollectionOutcome.failure(
-            "congress_trades", "live", "missing_credential"
-        )
-    page_limit = settings.fmp_max_pages if settings is not None else fmp.MAX_PAGES
-    session = session or requests.Session()
-    # Initially one request per chamber. Full pages discover further required
-    # units; terminated pagination is not unattempted work.
-    page_counts = {"senate_pages_fetched": 0, "house_pages_fetched": 0}
-    tracker = _Tracker("Congress requests", planned=2, extra_counts=page_counts)
+def _collect_fmp_chambers(
+    session: requests.Session,
+    fmp: FmpAdapter,
+    key: str,
+    chambers: Tuple[str, ...],
+    page_limit: int,
+    tracker: _Tracker,
+    sleep: Callable[[float], None],
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    FMP '-latest' pages per chamber, up to page_limit; None on any failed unit.
+    A short page is the whole served list; a full final page is the end of
+    what this run can see (the history derivation checks it for gaps).
+    """
+    counts = tracker.extra_counts
     raw_fmp: List[Dict[str, Any]] = []
-    for chamber in ("senate", "house"):
+    for chamber in chambers:
         for page in range(page_limit):
             unit = f"{chamber} page {page}"
+            counts["fmp_calls"] += 1
             resp = _get_json(
                 session,
                 f"{fmp.BASE_URL}/{chamber}-latest",
@@ -552,48 +584,248 @@ def collect_congress(
             )
             if not resp.ok:
                 tracker.fail(unit, resp.code)
-                return tracker.outcome("congress_trades", [])
+                return None
             items = resp.data
             if not isinstance(items, list) or not all(
                 isinstance(i, dict) and _string_fields_ok(i, _FMP_KEYS) for i in items
             ):
                 tracker.fail(unit, "malformed_response")
-                return tracker.outcome("congress_trades", [])
+                return None
             if len(items) > 20:
                 tracker.fail(unit, "malformed_response")
-                return tracker.outcome("congress_trades", [])
-            page_counts[f"{chamber}_pages_fetched"] += 1
-            if len(items) == 20 and page == page_limit - 1:
-                tracker.fail(unit, "pagination_exhausted")
-                return tracker.outcome("congress_trades", [])
+                return None
+            counts[f"{chamber}_pages_fetched"] += 1
+            counts[f"{chamber}_rows_served"] += len(items)
             tracker.ok()
             for item in items:
                 item["_chamber"] = chamber.capitalize()
             raw_fmp.extend(items)
-            if len(items) < 20:
+            if len(items) < 20 or page == page_limit - 1:
                 break
             if tracker.planned is not None:
                 tracker.planned += 1
+    return raw_fmp
+
+
+def _cached_clerk_report(entry: Any) -> bool:
+    """A cache entry the collector may reuse: a final outcome with well-formed trades."""
+    return (
+        isinstance(entry, dict)
+        and entry.get("status") in _CLERK_TERMINAL
+        and isinstance(entry.get("trades"), list)
+        and all(isinstance(t, dict) for t in entry["trades"])
+    )
+
+
+def _collect_house_clerk(
+    session: requests.Session,
+    tracker: _Tracker,
+    sleep: Callable[[float], None],
+    cache_path: Optional[Path],
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    House trades from every PTR filed in house_clerk.LOOKBACK_DAYS; None on
+    any failed unit. Units are each yearly index, then each report. A scanned
+    report (no text layer) completes with no records and is counted; a report
+    with stock rows the parser could not read fails, since its trades would
+    otherwise be dropped. Parsed reports are reused from the House Clerk
+    cache, which holds the same outcome a fresh parse produces.
+
+    house_rows_served stays 0: the Clerk lists every filing, so there is no
+    page edge for the history derivation's gap check to measure.
+    """
+    hc = _fetcher("house_clerk")
+    today = datetime.now(timezone.utc).date()
+    cutoff = date.fromordinal(today.toordinal() - hc.LOOKBACK_DAYS).isoformat()
+    years = sorted({today.year, int(cutoff[:4])})
+    if tracker.planned is not None:
+        tracker.planned += len(years)
+
+    filings: Dict[str, Dict[str, Any]] = {}
+    for year in years:
+        unit = f"house index {year}"
+        resp = _get_json(
+            session,
+            hc.INDEX_URL.format(year=year),
+            headers=hc.HEADERS,
+            timeout=hc.REQUEST_TIMEOUT,
+            sleep=sleep,
+            raw=True,
+        )
+        if not resp.ok:
+            tracker.fail(unit, resp.code)
+            return None
+        try:
+            listed = hc.parse_index(resp.data)
+        except ValueError:
+            tracker.fail(unit, "malformed_response")
+            return None
+        tracker.ok()
+        for f in listed:
+            if f["filing_date"] >= cutoff:
+                filings[f["doc_id"]] = f
+
+    cache = hc.load_cache(cache_path)
+    if tracker.planned is not None:
+        tracker.planned += len(filings)
+    tracker.extra_counts.update(
+        house_reports=len(filings),
+        house_reports_scanned=0,
+        house_reports_downloaded=0,
+        house_stock_rows_skipped=0,
+        house_trades_dated_after_disclosure=0,
+    )
+    trades: List[Dict[str, Any]] = []
+    outcomes: Dict[str, Dict[str, Any]] = {}
+    for doc_id, f in sorted(filings.items()):
+        unit = f"house report {doc_id}"
+        report = cache.get(doc_id)
+        if not _cached_clerk_report(report):
+            resp = _get_json(
+                session,
+                hc.PTR_URL.format(year=f["year"], doc_id=doc_id),
+                headers=hc.HEADERS,
+                timeout=hc.REQUEST_TIMEOUT,
+                sleep=sleep,
+                raw=True,
+            )
+            if not resp.ok:
+                tracker.fail(unit, resp.code)
+                break
+            report = hc.parse_report(resp.data, f)
+            tracker.extra_counts["house_reports_downloaded"] += 1
+            sleep(hc.REQUEST_DELAY)
+        if report["status"] == hc.STATUS_FAILED:
+            tracker.fail(unit, "malformed_response")
+            break
+        if report["status"] == hc.STATUS_PARTIAL:
+            tracker.fail(unit, "parse_error")
+            break
+        outcomes[doc_id] = report
+        if report["status"] == hc.STATUS_SCANNED:
+            tracker.extra_counts["house_reports_scanned"] += 1
+        tracker.extra_counts["house_stock_rows_skipped"] += report.get(
+            "skipped_rows", 0
+        )
+        # Stored as filed; ranking (watchlist-v4) ignores these purchases.
+        tracker.extra_counts["house_trades_dated_after_disclosure"] += sum(
+            1 for t in report["trades"] if t["transaction_date"] > t["disclosure_date"]
+        )
+        trades.extend(report["trades"])
+        tracker.ok()
+    # Even a failed collection keeps what it parsed, so the retry is cheaper.
+    hc.save_cache(
+        {**{d: o for d, o in cache.items() if _cached_clerk_report(o)}, **outcomes},
+        cache_path,
+    )
+    return None if tracker.failure_count else trades
+
+
+def collect_congress(
+    session: Optional[requests.Session] = None,
+    api_key: Optional[str] = None,
+    sleep: Callable[[float], None] = time.sleep,
+    *,
+    settings: Optional[Settings] = None,
+    max_pages: Optional[int] = None,
+    house_source: Optional[str] = None,
+    include_fmp_senate: Optional[bool] = None,
+    house_cache_path: Optional[Path] = None,
+) -> CollectionOutcome:
+    """
+    House trades from the Clerk of the House (or FMP), plus FMP's Senate page
+    when enabled. Explicit arguments win, then settings. A caller with neither
+    gets the FMP-only collection of both chambers on the free plan's one page.
+    """
+    fmp: FmpAdapter = _fetcher("fmp")
+    if house_source is None:
+        house_source = settings.congress_house_source if settings is not None else "fmp"
+    if include_fmp_senate is None:
+        include_fmp_senate = (
+            settings.congress_include_fmp_senate if settings is not None else True
+        )
+    if house_source not in ("house_clerk", "fmp"):
+        raise ValueError("house_source must be 'house_clerk' or 'fmp'")
+    chambers = tuple(
+        c
+        for c, wanted in (
+            ("senate", include_fmp_senate),
+            ("house", house_source == "fmp"),
+        )
+        if wanted
+    )
+
+    key: Optional[str] = ""
+    if chambers:
+        if api_key is not None:
+            key = api_key
+        elif settings is not None and settings.fmp_api_key is not None:
+            key = settings.fmp_api_key.get_secret_value()
+        else:
+            key = fmp.FMP_API_KEY
+        if not key or key.lower().startswith("your_"):
+            return CollectionOutcome.failure(
+                "congress_trades", "live", "missing_credential"
+            )
+    if max_pages is not None:
+        page_limit = max_pages
+    elif settings is not None:
+        page_limit = settings.fmp_max_pages
+    else:
+        page_limit = FREE_PLAN_PAGES
+    session = session or requests.Session()
+    # Initially one request per FMP chamber. Full pages discover further units
+    # up to page_limit, and the House Clerk indexes add one unit per report.
+    page_counts = {
+        "senate_pages_fetched": 0,
+        "house_pages_fetched": 0,
+        "senate_rows_served": 0,
+        "house_rows_served": 0,
+        "fmp_calls": 0,
+    }
+    tracker = _Tracker(
+        "Congress requests", planned=len(chambers), extra_counts=page_counts
+    )
+    raw_fmp = _collect_fmp_chambers(
+        session, fmp, key or "", chambers, page_limit, tracker, sleep
+    )
+    if raw_fmp is None:
+        return tracker.outcome("congress_trades", [])
+    clerk: List[Dict[str, Any]] = []
+    if house_source == "house_clerk":
+        collected = _collect_house_clerk(session, tracker, sleep, house_cache_path)
+        if collected is None:
+            return tracker.outcome("congress_trades", [])
+        clerk = collected
     try:
-        trades = fmp.parse_trades(raw_fmp)
-        # filter_recent silently drops rows whose date does not parse, so a
-        # malformed required date must fail the collection before it runs.
+        trades = fmp.parse_trades(raw_fmp) + clerk
         if not all(_is_iso_date(t.get("transaction_date")) for t in trades):
             return tracker.parse_failure("congress_trades")
-        trades = fmp.filter_recent(fmp.deduplicate_proven_repeats(trades), years=2)
+        trades = fmp.deduplicate_proven_repeats(trades)
     except (TypeError, ValueError, AttributeError, KeyError):
         return tracker.parse_failure("congress_trades")
+    endpoints = [f"{fmp.BASE_URL}/{c}-latest" for c in chambers]
+    if house_source == "house_clerk":
+        endpoints.append(_fetcher("house_clerk").INDEX_URL)
     envelope = {
-        "source": "Financial Modeling Prep (FMP)",
-        "endpoints": [f"{fmp.BASE_URL}/senate-latest", f"{fmp.BASE_URL}/house-latest"],
+        "source": " + ".join(
+            (["Financial Modeling Prep (FMP)"] if chambers else [])
+            + (["Clerk of the House"] if house_source == "house_clerk" else [])
+        ),
+        "endpoints": endpoints,
         "fetched_at": _now_iso(),
         "total_trades": len(trades),
+        "chambers": (["Senate"] if include_fmp_senate else []) + ["House"],
+        "house_source": house_source,
+        "house_reports": tracker.extra_counts.get("house_reports"),
+        "house_reports_scanned": tracker.extra_counts.get("house_reports_scanned"),
     }
     return tracker.outcome(
         "congress_trades",
         trades,
         envelope=envelope,
         coverage={"complete": True, "scope": "recent_window"},
+        source_as_of=_latest_iso_date([t.get("disclosure_date") for t in trades]),
     )
 
 
@@ -649,7 +881,7 @@ def collect_insider(
     settings: Optional[Settings] = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; None retains the legacy file fallback."""
-    insider = _fetcher("insider")
+    insider: InsiderAdapter = _fetcher("insider")
     upstream, failure = _resolve_upstream(
         "insider_trades", insider.LOCAL_DATA_DIR, upstream
     )
@@ -698,10 +930,6 @@ def collect_insider(
             tracker.fail(ticker, "malformed_response")
             break
         else:
-            # insider.py returns (buys, error_code, error_detail). Its detail
-            # can contain provider data; only the fixed code crosses this
-            # boundary. A parser failure leaves the ticker unknown. Records
-            # keep the planned ticker, not the provider symbol.
             parsed_buys, parse_code, _parse_detail = insider.parse_finnhub_buys(
                 ticker, resp.data, bucket
             )
@@ -724,6 +952,10 @@ def collect_insider(
         "insider_trades",
         buys,
         envelope=envelope,
+        # Coverage through the exact UTC date sent in every request, not the
+        # newest buy in a changing universe. Pinned by the importer in batch
+        # identity; same content on a later query day intentionally differs.
+        source_as_of=date.fromisoformat(today),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 
@@ -768,7 +1000,7 @@ def collect_short_interest(
     upstream: Any = None,
 ) -> CollectionOutcome:
     """Collect from explicit {trades, holdings} rows; supplied data never reads files."""
-    si = _fetcher("short_interest")
+    si: ShortInterestAdapter = _fetcher("short_interest")
     upstream, failure = _resolve_upstream("short_interest", si.LOCAL_DATA_DIR, upstream)
     if failure:
         return failure
@@ -781,7 +1013,15 @@ def collect_short_interest(
     session = session or requests.Session()
     tracker = _Tracker("short-interest tickers", planned=len(tickers))
     records: List[Dict[str, Any]] = []
+    # Nasdaq's URL takes the symbol as a path segment, which "/" (units,
+    # warrants, rights: ETHQ/U) can't be: never sent, listed like insider's.
+    unsupported = [t for t in tickers if "/" in t]
+    requested = len(tickers) - len(unsupported)
+    not_found: List[str] = []
     for ticker in tickers:
+        if "/" in ticker:
+            tracker.ok()
+            continue
         resp = _get_json(
             session,
             si.NASDAQ_URL.format(symbol=ticker),
@@ -790,7 +1030,12 @@ def collect_short_interest(
             sleep=sleep,
         )
         kind = _short_interest_kind(resp.data) if resp.ok else None
-        if not resp.ok:
+        if not resp.ok and resp.code == "http_404":
+            not_found.append(ticker)
+            tracker.ok()  # no record for this ticker
+            if len(not_found) > SHORT_INTEREST_MAX_404_SHARE * requested:
+                break  # an outage, not missing records: stop asking
+        elif not resp.ok:
             tracker.fail(ticker, resp.code)
             break
         elif kind is None:
@@ -807,22 +1052,52 @@ def collect_short_interest(
                 records.append(record)
                 tracker.ok()
         sleep(si.REQUEST_DELAY)
+    tracker.extra_counts["not_found"] = len(not_found)
+    if (
+        not tracker.failure_count
+        and not_found
+        and (
+            len(not_found) == requested
+            or len(not_found) > SHORT_INTEREST_MAX_404_SHARE * requested
+        )
+    ):
+        diagnostics = tracker.diagnostics()
+        diagnostics.update(
+            completed=tracker.completed - len(not_found),
+            failed=len(not_found),
+            failures=[
+                {"unit": t, "code": "http_404"}
+                for t in not_found[:MAX_REPORTED_FAILURES]
+            ],
+        )
+        return CollectionOutcome.failure(
+            "short_interest", "live", "collection_failed", diagnostics=diagnostics
+        )
+    if not records and not tracker.failure_count:
+        return CollectionOutcome.failure(
+            "short_interest",
+            "live",
+            "empty_short_interest",
+            diagnostics=tracker.diagnostics(),
+        )
     records.sort(key=lambda r: r["ticker"])
     envelope = {
         "schema_version": "1.0",
         "source": "nasdaq",
         "fetched_at": _now_iso(),
         "total_records": len(records),
+        "unsupported_tickers": unsupported,
     }
     return tracker.outcome(
         "short_interest",
         records,
         envelope=envelope,
+        source_as_of=_latest_iso_date([r.get("settlement_date") for r in records]),
         coverage={"complete": True, "scope": "selected_universe"},
     )
 
 
-COLLECTORS: Dict[str, Callable[..., CollectionOutcome]] = {
+COLLECTORS: Dict[str, Collector] = {
     "congress_trades": collect_congress,
     "ark_holdings": collect_ark,
     "insider_trades": collect_insider,

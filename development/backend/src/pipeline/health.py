@@ -1,27 +1,94 @@
 """Machine-readable checks for a supervisor/monitor. No credentials or payloads."""
 
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Iterable, Sequence
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import Engine
 
 from src.db import models as m
+from src.pipeline import congress_history
 from src.pipeline.publication import MAX_AGE, current
+from src.settings import (
+    PUBLICATION_DEADLINE,
+    PUBLICATION_TIMEZONE,
+    TRADING_HOLIDAYS,
+    Settings,
+)
+
+# M2: degraded publishing is visible but not an outage; everything else is.
+SEV2, SEV3 = "SEV2", "SEV3"
+
+# GDELT (G5, provisional): informational until M6 scores consume it. Staleness
+# is an advisory: visible, never a watchlist issue, never unhealthy.
+GDELT_MAX_AGE = timedelta(days=2)
 
 
-def health(engine: Engine) -> dict[str, Any]:
-    now = datetime.now(timezone.utc)
+def publication_window_start(now: datetime, holidays: Iterable[date]) -> datetime:
+    """Start of the trading day whose D6 deadline (10:30 PT) most recently passed.
+
+    A publication created at or after this instant serves that trading day;
+    weekends and listed NYSE holidays are skipped.
+    """
+    zone = ZoneInfo(PUBLICATION_TIMEZONE)
+    local = now.astimezone(zone)
+    closed = set(holidays)
+    day = local.date()
+    while True:
+        deadline = datetime.combine(day, PUBLICATION_DEADLINE, zone)
+        if day.weekday() < 5 and day not in closed and deadline <= local:
+            return datetime.combine(day, datetime.min.time(), zone)
+        day -= timedelta(days=1)
+
+
+def _severity(issue: str, issues: list[str]) -> str:
+    # Rolled back: a deliberate, audited operator decision, visible until the
+    # next publication; staleness it causes is still reported on its own.
+    if (
+        issue.startswith("publication:degraded")
+        or issue == "publication:rolled_back"
+        or issue == "congress_trades:possible_gap"
+    ):
+        return SEV3
+    source, _, state = issue.partition(":")
+    if state in ("failed", "abandoned"):
+        # A failed run the served publication still covers within policy.
+        served = not any(
+            i in issues
+            for i in (
+                "publication:missing",
+                "publication:missed",
+                "publication:stale",
+                f"publication:{source}:stale",
+                f"{source}:stale",
+            )
+        )
+        return SEV3 if served else SEV2
+    return SEV2
+
+
+def health(
+    engine: Engine,
+    *,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+    modes: Sequence[str] = ("live",),
+) -> dict[str, Any]:
+    """modes: which collection modes count as runs; only the demo widens it."""
+    now = datetime.now(timezone.utc) if now is None else now
+    holidays = settings.trading_holidays if settings is not None else TRADING_HOLIDAYS
+    window_start = publication_window_start(now, holidays)
     issues: list[str] = []
     sources: dict[str, dict[str, Any] | None] = {}
     with engine.connect() as conn:
-        for source in m.SOURCES:
+        for source in m.WATCHLIST_SOURCES:
             run = (
                 conn.execute(
                     select(m.ingestion_runs)
                     .where(
                         m.ingestion_runs.c.source == source,
-                        m.ingestion_runs.c.collection_mode == "live",
+                        m.ingestion_runs.c.collection_mode.in_(modes),
                     )
                     .order_by(
                         m.ingestion_runs.c.started_at.desc(),
@@ -38,7 +105,7 @@ def health(engine: Engine) -> dict[str, Any]:
                     .where(
                         m.ingestion_runs.c.source == source,
                         m.ingestion_runs.c.status == "succeeded",
-                        m.ingestion_runs.c.collection_mode == "live",
+                        m.ingestion_runs.c.collection_mode.in_(modes),
                     )
                     .order_by(
                         m.ingestion_runs.c.collected_at.desc().nullslast(),
@@ -68,6 +135,16 @@ def health(engine: Engine) -> dict[str, Any]:
             }
             if run["status"] in ("failed", "abandoned"):
                 issues.append(f"{source}:{run['status']}")
+            if (
+                source == "congress_trades"
+                and success is not None
+                and conn.execute(
+                    select(func.count())
+                    .select_from(m.congress_history_gaps)
+                    .where(m.congress_history_gaps.c.detected_run_id == success["id"])
+                ).scalar_one()
+            ):
+                issues.append("congress_trades:possible_gap")
             if run["status"] == "running" and (
                 run["heartbeat_at"] is None
                 or run["heartbeat_at"] < now - timedelta(minutes=10)
@@ -85,11 +162,93 @@ def health(engine: Engine) -> dict[str, Any]:
         batches = conn.execute(
             select(func.count()).select_from(m.source_batches)
         ).scalar_one()
+        # Informational, never an issue: history starts at the first live run,
+        # so the 2-year Congress window fills over time (design note §5).
+        since = conn.execute(
+            select(func.min(m.congress_trade_history.c.disclosure_date))
+        ).scalar_one()
+        congress_history_info = {
+            "since": since.isoformat() if since else None,
+            "warming": since is None or since > congress_history.window_start(now),
+        }
+    # M3 missed-run monitor: the scheduled job never started for the trading day
+    # whose deadline passed (distinct from a run that started and failed). Only
+    # watchlist sources count: a GDELT run must not mask a missed pipeline run.
+    with engine.connect() as conn:
+        started = conn.execute(
+            select(func.count())
+            .select_from(m.ingestion_runs)
+            .where(
+                m.ingestion_runs.c.collection_mode == "live",
+                m.ingestion_runs.c.source.in_(m.WATCHLIST_SOURCES),
+                m.ingestion_runs.c.started_at >= window_start,
+            )
+        ).scalar_one()
+    if not started:
+        issues.append("pipeline:missed_run")
+    advisories: list[str] = []
+    with engine.connect() as conn:
+        for source in m.SUBJECTLESS_SOURCES:
+            finished = conn.execute(
+                select(func.max(m.ingestion_runs.c.finished_at)).where(
+                    m.ingestion_runs.c.source == source,
+                    m.ingestion_runs.c.status == "succeeded",
+                )
+            ).scalar_one()
+            if finished is None or now - finished > GDELT_MAX_AGE:
+                advisories.append(f"{source}:stale")
+        if settings is not None and settings.market_cap_adapter is not None:
+            # M4 MCB-11: publish() falls back to earlier rows within the limit,
+            # so a stale collection is an advisory, never an issue.
+            finished = conn.execute(
+                select(func.max(m.ingestion_runs.c.finished_at)).where(
+                    m.ingestion_runs.c.source == "market_caps",
+                    m.ingestion_runs.c.status == "succeeded",
+                    m.ingestion_runs.c.collection_mode.in_(modes),
+                )
+            ).scalar_one()
+            if finished is None or now - finished > settings.market_cap_max_reuse_age:
+                advisories.append("market_caps:stale")
     pub = current(engine)
     if pub is None:
         issues.append("publication:missing")
-    elif now - pub["created_at"] > timedelta(days=3):
-        issues.append("publication:stale")
+    else:
+        if now - pub["created_at"] > timedelta(days=3):
+            issues.append("publication:stale")
+        if pub["created_at"] < window_start:
+            issues.append("publication:missed")
+        with engine.connect() as conn:
+            marker = conn.execute(
+                select(m.publication_events.c.checks).where(
+                    m.publication_events.c.publication_id == pub["id"],
+                    m.publication_events.c.kind == "degraded",
+                )
+            ).scalar_one_or_none()
+            # M3: production deliberately pinned by `cli rollback`. The pointer's
+            # promotion and the rollback event share one timestamp.
+            rolled_back = conn.execute(
+                select(func.count())
+                .select_from(m.publication_events)
+                .join(
+                    m.current_publication,
+                    m.current_publication.c.publication_id
+                    == m.publication_events.c.publication_id,
+                )
+                .where(
+                    m.current_publication.c.channel == "production",
+                    m.publication_events.c.kind == "rollback",
+                    m.publication_events.c.created_at
+                    == m.current_publication.c.promoted_at,
+                )
+            ).scalar_one()
+        if rolled_back:
+            issues.append("publication:rolled_back")
+        if marker is not None:
+            issues.append(
+                "publication:degraded:all_sources_reused"
+                if marker.get("all_sources_reused")
+                else "publication:degraded"
+            )
     if pub is not None:
         # New imports do not refresh the actual served publication's inputs.
         with engine.connect() as conn:
@@ -135,12 +294,20 @@ def health(engine: Engine) -> dict[str, Any]:
             ).scalar_one()
             if settlement and settlement < (now - timedelta(days=45)).date():
                 issues.append("publication:short_interest:observation_stale")
+    severities = {issue: _severity(issue, issues) for issue in issues}
     return {
+        # Any issue, SEV3 included, is unhealthy: the CLI keeps exiting 1 (M2 Q4).
         "healthy": not issues,
+        "severity": max(severities.values(), key=[SEV3, SEV2].index)
+        if severities
+        else "ok",
+        "issue_severity": severities,
         "checked_at": now,
         "issues": issues,
+        "advisories": advisories,
         "sources": sources,
         "publication_id": pub["id"] if pub else None,
         "database_bytes": size,
         "batch_count": batches,
+        "congress_history": congress_history_info,
     }

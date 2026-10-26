@@ -5,6 +5,7 @@ Command line for imports and inspection. Run from development/backend:
     python -m src.ingestion.cli import-file ark_holdings ../database/local_data/ark_holdings.json --attest-complete
     python -m src.ingestion.cli fetch ark_holdings
     python -m src.ingestion.cli latest ark_holdings --limit 5
+    python -m src.ingestion.cli summaries   # S1-12, manual only (OPERATIONS.md)
 
 Exit codes: 0 succeeded, 1 import recorded as failed or unhealthy report,
 2 command/configuration/database failure. Earlier pipeline stages may already
@@ -15,19 +16,24 @@ database URL, request URLs or exception messages.
 import argparse
 import getpass
 import json
+import logging
 import sys
 from dataclasses import asdict
 from typing import Any, List, Optional
 
-from src.db.models import SOURCES
+from src.db.models import SOURCES, WATCHLIST_SOURCES
 from src.db.queries import batch_rows, latest_successful_run
 from src.db.session import make_engine
-from src.ingestion.redaction import describe_exception
+from src.ingestion.redaction import redact
 from src.settings import SettingsError, load_settings
+from src.utils.logger import configure_logging, log_context, log_exception
+
+logger = logging.getLogger(__name__)
 
 
-def _print(obj: Any) -> None:
-    print(json.dumps(obj, indent=2, default=str))
+def emit(obj: Any) -> None:
+    """Write command results to stdout; diagnostics belong on stderr."""
+    sys.stdout.write(json.dumps(obj, indent=2, default=str) + "\n")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -35,7 +41,7 @@ def _parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     imp = sub.add_parser("import-file", help="import an existing fetcher JSON file")
-    imp.add_argument("source", choices=SOURCES)
+    imp.add_argument("source", choices=WATCHLIST_SOURCES)
     imp.add_argument("path")
     imp.add_argument(
         "--fixture",
@@ -52,7 +58,7 @@ def _parser() -> argparse.ArgumentParser:
     fetch = sub.add_parser(
         "fetch", help="collect live through the explicit-outcome wrapper and import"
     )
-    fetch.add_argument("source", choices=SOURCES)
+    fetch.add_argument("source", choices=WATCHLIST_SOURCES)
 
     latest = sub.add_parser(
         "latest", help="show the latest successful batch for a source"
@@ -79,6 +85,12 @@ def _parser() -> argparse.ArgumentParser:
         help="a failed check to override, as reported (repeatable; needs --override)",
     )
     manual.add_argument("--actor", help="operator identity for the override audit")
+    back = sub.add_parser(
+        "rollback", help="serve an earlier publication again, with an audited reason"
+    )
+    back.add_argument("--to", dest="to_publication_id", type=int, required=True)
+    back.add_argument("--reason", required=True, help="why production goes back")
+    back.add_argument("--actor", help="operator identity for the rollback audit")
     sub.add_parser("current", help="show the published watchlist")
     sub.add_parser("health", help="machine-readable health; exits 1 when unhealthy")
     replay = sub.add_parser(
@@ -89,14 +101,50 @@ def _parser() -> argparse.ArgumentParser:
         "recover-stale", help="mark workers with expired heartbeats abandoned"
     )
     recover.add_argument("--minutes", type=int, default=10)
+    sub.add_parser(
+        "summaries",
+        help="S1-12: store company summaries for the consensus list (manual, staging)",
+    )
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    configure_logging()
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command == "publish" and bool(args.override) != bool(args.override_checks):
         parser.error("--override and --override-check must be given together")
+    with log_context(
+        source=getattr(args, "source", None),
+        publication_id=getattr(args, "publication_id", None),
+    ):
+        return _execute(args)
+
+
+def _summaries(engine: Any, settings: Any) -> int:
+    """S1-12 (decision 76): run by hand, never scheduled. Counts only on stdout."""
+    from src.ingestion.company_summaries import summarize
+    from src.ingestion.fmp_descriptions import FmpProfileDescriptions
+
+    key = settings.fmp_api_key.get_secret_value() if settings.fmp_api_key else ""
+    if not key.strip() or key.lower().startswith("your_"):
+        emit({"error_code": "missing_credential"})  # before any request
+        return 1
+    result = summarize(engine, FmpProfileDescriptions(key))
+    if not result.succeeded:
+        emit({"error_code": result.error_code})
+        return 1
+    emit(
+        {
+            "members": result.members,
+            "with_summary": result.with_summary,
+            "unavailable": result.unavailable,
+        }
+    )
+    return 0
+
+
+def _execute(args: argparse.Namespace) -> int:
     try:
         settings = load_settings()
         if args.command == "run-pipeline":
@@ -105,7 +153,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "publish":
             settings.require_provider_keys("fmp")
         elif args.command == "fetch":
-            if args.source == "congress_trades":
+            if args.source == "congress_trades" and (
+                settings.congress_house_source == "fmp"
+                or settings.congress_include_fmp_senate
+            ):
+                # House Clerk alone needs no key; FMP chambers do.
                 settings.require_provider_keys("fmp")
             elif args.source == "insider_trades":
                 settings.require_provider_keys("finnhub")
@@ -114,13 +166,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             workload="pipeline" if args.command == "run-pipeline" else "cli",
         )
     except SettingsError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        # SettingsError contains only setting names, never rejected values.
+        logger.error("configuration error: %s", redact(exc))
         return 2
     except Exception as exc:
-        print(
-            f"error: database engine could not be created: {describe_exception(exc)}",
-            file=sys.stderr,
-        )
+        log_exception(logger, "database engine could not be created", exc)
         return 2
 
     try:
@@ -130,7 +180,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if args.command == "run-pipeline":
             from src.pipeline.runner import run_pipeline
 
-            _print(
+            emit(
                 {
                     "publication_id": run_pipeline(
                         engine,
@@ -147,7 +197,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             with engine.connect() as conn:
                 latest = {
-                    source: latest_successful_run(conn, source) for source in SOURCES
+                    source: latest_successful_run(conn, source)
+                    for source in WATCHLIST_SOURCES
                 }
                 if any(run is None for run in latest.values()):
                     raise PublicationError("all sources need a successful batch")
@@ -168,7 +219,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 else None,
             )
             actor = (args.actor or getpass.getuser()) if args.override else None
-            _print(
+            emit(
                 {
                     "publication_id": publish(
                         engine,
@@ -182,28 +233,43 @@ def main(argv: Optional[List[str]] = None) -> int:
                 }
             )
             return 0
+        if args.command == "rollback":
+            from src.pipeline.publication import rollback
+
+            previous = rollback(
+                engine,
+                args.to_publication_id,
+                actor=args.actor or getpass.getuser(),
+                reason=args.reason,
+            )
+            emit(
+                {"publication_id": args.to_publication_id, "rolled_back_from": previous}
+            )
+            return 0
         if args.command == "current":
             from src.pipeline.publication import current
 
-            _print(current(engine))
+            emit(current(engine))
             return 0
         if args.command == "replay":
             from src.pipeline.publication import replay
 
-            _print(replay(engine, args.publication_id))
+            emit(replay(engine, args.publication_id))
             return 0
         if args.command == "health":
             from src.pipeline.health import health
 
-            report = health(engine)
-            _print(report)
+            report = health(engine, settings=settings)
+            emit(report)
             return 0 if report["healthy"] else 1
+        if args.command == "summaries":
+            return _summaries(engine, settings)
         if args.command == "recover-stale":
             from datetime import timedelta
 
             from src.pipeline.lifecycle import abandon_stale_runs
 
-            _print(
+            emit(
                 {
                     "abandoned": abandon_stale_runs(
                         engine, timedelta(minutes=args.minutes)
@@ -216,7 +282,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             with engine.connect() as conn:
                 run = latest_successful_run(conn, args.source)
                 if run is None:
-                    _print({"source": args.source, "latest": None})
+                    emit({"source": args.source, "latest": None})
                     return 0
                 rows = batch_rows(
                     conn,
@@ -226,7 +292,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     offset=args.offset,
                     symbol=args.symbol,
                 )
-            _print(
+            emit(
                 {
                     "source": args.source,
                     "latest": dict(run._mapping),
@@ -249,7 +315,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             from src.pipeline.runner import collect_source
 
             result = collect_source(engine, args.source, settings=settings)
-            _print(asdict(result))
+            emit(asdict(result))
             return 0 if result.succeeded else 1
         result = import_collection(engine, outcome)
     except Exception as exc:
@@ -257,27 +323,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             OverrideInputError,
             PublicationInProgressError,
             PublicationQualityError,
+            RollbackError,
         )
+        from src.pipeline.runner import RequiredSourceUnavailableError
 
         if isinstance(exc, PublicationQualityError):
-            _print({"error_code": exc.code, "checks": list(exc.checks)})
+            emit({"error_code": exc.code, "checks": list(exc.checks)})
             return 1
-        if isinstance(exc, PublicationInProgressError):
-            _print({"error_code": exc.code})
+        if isinstance(exc, (PublicationInProgressError, RollbackError)):
+            emit({"error_code": exc.code})
+            return 1
+        if isinstance(exc, RequiredSourceUnavailableError):
+            emit({"error_code": exc.code, "source": exc.source})
             return 1
         if isinstance(exc, OverrideInputError):
-            # Fixed text only: the rejected input may itself hold a secret.
-            print(f"error: {exc.code}: {exc}", file=sys.stderr)
+            log_exception(logger, exc.code, exc)
             return 2
-        print(
-            f"error: database operation failed: {describe_exception(exc)}",
-            file=sys.stderr,
-        )
+        log_exception(logger, "database operation failed", exc)
         return 2
     finally:
         engine.dispose()
 
-    _print(asdict(result))
+    emit(asdict(result))
     return 0 if result.succeeded else 1
 
 

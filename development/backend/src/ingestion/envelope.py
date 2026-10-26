@@ -20,7 +20,16 @@ from typing import Any, Dict, Optional
 from src.ingestion.redaction import redact
 
 ENVELOPE_KEYS = {
-    "congress_trades": ("source", "endpoints", "fetched_at", "total_trades"),
+    "congress_trades": (
+        "source",
+        "endpoints",
+        "fetched_at",
+        "total_trades",
+        "chambers",
+        "house_source",
+        "house_reports",
+        "house_reports_scanned",
+    ),
     "ark_holdings": (
         "source",
         "funds_tracked",
@@ -38,7 +47,34 @@ ENVELOPE_KEYS = {
         "tickers_with_buys",
         "unsupported_tickers",
     ),
-    "short_interest": ("schema_version", "source", "fetched_at", "total_records"),
+    "short_interest": (
+        "schema_version",
+        "source",
+        "fetched_at",
+        "total_records",
+        "unsupported_tickers",
+    ),
+    # GDELT: missing timeline days are coverage gaps ("THEME:YYYY-MM-DD"), never
+    # zero rows; lists keep the first MAX_LIST_ITEMS, the count is exact.
+    "gdelt_theme_volume": (
+        "source",
+        "target_day",
+        "window_days",
+        "themes",
+        "missing_days",
+        "missing_days_count",
+    ),
+    "gdelt_theme_articles": ("source", "target_day", "themes", "skipped_articles"),
+    "gdelt_spike_results": (
+        "rule_version",
+        "spike_ratio",
+        "baseline_days",
+        "min_baseline_days",
+        "min_articles",
+        "input_batch_id",
+    ),
+    # provider is the adapter name; it is also in every row, which is hashed.
+    "market_caps": ("provider", "fetched_at", "total_symbols", "symbols_with_value"),
 }
 MAX_LIST_ITEMS = 20
 

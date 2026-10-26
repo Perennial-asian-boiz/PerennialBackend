@@ -20,7 +20,7 @@ Rules shared by every source:
 
 import math
 import re
-from datetime import date
+from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 from typing import Any, Callable, ClassVar, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlsplit
@@ -257,13 +257,30 @@ def _json_value(value: Any) -> Any:
     return value
 
 
-class SourceRecord(BaseModel):
-    """Base for one normalized fetcher record."""
+class ContractRecord(BaseModel):
+    """Base for one normalized record of any source in the ingestion contract."""
 
     model_config = ConfigDict(extra="ignore", frozen=True, populate_by_name=True)
 
     # Columns stored in the source table, in addition to batch/security ids.
     DB_COLUMNS: ClassVar[Tuple[str, ...]] = ()
+
+    def canonical(self) -> Dict[str, Any]:
+        """JSON-safe, deterministic representation used for hashing and the batch payload."""
+        return {
+            name: _json_value(getattr(self, name)) for name in type(self).model_fields
+        }
+
+    def db_values(self) -> Dict[str, Any]:
+        return {name: getattr(self, name) for name in self.DB_COLUMNS}
+
+
+class GlobalRecord(ContractRecord):
+    """A record not about one security (for example a GDELT theme-day): no ticker."""
+
+
+class SourceRecord(ContractRecord):
+    """Base for one normalized fetcher record about a single security."""
 
     ticker: Ticker
     exchange: Annotated[Optional[str], BeforeValidator(_text_validator(20))] = None
@@ -301,15 +318,6 @@ class SourceRecord(BaseModel):
         if not re.fullmatch(r"[A-Z]{3}", text):
             raise ValueError("currency must be a 3-letter code")
         return text
-
-    def canonical(self) -> Dict[str, Any]:
-        """JSON-safe, deterministic representation used for hashing and the batch payload."""
-        return {
-            name: _json_value(getattr(self, name)) for name in type(self).model_fields
-        }
-
-    def db_values(self) -> Dict[str, Any]:
-        return {name: getattr(self, name) for name in self.DB_COLUMNS}
 
 
 class CongressTrade(SourceRecord):
@@ -464,11 +472,159 @@ class ShortInterestRecord(SourceRecord):
         return v
 
 
-RECORD_MODELS: Dict[str, type[SourceRecord]] = {
+_THEME = re.compile(r"[A-Z0-9_]{1,64}")
+
+
+def _theme(value: Any) -> str:
+    if not isinstance(value, str) or not _THEME.fullmatch(value):
+        raise ValueError("theme must be a GDELT theme code")
+    return value
+
+
+def _tone(value: Any) -> Optional[Decimal]:
+    """GDELT average tone: signed, NUMERIC(8, 4)."""
+    dec = _optional_decimal(value)
+    if dec is None:
+        return None
+    dec = dec.quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+    if abs(dec) >= 10_000:
+        raise ValueError("number is out of range")
+    return dec
+
+
+Theme = Annotated[str, BeforeValidator(_theme)]
+
+
+class GdeltThemeVolume(GlobalRecord):
+    """One theme on one UTC day: article volume and average tone."""
+
+    DB_COLUMNS = ("theme", "day", "article_count", "total_articles", "avg_tone")
+
+    theme: Theme
+    day: RequiredDate
+    article_count: int = Field(ge=0, strict=True)
+    total_articles: Optional[int] = Field(default=None, ge=0, strict=True)
+    avg_tone: Annotated[Optional[Decimal], BeforeValidator(_tone)] = None
+
+
+class GdeltThemeArticle(GlobalRecord):
+    """One evidence article for a theme on the target day."""
+
+    DB_COLUMNS = ("theme", "day", "url", "title", "domain", "seen_at")
+
+    theme: Theme
+    day: RequiredDate
+    url: Annotated[str, BeforeValidator(_bounded(_optional_link, 2048))]
+    title: Annotated[Optional[str], BeforeValidator(_text_validator(500))] = None
+    domain: Annotated[Optional[str], BeforeValidator(_text_validator(255))] = None
+    seen_at: Optional[datetime] = None
+
+    @field_validator("seen_at")
+    @classmethod
+    def _aware(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("seen_at must be timezone-aware")
+        return v
+
+
+class GdeltSpikeResult(GlobalRecord):
+    """Derived: whether a theme's target-day volume is a spike (rule_version)."""
+
+    DB_COLUMNS = (
+        "theme",
+        "day",
+        "article_count",
+        "baseline_median",
+        "observed_baseline_days",
+        "ratio",
+        "is_spike",
+        "rule_version",
+    )
+
+    theme: Theme
+    day: RequiredDate
+    article_count: int = Field(ge=0, strict=True)
+    baseline_median: Annotated[
+        Optional[Decimal], BeforeValidator(_decimal_validator(2, 12))
+    ] = None
+    observed_baseline_days: int = Field(ge=0, le=32767, strict=True)
+    ratio: Annotated[Optional[Decimal], BeforeValidator(_decimal_validator(2, 10))] = (
+        None
+    )
+    is_spike: Optional[bool] = None
+    rule_version: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
+
+
+_PROVIDER = re.compile(r"[a-z0-9_]{1,32}")
+_positive_cap = _decimal_validator(2, 24)
+
+
+def _market_cap(value: Any) -> Optional[Decimal]:
+    dec = _positive_cap(value)
+    if dec is not None and dec <= 0:
+        raise ValueError("market cap must be positive")
+    return dec
+
+
+def _provider(value: Any) -> str:
+    if not isinstance(value, str) or not _PROVIDER.fullmatch(value):
+        raise ValueError("provider must be an adapter name")
+    return value
+
+
+class MarketCapRecord(SourceRecord):
+    """One security's market cap from one adapter (M4). The ticker is canonical.
+
+    `value_currency` is the currency `value` is reported in, stored in the
+    `currency` column. It is deliberately not SourceRecord.currency, which the
+    importer writes to securities.currency: a provider's reporting currency is
+    not the listing's trading currency, and this source never edits securities.
+    """
+
+    DB_COLUMNS = (
+        "value",
+        "provider",
+        "issuer_level",
+        "observed_at",
+        "sector",
+        "industry",
+    )
+
+    value: Annotated[Optional[Decimal], BeforeValidator(_market_cap)] = None
+    value_currency: Annotated[str, BeforeValidator(_text_validator(3, required=True))]
+    provider: Annotated[str, BeforeValidator(_provider)]
+    issuer_level: bool = Field(strict=True)
+    observed_at: Optional[datetime] = None
+    sector: Annotated[Optional[str], BeforeValidator(_text_validator(64))] = None
+    industry: Annotated[Optional[str], BeforeValidator(_text_validator(128))] = None
+
+    @field_validator("value_currency")
+    @classmethod
+    def _value_currency(cls, v: str) -> str:
+        if not re.fullmatch(r"[A-Z]{3}", v):
+            raise ValueError("currency must be a 3-letter code")
+        return v
+
+    @field_validator("observed_at")
+    @classmethod
+    def _aware(cls, v: Optional[datetime]) -> Optional[datetime]:
+        if v is not None and v.tzinfo is None:
+            raise ValueError("observed_at must be timezone-aware")
+        return v
+
+    def db_values(self) -> Dict[str, Any]:
+        return {**super().db_values(), "currency": self.value_currency}
+
+
+RECORD_MODELS: Dict[str, type[ContractRecord]] = {
     "congress_trades": CongressTrade,
     "ark_holdings": ArkHolding,
     "insider_trades": InsiderTrade,
     "short_interest": ShortInterestRecord,
+    "gdelt_theme_volume": GdeltThemeVolume,
+    "gdelt_theme_articles": GdeltThemeArticle,
+    "gdelt_spike_results": GdeltSpikeResult,
+    "market_caps": MarketCapRecord,
 }
 
 # Top-level key holding the record list in each fetcher's JSON output.
@@ -480,4 +636,4 @@ RECORDS_KEY = {
 }
 
 # Sources whose rows are one-per-security (unique (batch_id, security_id)).
-ONE_ROW_PER_SECURITY = frozenset({"ark_holdings", "short_interest"})
+ONE_ROW_PER_SECURITY = frozenset({"ark_holdings", "short_interest", "market_caps"})

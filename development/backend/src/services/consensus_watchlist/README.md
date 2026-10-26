@@ -19,7 +19,7 @@ reads all four back and ranks them.
 
 | Signal | Source | Script | Output File | Key needed |
 |---|---|---|---|---|
-| **Congress trades** | Financial Modeling Prep | `fetchers/fmp.py` | `trades_congress.json` | `FMP_API_KEY` |
+| **Congress trades** | Senate: Financial Modeling Prep. House: Clerk of the House PTRs (`fetchers/house_clerk.py`), falling back to FMP if that fails | `fetchers/fmp.py` | `trades_congress.json` | `FMP_API_KEY` (House Clerk needs none) |
 | **ARK holdings** | arkfunds.io API | `fetchers/ark.py` | `ark_holdings.json` | — |
 | **Insider trades** | Finnhub (SEC Form 4) | `fetchers/insider.py` | `trades_insider.json` | `FINNHUB_API_KEY` |
 | **Short interest** | Nasdaq public quote API | `fetchers/short_interest.py` | `short_interest.json` | — |
@@ -27,6 +27,14 @@ reads all four back and ranks them.
 
 All outputs land in `development/database/local_data/`, resolved through
 `paths.py` — see *Paths* below.
+
+The House Clerk fetcher caches each parsed report in
+`local_data/house_clerk_cache.json` (filed reports never change), so only
+new filings are downloaded after the first run. `trades_congress.json`
+records which source the House rows came from in `house_source`, and the
+Clerk run's coverage (parsed, scanned, failed reports) in `house_clerk`.
+Congressional disclosure data may not be used for commercial purposes
+(5 U.S.C. § 13107(c)), whichever source it comes from.
 
 ### On the short-interest source
 
@@ -75,7 +83,7 @@ Ranking is deterministic: same inputs, same order, every run.
 
 The legacy JSON path keeps the `fab7188` Congress dedup key:
 `(politician_name.lower(), ticker, transaction_date, trade_type.lower())`,
-keeping the first row. `fmp.deduplicate` serves that legacy writer; the database
+keeping the first row. `fmp.legacy_deduplicate` serves that legacy writer; the database
 collector uses `deduplicate_proven_repeats`, which retains cross-provider
 observations and unidentified repeated rows. The legacy short-interest parser
 keeps a ticker when a number is malformed and sets that field to null. The

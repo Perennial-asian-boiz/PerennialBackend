@@ -71,8 +71,11 @@ def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
     import secrets
 
     suffix = secrets.token_hex(6)
-    owner, importer, reader = [f"ops_test_{r}_{suffix}" for r in ("owner", "importer", "reader")]
-    roles = (owner, importer, reader)
+    # M5 R1: provisioning manages four groups; the API role is covered in test_read_api.py.
+    owner, importer, reader, api = [
+        f"ops_test_{r}_{suffix}" for r in ("owner", "importer", "reader", "api")
+    ]
+    roles = (owner, importer, reader, api)
     with engine.begin() as conn:
         # Legacy broad grants, including column grants, must be removed on reapply.
         provision(conn.connection.driver_connection, roles, phase="bootstrap")
@@ -125,6 +128,44 @@ def test_roles_enforce_immutable_data_and_support_imports(engine, fixture_path):
                                         {"role": importer, "table": "perennial." + table}).scalar()
             assert conn.execute(text("SELECT has_table_privilege(:role,'perennial.current_publication','UPDATE')"),
                                 {"role": importer}).scalar()
+            # M4: aliases are append-only for imports; profiles are owner-seeded reference data.
+            privilege = "SELECT has_table_privilege(:role,:table,:privilege)"
+            for role, table, priv, allowed in (
+                (importer, "security_identifiers", "INSERT", True),
+                (importer, "security_identifiers", "UPDATE", False),
+                (importer, "security_identifiers", "DELETE", False),
+                (importer, "company_profiles", "SELECT", True),
+                (importer, "company_profiles", "INSERT", False),
+                (importer, "company_profiles", "UPDATE", False),
+                (reader, "security_identifiers", "SELECT", True),
+                (reader, "company_profiles", "SELECT", True),
+                (reader, "security_identifiers", "INSERT", False),
+            ):
+                assert conn.execute(text(privilege), {"role": role, "table": "perennial." + table,
+                                                      "privilege": priv}).scalar() is allowed
+            assert not conn.execute(text("SELECT has_column_privilege(:role,'perennial.securities',"
+                                         "'company_profile_id','UPDATE')"), {"role": importer}).scalar()
+            # S1-12 F1: the summary job may UPDATE exactly these seven columns of
+            # company_profiles, listed here (not read from SUMMARY_COLUMNS) so a widened
+            # grant fails; no other column, no INSERT on any, no table-level UPDATE.
+            summary_columns = {"summary", "summary_grade", "summary_status", "summary_source_name",
+                               "summary_source_url", "summary_as_of", "description_digest"}
+            columns = set(conn.execute(text(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_schema='perennial' AND table_name='company_profiles'")).scalars())
+            assert summary_columns < columns
+            column_privilege = "SELECT has_column_privilege(:role,'perennial.company_profiles',:column,:privilege)"
+            for column in sorted(columns):
+                for role, priv, allowed in (
+                    (importer, "UPDATE", column in summary_columns),
+                    (importer, "INSERT", False),
+                    (reader, "UPDATE", False),
+                ):
+                    assert conn.execute(text(column_privilege), {
+                        "role": role, "column": column, "privilege": priv,
+                    }).scalar() is allowed, (role == importer and "importer" or "reader", column, priv)
+            from provision_roles import SUMMARY_COLUMNS
+            assert set(SUMMARY_COLUMNS) == summary_columns
         with engine.begin() as conn:
             conn.execute(text(f'SET LOCAL ROLE "{owner}"'))
             conn.execute(text("CREATE TABLE perennial.future_table (id bigint GENERATED ALWAYS AS IDENTITY)"))

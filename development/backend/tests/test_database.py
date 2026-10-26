@@ -19,7 +19,7 @@ from src.db.queries import latest_rows, latest_successful_batch_id, latest_succe
 from src.ingestion import importer
 from src.ingestion.files import read_fetcher_file
 from src.ingestion.importer import CollectionOutcome, import_collection, prune_failed_diagnostics
-from tests.conftest import alembic_config
+from conftest import alembic_config
 
 pytestmark = pytest.mark.db
 
@@ -40,6 +40,11 @@ def fixture_outcome(fixture_path, source, mutate=None):
         mutate(data[KEYS[source]])
     envelope = {k: v for k, v in data.items() if k != KEYS[source]}
     return CollectionOutcome.success(source, "fixture", data[KEYS[source]], envelope=envelope)
+
+
+def universe(engine, fixture_path):
+    """Root sources register the universe that derived sources resolve against."""
+    assert import_collection(engine, fixture_outcome(fixture_path, "ark_holdings")).succeeded
 
 
 def count(engine, table, **where):
@@ -93,6 +98,9 @@ def test_constraints_reject_bad_rows(engine):
 
 @pytest.mark.parametrize("source", list(FILES))
 def test_each_fixture_imports_then_reuses(engine, fixture_path, source):
+    if source in ("insider_trades", "short_interest"):
+        universe(engine, fixture_path)
+    batches = count(engine, source_batches)
     first = import_collection(engine, fixture_outcome(fixture_path, source))
     assert first.succeeded and first.reused_batch is False
     table = models.SOURCE_TABLES[source]
@@ -101,8 +109,8 @@ def test_each_fixture_imports_then_reuses(engine, fixture_path, source):
 
     second = import_collection(engine, fixture_outcome(fixture_path, source))
     assert second.succeeded and second.reused_batch is True and second.batch_id == first.batch_id
-    assert count(engine, source_batches) == 1 and count(engine, table) == rows
-    assert count(engine, ingestion_runs, status="succeeded") == 2
+    assert count(engine, source_batches) == batches + 1 and count(engine, table) == rows
+    assert count(engine, ingestion_runs, status="succeeded", source=source) == 2
 
 
 def test_fixture_values_round_trip(engine, fixture_path):
@@ -144,6 +152,7 @@ def test_fixture_values_round_trip(engine, fixture_path):
 
 
 def test_fetched_at_only_change_reuses_batch(engine, fixture_path):
+    universe(engine, fixture_path)
     first = import_collection(engine, fixture_outcome(fixture_path, "insider_trades"))
 
     def restamp(rows):
@@ -225,6 +234,7 @@ def test_database_error_mid_import_rolls_back_everything(engine, fixture_path, m
 
 
 def test_failed_collection_keeps_previous_batch(engine, fixture_path):
+    universe(engine, fixture_path)
     good = import_collection(engine, fixture_outcome(fixture_path, "short_interest"))
     failed = import_collection(engine, CollectionOutcome.failure(
         "short_interest", "live", "partial_collection",
@@ -233,7 +243,7 @@ def test_failed_collection_keeps_previous_batch(engine, fixture_path):
     ))
     assert failed.error_code == "partial_collection"
     assert failed.error_summary.endswith("1 of 2 short-interest tickers failed: ZZAA (http_503)")
-    assert count(engine, source_batches) == 1
+    assert count(engine, source_batches) == 2
     with engine.connect() as conn:
         assert latest_successful_batch_id(conn, "short_interest") == good.batch_id
         stored = conn.execute(select(ingestion_runs.c.diagnostics)
@@ -336,9 +346,11 @@ def test_concurrent_identical_imports_create_one_batch(engine, fixture_path):
 
 
 def test_concurrent_sources_share_new_securities(engine, fixture_path):
-    sources = list(FILES)
-    results = _run_parallel(len(sources), lambda i: import_collection(engine, fixture_outcome(fixture_path, sources[i])))
-    assert all(r.succeeded for r in results)
+    # Roots register concurrently (ZZAA is in both); derived sources then resolve.
+    for sources in (["congress_trades", "ark_holdings"], ["insider_trades", "short_interest"]):
+        results = _run_parallel(
+            len(sources), lambda i: import_collection(engine, fixture_outcome(fixture_path, sources[i])))
+        assert all(r.succeeded for r in results)
     with engine.connect() as conn:
         symbols = conn.execute(select(securities.c.symbol)).scalars().all()
     assert len(symbols) == len(set(symbols))

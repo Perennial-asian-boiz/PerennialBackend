@@ -4,6 +4,21 @@ This service watches GDELT themes such as oil prices, interest rates and trade d
 
 GDELT gives us global event coverage. It doesn't score company sentiment: that is FinBERT's job, on the `FinBERT` branch. The tone numbers below are GDELT's own word-list score, not FinBERT output.
 
+## Current data model: the ingestion contract
+
+Since the GDELT contract rework (`docs/work-items/gdelt-contract-design-note.md`), each daily run is three ordinary ingestion runs with immutable batches (`contract.py`):
+
+| Source | Table | What one batch holds |
+|---|---|---|
+| `gdelt_theme_volume` | `gdelt_theme_volume` | Every watched theme's daily volume and tone over 90 days up to the target day. Missing timeline days are coverage gaps in the batch envelope, never zero rows. |
+| `gdelt_theme_articles` | `gdelt_theme_articles` | Up to 5 evidence articles per theme for the target day |
+| `gdelt_spike_results` (derived) | `gdelt_spike_results` | Rule `spike-v2` applied to one recorded volume batch (named in `run_dependencies`). Missing baseline days are unknown, not zero, and too few observed days gives `is_spike = null`. |
+
+- **Partial runs:** any failed theme fails that source's batch, and readers keep the last good batch.
+- **Readers:** read the latest successful run of a source, as for the watchlist sources.
+- **Watchlist isolation:** GDELT is in `SUBJECTLESS_SOURCES`, not `WATCHLIST_SOURCES`, so it can never block or degrade the watchlist publication.
+- **Legacy tables:** the tables below (`gdelt_theme_days`, `gdelt_articles`, `gdelt_spike_checks`, migration `0005`) are **legacy**. Nothing writes them any more, and a later contract migration drops them.
+
 ## What we built
 
 All work is on the `GDELT` branch. Nothing reaches `main` until the feature is finished.

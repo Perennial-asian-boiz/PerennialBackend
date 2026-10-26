@@ -6,7 +6,7 @@ Describe the user-visible or operational behavior and the reason for the change.
 
 - [ ] Relevant tests pass against synthetic data, including PostgreSQL tests when database behavior changes.
 - [ ] Ruff lint and format checks pass for the owned core packages.
-- [ ] Strict mypy passes for `src/db`, `src/ingestion`, and `src/pipeline`.
+- [ ] Strict mypy passes for `src/db`, `src/ingestion`, `src/pipeline`, and `src/api`.
 - [ ] Alembic upgrade → downgrade → upgrade and drift checks pass for schema changes.
 - [ ] Dependency audit result is reviewed; any finding has a tracked disposition.
 - [ ] Documentation and operations notes reflect changed behavior and risks.
