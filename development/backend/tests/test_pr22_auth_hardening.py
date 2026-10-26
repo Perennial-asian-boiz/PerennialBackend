@@ -1839,14 +1839,9 @@ AH9D_INVALID = {
     "share_not_an_integer": {"API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "1.5"},
     "recovery_above_the_total": {"API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "26"},
     "signup_above_the_total": {"API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "30"},
-    "ceilings_together_reach_the_total": {
-        "API_EMAIL_BUDGET_RECOVERY_PER_HOUR": "13",
-        "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "12",
-    },
-    "share_equal_to_a_ceiling": {"API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "6"},
-    "share_above_one_ceiling": {
-        "API_EMAIL_BUDGET_SIGNUP_PER_HOUR": "4",
-        "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "5",
+    "share_above_total": {
+        "API_EMAIL_BUDGET_PER_HOUR": "25",
+        "API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR": "26",
     },
 }
 
@@ -1866,8 +1861,15 @@ def test_ah9d_invalid_email_budgets_refuse_at_startup(
 
 
 def test_ah9d_the_default_budget_is_valid_and_starts(engine, pr22_roles, monkeypatch):  # noqa: F811
-    with budgeted(engine, pr22_roles, monkeypatch) as (client, _, _):
+    with budgeted(engine, pr22_roles, monkeypatch) as (client, _, app):
         assert client.get("/health").status_code == 200
+        config = app.state.rate_limiter.config
+        assert (
+            config.email_budget_per_hour,
+            config.email_budget_recovery_per_hour,
+            config.email_budget_signup_per_hour,
+            config.email_budget_per_client_per_hour,
+        ) == (60, 60, 60, 60)
 
 
 @pytest.mark.parametrize("code", ["over_email_send_rate_limit", "rate_limited"])

@@ -190,8 +190,23 @@ def test_default_limits_are_burst_30_refilling_60_a_minute():
     defaults = RateLimitConfig()
     assert (defaults.burst, defaults.per_minute) == (30, 60)
     assert (defaults.auth_burst, defaults.auth_per_hour) == (5, 30)
+    assert (
+        defaults.email_budget_per_hour,
+        defaults.email_budget_recovery_per_hour,
+        defaults.email_budget_signup_per_hour,
+        defaults.email_budget_per_client_per_hour,
+    ) == (60, 60, 60, 60)
     assert defaults.max_clients == 10000
     assert defaults.trusted_proxies == () and defaults.trust_all_proxies is False
+
+
+def test_default_email_client_share_allows_60_then_refills_once_per_minute():
+    from src.api.rate_limit import RateLimitConfig, RateLimiter
+
+    limiter = RateLimiter(RateLimitConfig())
+    for _ in range(60):
+        assert limiter.check("email", "test-client") is None
+    assert limiter.check("email", "test-client") == 60
 
 
 # ── RL-4, RL-5, RL-6, RL-6b: keying ─────────────────────
