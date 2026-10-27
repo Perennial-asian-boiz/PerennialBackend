@@ -5,8 +5,9 @@ with no model of any kind).
 For each consensus-list member (Q11) the job fetches a description through a
 provider-neutral DescriptionAdapter and stores, on the member's company
 profile, the first window of 2–4 consecutive sentences that reads at
-Flesch–Kincaid grade 8 or below (decision 72: verbatim sentence selection,
-falling back to "Summary not available"). Only the excerpt is stored, with the
+Flesch–Kincaid grade 13 or below (decision 72: verbatim sentence selection,
+falling back to "Summary not available"; decision 88 raised the limit from 8,
+since real descriptions read around grade 16). Only the excerpt is stored, with the
 source's name and https link; the description itself never is.
 
 Policy:
@@ -24,9 +25,10 @@ Policy:
     still succeeds. A member without a company profile has nowhere to store a
     summary: it isn't fetched and counts as unavailable.
   * Skip key: description_digest is the SHA-256 of the description as fetched
-    together with its link, the source's name and SELECTOR_VERSION. A profile
-    whose digest is unchanged and that already has an outcome isn't rewritten,
-    so bumping SELECTOR_VERSION reprocesses every row (checker N1). A changed
+    together with its link, the source's name, SELECTOR_VERSION and MAX_GRADE.
+    A profile whose digest is unchanged and that already has an outcome isn't
+    rewritten, so bumping SELECTOR_VERSION or changing MAX_GRADE reprocesses
+    every row (checker N1), including rows stored "unavailable". A changed
     description is processed again; when it has no passing window the stored
     summary is cleared, because it no longer matches its source.
   * Each run logs one coverage line (CS-7): counts only, never company text or
@@ -59,8 +61,8 @@ from src.ingestion.diagnostics import failure_code
 logger = logging.getLogger(__name__)
 
 # Part of every description_digest: change it whenever selection changes.
-SELECTOR_VERSION = "s1-12-v1"
-MAX_GRADE = 8.0
+SELECTOR_VERSION = "s1-12-v2"
+MAX_GRADE = 13.0  # decision 88 (was 8.0); also part of every description_digest
 WINDOW_SIZES = (4, 3, 2)
 MAX_SUMMARY_CHARS = 4000  # ck_company_profiles_summary_not_blank
 MAX_SOURCE_NAME_CHARS = 128  # company_profiles.summary_source_name
@@ -236,6 +238,7 @@ def _https(url: str) -> bool:
 def _digest(source_name: str, description: Description | None) -> str:
     key = {
         "selector_version": SELECTOR_VERSION,
+        "max_grade": MAX_GRADE,
         "source_name": source_name,
         "url": description.url if description else None,
         "text": description.text if description else None,

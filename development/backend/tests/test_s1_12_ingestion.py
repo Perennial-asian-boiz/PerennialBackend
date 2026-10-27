@@ -186,7 +186,7 @@ def test_cs2_the_first_passing_window_is_taken_verbatim(case):
         assert excerpt is None
     else:
         assert excerpt is not None and excerpt.text == expected
-        assert float(excerpt.grade) <= 8.0
+        assert float(excerpt.grade) <= 13.0  # MAX_GRADE, 8 until 2026-10-26
 
 
 def test_cs2_a_none_description_is_unavailable():
