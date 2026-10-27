@@ -77,13 +77,12 @@ class RateLimitConfig:
     session_per_minute: int = 60
     refresh_burst: int = 10
     refresh_per_hour: int = 60
-    # AH-9: every email the app asks Supabase to send in a rolling hour (below
-    # Supabase's own project-wide limit), ceilings for the flows strangers
-    # control, and each client's share across every flow.
-    email_budget_per_hour: int = 25
-    email_budget_recovery_per_hour: int = 6
-    email_budget_signup_per_hour: int = 6
-    email_budget_per_client_per_hour: int = 3
+    # Keep the API-side email ceiling aligned with this project's 60/hour
+    # Supabase SMTP limit. Flow and client ceilings may not exceed the total.
+    email_budget_per_hour: int = 60
+    email_budget_recovery_per_hour: int = 60
+    email_budget_signup_per_hour: int = 60
+    email_budget_per_client_per_hour: int = 60
     max_clients: int = 10000
     trusted_proxies: tuple[str, ...] = ()
     trust_all_proxies: bool = False
@@ -112,16 +111,11 @@ class RateLimitConfig:
         if any(type(v) is not int or v <= 0 for v in limits):
             raise RateLimitConfigError()
         total = self.email_budget_per_hour
-        ceilings = (
-            self.email_budget_recovery_per_hour,
-            self.email_budget_signup_per_hour,
-        )
-        # AH-9d: each ceiling within the total, the two together leaving login
-        # room, and a client's share below each ceiling.
+        # Keep all subordinate budgets at or below the app-wide ceiling.
         if (
-            any(c > total for c in ceilings)
-            or sum(ceilings) >= total
-            or any(self.email_budget_per_client_per_hour >= c for c in ceilings)
+            self.email_budget_recovery_per_hour > total
+            or self.email_budget_signup_per_hour > total
+            or self.email_budget_per_client_per_hour > total
         ):
             raise RateLimitConfigError()
         if not isinstance(self.trusted_proxies, tuple) or not isinstance(

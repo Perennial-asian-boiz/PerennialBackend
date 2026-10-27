@@ -154,10 +154,10 @@ Every route above is limited per client, before any other work: a limited reques
 | `API_SESSION_RATE_LIMIT_PER_MINUTE` | `60` | session bucket refill rate |
 | `API_REFRESH_RATE_LIMIT_BURST` | `10` | refresh bucket capacity (`POST /v1/auth/refresh`) |
 | `API_REFRESH_RATE_LIMIT_PER_HOUR` | `60` | refresh bucket refill rate |
-| `API_EMAIL_BUDGET_PER_HOUR` | `25` | every email the API asks Supabase to send in a rolling hour, app-wide |
-| `API_EMAIL_BUDGET_RECOVERY_PER_HOUR` | `6` | app-wide ceiling for forgot-password emails |
-| `API_EMAIL_BUDGET_SIGNUP_PER_HOUR` | `6` | app-wide ceiling for signup and resend-confirmation emails |
-| `API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR` | `3` | each client's share of emails, across every flow |
+| `API_EMAIL_BUDGET_PER_HOUR` | `60` | every email the API asks Supabase to send in a rolling hour, app-wide |
+| `API_EMAIL_BUDGET_RECOVERY_PER_HOUR` | `60` | app-wide ceiling for forgot-password emails, subject to the total |
+| `API_EMAIL_BUDGET_SIGNUP_PER_HOUR` | `60` | app-wide ceiling for signup and resend-confirmation emails, subject to the total |
+| `API_EMAIL_BUDGET_PER_CLIENT_PER_HOUR` | `60` | each client's share of emails, across every flow; the app-wide total still applies |
 | `API_RATE_LIMIT_MAX_CLIENTS` | `10000` | buckets kept per kind; the least recently used is evicted, and an evicted client starts again full |
 | `API_TRUSTED_PROXIES` | empty | comma-separated IPs or CIDRs of **every** proxy hop in front of the API |
 | `API_TRUST_ALL_PROXIES` | unset | `1` trusts every peer's `X-Forwarded-For` |
