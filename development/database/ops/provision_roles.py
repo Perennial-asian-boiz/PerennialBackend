@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 
 import psycopg
 from psycopg import sql
@@ -55,6 +56,11 @@ SUMMARY_COLUMNS = ("summary", "summary_grade", "summary_status", "summary_source
 SUPABASE_API_ROLES = ("anon", "authenticated", "service_role")
 SHARED_DATABASE_NOTICE = ("Schema auth exists, so this is a shared (Supabase) database: PUBLIC keeps CONNECT and "
                           "TEMPORARY, which the platform's own logins connect through")
+# Grants before an upgrade (decision 85): the listed tables a later migration creates are
+# skipped, so they'd have no ACL until the grants run again.
+BEHIND_HEAD_NOTICE = ("The database's migration revision is older than this code's head, so listed tables that "
+                      "a later migration creates were skipped: rerun the grants after the upgrade")
+ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
 log = logging.getLogger(__name__)
 
 
@@ -168,10 +174,13 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
     if phase == "bootstrap":
         return
     actual = {r[0] for r in conn.execute("SELECT tablename FROM pg_tables WHERE schemaname='perennial'")}
-    # Every table must have an explicit policy. A policy for a table a later migration
-    # creates is fine: newer code provisioning a database not yet upgraded (MO-2).
-    if actual - set(TABLES):
+    # Every table must have an explicit policy, and every listed table must exist. The one
+    # exception is a database behind this code's head (newer code before the upgrade, MO-2):
+    # its missing tables are skipped with a warning to rerun the grants after the upgrade.
+    if actual - set(TABLES) or (set(TABLES) - actual and not _behind_head(conn, owner)):
         raise ValueError("Application table policy differs from migrated schema; update explicit grants")
+    if set(TABLES) - actual:
+        log.warning(BEHIND_HEAD_NOTICE)
     present = [t for t in TABLES if t in actual]
     # Objects the owner doesn't own yet (after a restore, the admin's) move to the owner first.
     # Read from the catalog: a regclass lookup would need USAGE on the owner's schema.
@@ -234,6 +243,31 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
             if present:
                 conn.execute(sql.SQL("REVOKE ALL ON TABLE public.alembic_version FROM {}")
                              .format(sql.SQL(", ").join(sql.Identifier(r) for r in present)))
+
+
+def _behind_head(conn, owner):
+    """True only if the database's Alembic revision is an ancestor of this code's head.
+
+    No version table, an unknown revision or the head itself is not behind. The admin
+    may lack SELECT on the version table (the owner's, after earlier grants), so it is
+    then read as the owner.
+    """
+    if not conn.execute("SELECT to_regclass('public.alembic_version')").fetchone()[0]:
+        return False
+    query = "SELECT version_num FROM public.alembic_version"
+    if conn.execute("SELECT has_table_privilege('public.alembic_version', 'SELECT')").fetchone()[0]:
+        rows = conn.execute(query).fetchall()
+    else:
+        with _as_owner(conn, owner):
+            rows = conn.execute(query).fetchall()
+    if len(rows) != 1:
+        return False
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(Config(str(ALEMBIC_INI)))
+    head = script.get_current_head()
+    return rows[0][0] != head and rows[0][0] in {r.revision for r in script.iterate_revisions(head, "base")}
 
 
 @contextmanager
