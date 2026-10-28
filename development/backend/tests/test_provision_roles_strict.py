@@ -18,6 +18,13 @@ Pinned here (ops chooses between the reviewers' two options):
   TABLES and gives every IMMUTABLE table exactly its ACL; rerunning grants after a
   behind-head grant and the upgrade gives the new tables their ACL.
 Every database here is a scratch database; roles are uniquely named and dropped.
+
+T1 (checker on ops's 7773f31, 2026-10-28): option 2 was built, so the chosen
+behaviour is pinned below. Behind head, grants succeed, log BEHIND_HEAD_NOTICE and
+grant the tables that exist. "Behind head" means exactly one alembic_version row
+naming an ancestor of the code's head. An unknown revision, no version table, or
+an empty or multi-row one, with a listed table missing, refuses with the fixed
+text.
 """
 
 import logging
@@ -215,3 +222,70 @@ def test_rerunning_grants_after_the_upgrade_gives_the_new_tables_their_acl(
         _assert_immutable_acls(
             scratch, roles, [t for t in module.IMMUTABLE if t in new]
         )
+
+
+# ── T1: the chosen behaviour (option 2) ──────────────────
+
+
+@pytest.mark.db
+def test_grants_behind_head_succeed_warn_and_grant_the_present_tables(engine, roles):
+    module = ops_module("provision_roles")
+    with _database(engine) as (_, scratch):
+        provision_roles(scratch, roles, "bootstrap")
+        _upgrade(scratch, _behind_head())
+        present = _tables(scratch)
+        assert set(module.TABLES) - present  # listed tables still missing
+        with _provisioning_warnings() as messages:
+            provision_roles(scratch, roles, "grants")  # must not raise
+        assert module.BEHIND_HEAD_NOTICE in messages
+        _assert_immutable_acls(
+            scratch, roles, [t for t in module.IMMUTABLE if t in present]
+        )
+        assert _tables(scratch) == present  # nothing created
+
+
+def _set_versions(scratch, *versions):
+    with scratch.begin() as conn:
+        conn.execute(text("DELETE FROM public.alembic_version"))
+        for version in versions:
+            conn.execute(
+                text("INSERT INTO public.alembic_version (version_num) VALUES (:v)"),
+                {"v": version},
+            )
+
+
+@contextmanager
+def _behind_head_database(engine, roles):
+    """A scratch database at the head's down_revision, bootstrapped."""
+    with _database(engine) as (_, scratch):
+        provision_roles(scratch, roles, "bootstrap")
+        _upgrade(scratch, _behind_head())
+        yield scratch
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    "versions",
+    [("zz99",), (), "two_rows"],
+    ids=["unknown_revision", "empty_version_table", "two_version_rows"],
+)
+def test_a_version_that_is_not_a_single_ancestor_refuses(engine, roles, versions):
+    with _behind_head_database(engine, roles) as scratch:
+        if versions == "two_rows":
+            with scratch.connect() as conn:
+                current = _version(conn)
+            versions = (current, _script().get_revision(current).down_revision)
+        _set_versions(scratch, *versions)
+        with pytest.raises(ValueError) as refused:
+            provision_roles(scratch, roles, "grants")
+        assert str(refused.value) == REFUSAL
+
+
+@pytest.mark.db
+def test_no_version_table_refuses(engine, roles):
+    with _behind_head_database(engine, roles) as scratch:
+        with scratch.begin() as conn:
+            conn.execute(text("DROP TABLE public.alembic_version"))
+        with pytest.raises(ValueError) as refused:
+            provision_roles(scratch, roles, "grants")
+        assert str(refused.value) == REFUSAL
