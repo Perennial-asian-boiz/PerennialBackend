@@ -5,10 +5,11 @@ with no model of any kind).
 For each consensus-list member (Q11) the job fetches a description through a
 provider-neutral DescriptionAdapter and stores, on the member's company
 profile, the first window of 2–4 consecutive sentences that reads at
-Flesch–Kincaid grade 13 or below (decision 72: verbatim sentence selection,
-falling back to "Summary not available"; decision 88 raised the limit from 8,
-since real descriptions read around grade 16). Only the excerpt is stored, with the
-source's name and https link; the description itself never is.
+Flesch–Kincaid grade 16 or below (decision 72: verbatim sentence selection,
+falling back to "Summary not available"; decision 88 raised the limit from 8
+to 13, and decision 89 to 16 with SEC EDGAR as the source). Only the excerpt
+is stored, with the source's name and https link; the description itself
+never is. The CLI's adapter is sec_descriptions.SecTenKDescriptions.
 
 Policy:
   * Sentences come from split_sentences, our fixed splitter (textstat's splits
@@ -62,7 +63,7 @@ logger = logging.getLogger(__name__)
 
 # Part of every description_digest: change it whenever selection changes.
 SELECTOR_VERSION = "s1-12-v2"
-MAX_GRADE = 13.0  # decision 88 (was 8.0); also part of every description_digest
+MAX_GRADE = 16.0  # decision 89 (13.0 from decision 88, 8.0 before); in every digest
 WINDOW_SIZES = (4, 3, 2)
 MAX_SUMMARY_CHARS = 4000  # ck_company_profiles_summary_not_blank
 MAX_SOURCE_NAME_CHARS = 128  # company_profiles.summary_source_name

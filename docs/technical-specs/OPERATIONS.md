@@ -174,44 +174,72 @@ coverage, freshness or lineage rules to make a publication appear current.
 ## S1-12 company summaries (manual, staging only)
 
 Bryan runs this by hand to demo S1-12 on staging (decision 76). It is never
-scheduled and is not part of `run-pipeline`. Descriptions come from FMP's
-existing profile call (decision 75 (a)), still gated by decision 3's terms
-review, so don't run it against production.
+scheduled and is not part of `run-pipeline`. Descriptions come from SEC EDGAR:
+Item 1 ("Business") of each company's latest 10-K (decisions 89-90). FMP is
+no longer used: the command makes no FMP call and doesn't read `FMP_API_KEY`.
 
 Environment, the same as the worker's:
 - `DATABASE_URL`: the application's importer login (exactly importer
   membership). The importer may update only the seven summary columns of
   `company_profiles`.
-- `FMP_API_KEY`: the FMP key. A missing or placeholder key stops the command
-  before any request.
+- `SEC_USER_AGENT`: the contact SEC requires in every request's `User-Agent`,
+  the same setting as the fundamentals job. Use a team mailbox, for example
+  `Perennial Research team@<our domain>`. A missing or blank value, or one
+  containing `example.com` (the `.env.example` placeholder), stops the command
+  before any request or write. It isn't a credential, but it is never logged.
 
 ```sh
 cd development/backend
 python -m src.ingestion.cli summaries
 ```
 
-It summarizes the current production publication's consensus members: one FMP
-`/stable/profile` call per member with a company profile, on the same daily
-FMP quota as market caps and Congress. Output on stdout:
+It summarizes the current production publication's consensus members. SEC
+requests, all with only the `User-Agent` header:
+- 1 to `www.sec.gov/files/company_tickers.json`, only if some member's
+  company profile has no seeded CIK;
+- 1 to `data.sec.gov/submissions/CIK##########.json` per company profile with
+  a CIK (share classes such as GOOG and GOOGL share one);
+- 1 to the 10-K's primary document under `www.sec.gov/Archives/edgar/data/`
+  when that company has a usable 10-K.
+
+So about 2 per member at most: roughly 341 for 170 members. Requests are spaced
+at least 0.12 s apart (under 8.4 a second; SEC allows 10), so a full run takes
+at least about 41 s plus download time. Every run downloads each 10-K again;
+skipping unchanged filings is a possible follow-up.
+
+Which filing: the newest `10-K` (by filing date) in the company's recent
+filings, filed within the last 550 days. Amendments (`10-K/A`), `10-KT`,
+`20-F` and `40-F` don't count, so a company without a recent 10-K shows
+"Summary not available" (decision 91). The text is the prose of Item 1, up to
+the next Item 1A/1B/1C/2/3 heading. Filings laid out as a cross-reference index
+have no Item 1 heading and are unavailable too.
+
+Output on stdout:
 - Success, exit 0: `{"members": N, "with_summary": A, "unavailable": B}`. `A`
-  members now have a stored 2–4 sentence excerpt at Flesch–Kincaid grade 13
-  or below (8 until 2026-10-26, decision 88). `B` show "Summary not
-  available" (no description, no readable window, or no company profile). A
-  rerun with unchanged descriptions rewrites nothing. The grade limit and the
-  selector version are part of each row's description digest, so the first
-  run after either changes re-checks every stored row once, including those
-  stored "unavailable", with the usual one FMP call per profile.
+  members now have a stored 2–4 sentence excerpt at Flesch–Kincaid grade 16
+  or below (decision 89; 13 from decision 88, 8 before). `B` show "Summary
+  not available" (no CIK, no recent 10-K, no Item 1 prose, no readable window,
+  or no company profile). A rerun with unchanged filings rewrites nothing. The
+  grade limit, the selector version, the source name and the link are part of
+  each row's description digest, so the first run after any of them changes
+  re-checks every stored row once, including those stored "unavailable". The
+  first successful EDGAR run re-decides every member's row stored from FMP.
+  Rows of companies that aren't members keep their FMP summary for now
+  (packet ED-9, waiting on Bryan's E1).
 - Failure, exit 1: `{"error_code": "..."}`. `missing_credential` means
-  `FMP_API_KEY` isn't set. `collection_failed` means an FMP request failed (the
-  stderr log names the symbol and a fixed code). Nothing is written on
-  failure, and earlier summaries stay as they were.
+  `SEC_USER_AGENT` isn't set or is the placeholder. `collection_failed` means
+  an SEC request failed (a 403 or 429 included: SEC may block an IP or refuse a
+  User-Agent). The stderr log names the symbol and a fixed code. Nothing is
+  written on failure, and earlier summaries stay as they were.
 - Exit 2: a configuration or database error (see stderr).
 
-Each stored summary is shown as "Source: Financial Modeling Prep", linked to
-FMP's public home page, https://financialmodelingprep.com/, for every company
-(decision 78 (a): FMP's per-company page only loads after logging in).
+Each stored summary is shown as "Source: SEC EDGAR", linked to the 10-K
+document it came from:
+`https://www.sec.gov/Archives/edgar/data/<CIK>/<accession number without dashes>/<primary document>`.
+`summary_as_of` stays the time it was stored, not the filing date.
 
-No company text, key or provider response appears in the output or logs.
+No company text, filing URL, User-Agent or provider response appears in the
+output or logs.
 
 ## M3 database observability plan (Supabase PostgreSQL 17)
 
