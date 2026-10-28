@@ -22,6 +22,9 @@ FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 ARCHIVE_HOST = "www.sec.gov"
 ARCHIVE_PATH = "/Archives/edgar/data/"
+# Bounds the HTML parsing work per 10-K (F1). The download itself is still
+# bounded by the shared collectors.MAX_RESPONSE_BYTES (50 MiB).
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 MIN_REQUEST_INTERVAL_SECONDS = 0.12
 ANNUAL_FORMS = frozenset({"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"})
 FISCAL_YEARS_KEPT = 6  # 3-year growth, last year's trend and the 5-year chart
@@ -238,16 +241,18 @@ class EdgarClient:
         return response.data
 
     def document(self, url: str) -> bytes | None:
-        """An archive document's raw bytes; None when it's gone (404) or over the body cap.
+        """An archive document's raw bytes; None when it's gone (404) or over a cap.
 
-        Only https://www.sec.gov/Archives/edgar/data/ URLs are fetched; anything
-        else is a bug in the caller and is refused before any request.
+        Only https://www.sec.gov/Archives/edgar/data/ URLs without "." or ".."
+        path segments are fetched; anything else is a bug in the caller and is
+        refused before any request.
         """
         parts = urlsplit(url)
         if (
             parts.scheme != "https"
             or parts.netloc != ARCHIVE_HOST
             or not parts.path.startswith(ARCHIVE_PATH)
+            or any(segment in (".", "..") for segment in parts.path.split("/"))
             or parts.query
             or parts.fragment
         ):
@@ -259,7 +264,7 @@ class EdgarClient:
             if exc.args == ("response_too_large",):
                 return None
             raise
-        if response.status == 404:
+        body: bytes | None = response.data
+        if response.status == 404 or body is None or len(body) > MAX_DOCUMENT_BYTES:
             return None
-        body: bytes = response.data
         return body

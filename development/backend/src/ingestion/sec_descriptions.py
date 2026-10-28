@@ -12,20 +12,23 @@ Per symbol, through EdgarClient's paced _get (User-Agent is the only header):
     symbol has no seed. No CIK: None.
   * Filing (ED-2): filings.recent only; the exact form "10-K" with the greatest
     filingDate, ties to the greatest accessionNumber (10-K/A, 10-KT, 20-F and
-    40-F never count). No 10-K, a submissions 404, or a filing older than
-    MAX_FILING_AGE_DAYS (from today's UTC date): None.
+    40-F never count). A 10-K row with an unreadable date or accession, or a
+    non-string primaryDocument, is skipped (F1). No well-formed 10-K, a
+    submissions 404, or a filing older than MAX_FILING_AGE_DAYS (from today's
+    UTC date): None.
   * Link (ED-6): https://www.sec.gov/Archives/edgar/data/<cik>/<accession
     without dashes>/<primaryDocument>. A primaryDocument that isn't a plain
     .htm/.html filename is None, so no path from a response can change host or
     directory.
   * Text (ED-3): item_1_text over the document, decoded as UTF-8 (BOM allowed)
-    or else cp1252 with replacement. A 404, an oversized document, or no Item 1
-    prose is None.
+    or else cp1252 with replacement. A 404, a document over
+    edgar.MAX_DOCUMENT_BYTES (20 MiB), or no Item 1 prose is None.
 
 Errors (ED-4): every failure leaves as DescriptionAdapterError with a fixed
 code: the transport's (http_NNN, timeout, deadline_exceeded, invalid_json,
 request_error:* reduced to request_failed), ticker_map_malformed,
-submissions_malformed, or unexpected_error for anything else, raised with no
+submissions_malformed (no filings.recent, or a missing or ragged column), or
+unexpected_error for anything else, raised with no
 chained cause or context. Nothing from a filing, the User-Agent or a URL is
 logged here.
 """
@@ -143,8 +146,16 @@ def _heading(pattern: re.Pattern[str], text: str) -> bool:
 
 
 def _prose(text: str, in_table: bool) -> bool:
-    """A sentence-ending block outside tables: drops headings, footers and TOC links."""
-    return not in_table and "�" not in text and _PROSE_END.search(text) is not None
+    """A sentence-ending block outside tables with a letter in it.
+
+    Drops headings, page footers, TOC links and numbering such as "1." or "* * *.".
+    """
+    return (
+        not in_table
+        and any(c.isalpha() for c in text)
+        and "�" not in text
+        and _PROSE_END.search(text) is not None
+    )
 
 
 def item_1_text(html: str) -> str | None:
@@ -204,20 +215,21 @@ def _latest_10k(submissions: Mapping[str, Any]) -> tuple[date, str, str] | None:
         raise EdgarError("submissions_malformed")  # a missing or ragged array
     best: tuple[date, str, str] | None = None
     for form, filed, accession, document in zip(*columns):
-        if form != "10-K":
-            continue
+        # A malformed 10-K row is skipped (F1): one bad row in a company's
+        # history must not fail every future all-or-nothing run.
         if not (
-            isinstance(filed, str)
+            form == "10-K"
+            and isinstance(filed, str)
             and _ISO_DATE.fullmatch(filed)
             and isinstance(accession, str)
             and _ACCESSION.fullmatch(accession)
             and isinstance(document, str)
         ):
-            raise EdgarError("submissions_malformed")
+            continue
         try:
             day = date.fromisoformat(filed)
-        except ValueError:
-            raise EdgarError("submissions_malformed") from None
+        except ValueError:  # an impossible date such as 2025-02-30
+            continue
         if best is None or (day, accession) > best[:2]:
             best = (day, accession, document)
     return best
