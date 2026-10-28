@@ -36,7 +36,12 @@ def _quality_defaults() -> dict[str, QualityThreshold]:
         "congress_trades": QualityThreshold(
             allow_equal_as_of=True, null_fields=("disclosure_date",)
         ),
-        "ark_holdings": QualityThreshold(null_fields=("share_price",)),
+        # Decision 87 (a): the batch is dated by its stalest fund, so one lagging
+        # fund can repeat the previous date while holdings change; that still
+        # publishes. A stale fund is excluded by collectors.ARK_MAX_AGE.
+        "ark_holdings": QualityThreshold(
+            allow_equal_as_of=True, null_fields=("share_price",)
+        ),
         "insider_trades": QualityThreshold(
             allow_equal_as_of=True, null_fields=("shares", "value")
         ),
