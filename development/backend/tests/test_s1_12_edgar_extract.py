@@ -282,6 +282,29 @@ def test_prose_ends_in_sentence_punctuation_with_optional_closing_marks():
     )
 
 
+@pytest.mark.parametrize("bullet", ["1.", "3.1.", "(2).", "\u2014.", "* * *.", "1.)"])
+def test_a_block_without_a_letter_is_not_prose(bullet):
+    """Checker note on 441f00b: a lone Word bullet block such as "1." ends in
+    sentence punctuation, but it isn't a sentence; prose needs at least one letter."""
+    assert (
+        extract(
+            ITEM_1,
+            f"<p>{bullet}</p>",
+            paras("Acme makes tools."),
+            f"<p>{bullet}</p>",
+            paras("It sells rakes."),
+            ITEM_1A,
+        )
+        == "Acme makes tools.\n\nIt sells rakes."
+    )
+
+
+def test_a_numbered_sentence_with_letters_is_still_prose():
+    assert extract(
+        ITEM_1, paras("1. Acme makes tools.", "\u00c9tude sells rakes."), ITEM_1A
+    ) == ("1. Acme makes tools.\n\n\u00c9tude sells rakes.")
+
+
 def test_blocks_inside_tables_are_never_prose():
     assert (
         extract(

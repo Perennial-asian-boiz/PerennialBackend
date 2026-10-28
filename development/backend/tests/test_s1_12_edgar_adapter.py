@@ -394,24 +394,92 @@ def test_a_malformed_submissions_body_is_an_error(case):
     )
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("filingDate", "2025/01/31"),
-        ("filingDate", "2025-02-30"),
-        ("filingDate", None),
-        ("accessionNumber", "0000320193-25-79"),
-        ("accessionNumber", "../../0000320193-25-000079"),
-        ("accessionNumber", 320193),
-        ("primaryDocument", 5),
-    ],
-)
-def test_a_chosen_field_of_the_wrong_type_or_format_is_an_error(field, value):
+# Checker F1 on 441f00b (coordinator, 2026-10-28): a malformed 10-K row is
+# skipped, never fatal. The run is all-or-nothing, so one bad older row for one
+# company would otherwise fail every run. A row whose date can't be read can't be
+# ranked, so it's skipped too; no well-formed 10-K left -> None (a permanent
+# per-filing condition, ED-4). Ragged arrays stay submissions_malformed (the
+# whole response is broken). This replaces the earlier
+# test_a_chosen_field_of_the_wrong_type_or_format_is_an_error, which pinned
+# submissions_malformed for any malformed 10-K row.
+MALFORMED = [
+    ("filingDate", "2025/01/31"),
+    ("filingDate", "2025-02-30"),
+    ("filingDate", None),
+    ("filingDate", 20250131),
+    ("accessionNumber", "0000320193-25-79"),
+    ("accessionNumber", "../../0000320193-25-000079"),
+    ("accessionNumber", 320193),
+    ("accessionNumber", None),
+    ("primaryDocument", 5),
+    ("primaryDocument", None),
+]
+MALFORMED_IDS = [f"{field}={value!r}" for field, value in MALFORMED]
+
+
+@pytest.mark.parametrize("field,value", MALFORMED, ids=MALFORMED_IDS)
+def test_a_lone_malformed_10k_row_is_none_not_an_error(field, value):
     fake = FakeSec()
     company(fake, "ZZAA", 111, {**entry(), field: value})
-    assert error_code(lambda: adapter(fake, {"ZZAA": 111}).fetch("ZZAA")).code == (
-        "submissions_malformed"
-    )
+    assert adapter(fake, {"ZZAA": 111}).fetch("ZZAA") is None
+    assert fake.urls() == [sub_url(111)]  # no document request
+
+
+@pytest.mark.parametrize("field,value", MALFORMED, ids=MALFORMED_IDS)
+def test_a_malformed_older_10k_row_is_skipped_and_the_newest_chosen(field, value):
+    fake = FakeSec()
+    newest = entry(filed=ago(30), accession="0000000111-25-000009", document="new.htm")
+    older = {
+        **entry(filed=ago(400), accession="0000000111-24-000001", document="old.htm"),
+        field: value,
+    }
+    company(fake, "ZZAA", 111, older, newest)
+    description = adapter(fake, {"ZZAA": 111}).fetch("ZZAA")
+    assert description is not None
+    assert description.url == doc_url(111, "0000000111-25-000009", "new.htm")
+
+
+@pytest.mark.parametrize("field,value", MALFORMED, ids=MALFORMED_IDS)
+def test_a_malformed_newer_10k_row_is_skipped_for_the_newest_well_formed(field, value):
+    fake = FakeSec()
+    newer = {
+        **entry(filed=ago(10), accession="0000000111-25-000009", document="new.htm"),
+        field: value,
+    }
+    good = entry(filed=ago(60), accession="0000000111-25-000001", document="good.htm")
+    company(fake, "ZZAA", 111, newer, good)
+    description = adapter(fake, {"ZZAA": 111}).fetch("ZZAA")
+    assert description is not None
+    assert description.url == doc_url(111, "0000000111-25-000001", "good.htm")
+
+
+def test_malformed_rows_of_other_forms_never_matter():
+    fake = FakeSec()
+    junk = {
+        "form": "10-Q",
+        "filingDate": "junk",
+        "accessionNumber": 7,
+        "primaryDocument": None,
+    }
+    company(fake, "ZZAA", 111, junk, entry())
+    assert adapter(fake, {"ZZAA": 111}).fetch("ZZAA").url == doc_url(111)
+
+
+@pytest.mark.db
+def test_one_companys_malformed_old_row_doesnt_fail_the_run(engine):
+    from src.ingestion.company_summaries import summarize
+
+    symbols = _members(engine, "ZZAA", "ZZAB")
+    fake = FakeSec()
+    company(fake, "ZZAA", 111)
+    bad_old = {
+        **entry(filed=ago(400), accession="0000000112-24-000001"),
+        "filingDate": "junk",
+    }
+    company(fake, "ZZAB", 112, bad_old, entry(accession="0000000112-25-000001"))
+    result = summarize(engine, adapter(fake), symbols=symbols)
+    assert result.succeeded, result.error_code
+    assert (result.with_summary, result.unavailable) == (2, 0)
 
 
 # ── ED-6: the link ───────────────────────────────────────
@@ -489,6 +557,75 @@ def test_document_refuses_anything_but_the_edgar_archive_without_a_request(url):
         client.document(url)
     assert caught.value.args == ("invalid_url",)
     assert fake.requests == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "111/./000000011125000001/a.htm",
+        "111/../111/000000011125000001/a.htm",
+        "111/000000011125000001/../../../../files/company_tickers.json",
+        "111/000000011125000001/..",
+        "111/000000011125000001/.",
+        "./111/000000011125000001/a.htm",
+    ],
+)
+def test_document_refuses_dot_segments_without_a_request(path):
+    """Auditor's hardening (coordinator, 2026-10-28): no '.' or '..' path segment."""
+    from src.services.fundamentals.edgar import EdgarClient, EdgarError
+
+    fake = FakeSec()
+    clock = Clock()
+    client = EdgarClient(fake, UA, monotonic=clock.monotonic, sleep=clock.sleep)
+    with pytest.raises(EdgarError) as caught:
+        client.document(ARCHIVE + path)
+    assert caught.value.args == ("invalid_url",)
+    assert fake.requests == []
+
+
+def test_dots_inside_a_segment_are_fine():
+    from src.services.fundamentals.edgar import EdgarClient
+
+    fake = FakeSec()
+    url = ARCHIVE + "111/000000011125000001/zz.a..b.htm"
+    fake.docs[url] = b"ok"
+    clock = Clock()
+    client = EdgarClient(fake, UA, monotonic=clock.monotonic, sleep=clock.sleep)
+    assert client.document(url) == b"ok"
+
+
+def test_the_document_cap_is_20_mib():
+    from src.ingestion import collectors
+    from src.services.fundamentals import edgar
+
+    assert edgar.MAX_DOCUMENT_BYTES == 20 * 1024 * 1024
+    assert (
+        edgar.MAX_DOCUMENT_BYTES < collectors.MAX_RESPONSE_BYTES
+    )  # the shared cap stays
+
+
+@pytest.mark.parametrize("over", [True, False], ids=["cap_plus_one", "exactly_the_cap"])
+def test_a_document_over_the_document_cap_is_none(over):
+    from src.services.fundamentals.edgar import MAX_DOCUMENT_BYTES, EdgarClient
+
+    fake = FakeSec()
+    url = doc_url(111)
+    body = b"x" * (MAX_DOCUMENT_BYTES + (1 if over else 0))
+    fake.docs[url] = FakeResponse(200, raw=body)  # streamed, no Content-Length
+    clock = Clock()
+    client = EdgarClient(fake, UA, monotonic=clock.monotonic, sleep=clock.sleep)
+    got = client.document(url)
+    assert (got is None) if over else (got == body)
+
+
+def test_a_document_over_the_document_cap_is_none_through_the_adapter():
+    from src.services.fundamentals.edgar import MAX_DOCUMENT_BYTES
+
+    fake = FakeSec()
+    company(fake, "ZZAA", 111)
+    padding = b"<!--" + b"x" * MAX_DOCUMENT_BYTES + b"-->"
+    fake.docs[doc_url(111)] = TENK_HTML.encode() + padding
+    assert adapter(fake, {"ZZAA": 111}).fetch("ZZAA") is None
 
 
 def test_document_returns_the_raw_bytes():
