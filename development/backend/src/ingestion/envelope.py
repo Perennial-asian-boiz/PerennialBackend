@@ -152,3 +152,36 @@ ENVELOPE_KEYS.update(
         "match_rule_version",
     ),
 )
+
+# Sprint 2 scores (derived runs). company_scores keeps score-v1's envelope
+# (score_version and weights as "component:weight" strings) and the input batches.
+ENVELOPE_KEYS.update(
+    ticker_sentiment=(
+        "rollup_version",
+        "model_version",
+        "source_weights_version",
+        "method",
+        "window_days",
+        "input_batch_ids",
+        "universe",
+        "covered",
+        "no_coverage_count",
+    ),
+    company_scores=(
+        "score_version",
+        "weights",
+        "fundamental_scores_batch_id",
+        "ticker_sentiment_batch_id",
+        "watchlist_publication_id",
+        "universe",
+        "scored",
+        "unavailable_count",
+    ),
+    score_explanations=(
+        "template_version",
+        "company_scores_batch_id",
+        "universe",
+        "explained",
+        "carried_forward_count",
+    ),
+)
