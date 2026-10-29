@@ -92,6 +92,7 @@ files = [
     "development/backend/src/ingestion",
     "development/backend/src/pipeline",
     "development/backend/src/services/fundamentals",
+    "development/backend/src/services/scores",
     "development/backend/src/services/news/finnhub.py",
     "development/backend/src/services/news/matching.py",
     "development/backend/src/services/news/job.py",
