@@ -130,12 +130,10 @@ def _summaries(engine: Any, settings: Any) -> int:
 
     from src.ingestion.company_summaries import summarize
     from src.ingestion.sec_descriptions import SecTenKDescriptions, seeded_ciks
-    from src.services.fundamentals.edgar import EdgarClient
+    from src.services.fundamentals.edgar import EdgarClient, user_agent_ok
 
-    agent = settings.sec_user_agent or ""
-    if not agent.strip() or "example.com" in agent.lower():
-        # Before any request or write: a copied .env.example placeholder
-        # (you@example.com) must never go out as SEC's contact.
+    agent = settings.sec_user_agent
+    if not user_agent_ok(agent):  # before any request or write
         emit({"error_code": "missing_credential"})
         return 1
     client = EdgarClient(requests.Session(), agent)

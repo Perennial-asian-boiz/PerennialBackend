@@ -50,6 +50,7 @@ include = [
     "development/backend/sentiment/**/*.py",
     "development/database/ops/quality_gate.py",
     "development/database/ops/provision_api_role.py",
+    "development/database/ops/seed_names.py",
     "development/backend/tests/test_supabase_accounts.py",
     "development/backend/tests/test_pr22_auth_hardening.py",
     "development/backend/tests/test_pr22_auth_hardening_edges.py",
