@@ -227,15 +227,19 @@ Output on stdout:
   or no company profile). A rerun with unchanged filings rewrites nothing. The
   grade limit, the selector version, the source name and the link are part of
   each row's description digest, so the first run after any of them changes
-  re-checks every stored row once, including those stored "unavailable". The
-  first successful EDGAR run re-decides every member's row stored from FMP.
-  Rows of companies that aren't members keep their FMP summary for now
-  (packet ED-9, waiting on Bryan's E1).
+  re-checks every stored row once, including those stored "unavailable".
+- Every run, before its first SEC request, clears every stored summary that
+  came from another source (FMP), members or not, in its own committed step
+  (packet ED-9, decision 93 E1 (b)). Those companies show "Summary not
+  available" until this run, or a later one, decides them from SEC. The stderr
+  coverage line counts them as `cleared_other_source=N`; stdout doesn't.
 - Failure, exit 1: `{"error_code": "..."}`. `missing_credential` means
   `SEC_USER_AGENT` isn't set or is the placeholder. `collection_failed` means
   an SEC request failed (a 403 or 429 included: SEC may block an IP or refuse a
-  User-Agent). The stderr log names the symbol and a fixed code. Nothing is
-  written on failure, and earlier summaries stay as they were.
+  User-Agent). The stderr log names the symbol and a fixed code. No summary is
+  written on failure: earlier SEC summaries stay as they were, but the
+  other-source clear above has already happened. `missing_credential` stops
+  before the clear, so that run changes nothing.
 - Exit 2: a configuration or database error (see stderr).
 
 Each stored summary is shown as "Source: SEC EDGAR", linked to the 10-K
