@@ -11,7 +11,7 @@ S1-12 (ED-2, ED-6) adds a company's submissions list and raw archive documents
 import time
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping, TypeGuard
 from urllib.parse import urlsplit
 
 import requests
@@ -104,6 +104,15 @@ FLOW_ITEMS = frozenset(
         "noninterest_expense",
     }
 )
+
+
+def user_agent_ok(agent: str | None) -> TypeGuard[str]:
+    """False for a missing or blank User-Agent, or one naming example.com (the
+    .env.example placeholder, you@example.com), which must never go out as SEC's
+    contact."""
+    return (
+        agent is not None and agent.strip() != "" and "example.com" not in agent.lower()
+    )
 
 
 class EdgarError(RuntimeError):
@@ -208,17 +217,35 @@ class EdgarClient:
             raise EdgarError(response.code or "request_failed")
         return response
 
-    def ticker_map(self) -> dict[str, int]:
-        """SEC's ticker -> CIK map. Share-class punctuation uses '-' (BRK-B)."""
+    def _ticker_rows(self) -> list[dict[str, Any]]:
         data = self._get(TICKER_MAP_URL).data
         if not isinstance(data, dict):
             raise EdgarError("ticker_map_malformed")
+        return [
+            row
+            for row in data.values()
+            if isinstance(row, dict) and isinstance(row.get("ticker"), str)
+        ]
+
+    def ticker_map(self) -> dict[str, int]:
+        """SEC's ticker -> CIK map. Share-class punctuation uses '-' (BRK-B)."""
         out: dict[str, int] = {}
-        for row in data.values():
-            if isinstance(row, dict) and isinstance(row.get("ticker"), str):
-                cik = row.get("cik_str")
-                if isinstance(cik, int) and not isinstance(cik, bool):
-                    out.setdefault(row["ticker"].upper(), cik)
+        for row in self._ticker_rows():
+            cik = row.get("cik_str")
+            if isinstance(cik, int) and not isinstance(cik, bool):
+                out.setdefault(row["ticker"].upper(), cik)
+        return out
+
+    def ticker_titles(self) -> dict[str, str]:
+        """SEC's ticker -> company title as filed, from the same list (decision 92).
+
+        A blank or non-string title is left out.
+        """
+        out: dict[str, str] = {}
+        for row in self._ticker_rows():
+            title = row.get("title")
+            if isinstance(title, str) and title.strip():
+                out.setdefault(row["ticker"].upper(), title)
         return out
 
     def company_facts(self, cik: int) -> dict[str, Any] | None:
