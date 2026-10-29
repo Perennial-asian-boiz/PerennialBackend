@@ -138,8 +138,9 @@ an isolated server. The provisioning tool deliberately creates no passwords.
   `SEC_USER_AGENT=... OPS_DATABASE_URL=... python development/database/ops/seed_names.py`
   by hand as the owner. It fills only empty `securities.name` from SEC's ticker
   list (one request), keeps every existing name, and prints counts only
-  (`names_filled`, `not_in_sec_list`). Never scheduled; the importer can't
-  write names.
+  (`names_filled`, `not_in_sec_list`, `titles_skipped`: a title with a control
+  or format character, or over 200 characters, is never stored). Never
+  scheduled; the importer can't write names.
 
 ### API clocks and the email budget (#22 auth hardening)
 

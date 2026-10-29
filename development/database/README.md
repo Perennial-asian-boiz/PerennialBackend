@@ -66,6 +66,8 @@ SEC_USER_AGENT=... OPS_DATABASE_URL=... python development/database/ops/seed_nam
 One request to `company_tickers.json`. Only a NULL or blank name is filled,
 with SEC's title as filed; existing names are kept. A security SEC doesn't list
 (IBIT, ARKY, BYDDY on staging) keeps no name and counts as `not_in_sec_list`.
+A title with a control or format character, or over 200 characters, isn't
+stored, cleaned or cut: the name stays empty and counts as `titles_skipped`.
 `SEC_USER_AGENT` follows the summaries command's rule: missing, blank or
 `example.com` prints `{"error_code": "missing_credential"}` before any request.
 

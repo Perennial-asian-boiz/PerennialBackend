@@ -4,7 +4,9 @@ Run by hand as the schema owner after new securities appear; never scheduled:
     SEC_USER_AGENT=... OPS_DATABASE_URL=... python development/database/ops/seed_names.py
 One request, to SEC's company_tickers.json, with only the User-Agent header.
 Only a NULL or blank name is filled, with SEC's title as filed (no recasing);
-a name set by anyone else, even while this runs, is kept. A share class is
+a name set by anyone else, even while this runs, is kept. A title with a
+control or format character (any Unicode "C" category), or over MAX_NAME_CHARS,
+is skipped, never cleaned or cut (auditor F1). A share class is
 looked up with SEC's dash (BRK.B -> BRK-B). Output is counts only.
 """
 
@@ -21,11 +23,14 @@ BACKEND = Path(__file__).resolve().parents[2] / "backend"
 sys.path.insert(0, str(BACKEND))
 
 from src.db.models import securities  # noqa: E402
+from src.ingestion.company_summaries import printable  # noqa: E402
 from src.services.fundamentals.edgar import (  # noqa: E402
     EdgarClient,
     EdgarError,
     user_agent_ok,
 )
+
+MAX_NAME_CHARS = 200  # a longer SEC title is skipped, not cut
 
 
 def _empty():  # a NULL or blank name
@@ -34,7 +39,7 @@ def _empty():  # a NULL or blank name
 
 def run(engine: Engine, client: EdgarClient) -> dict[str, int]:
     titles = client.ticker_titles()  # before the transaction: a failure writes nothing
-    filled = missing = 0
+    filled = missing = skipped = 0
     with engine.begin() as conn:
         empty = conn.execute(
             select(securities.c.id, securities.c.symbol).where(_empty())
@@ -44,13 +49,20 @@ def run(engine: Engine, client: EdgarClient) -> dict[str, int]:
             if title is None:
                 missing += 1
                 continue
+            if len(title) > MAX_NAME_CHARS or not printable(title):
+                skipped += 1
+                continue
             # Guarded: a name written since the read above is never overwritten.
             filled += conn.execute(
                 update(securities)
                 .where(securities.c.id == row.id, _empty())
                 .values(name=title)
             ).rowcount
-    return {"names_filled": filled, "not_in_sec_list": missing}
+    return {
+        "names_filled": filled,
+        "not_in_sec_list": missing,
+        "titles_skipped": skipped,
+    }
 
 
 def main() -> int:
