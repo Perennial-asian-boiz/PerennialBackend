@@ -129,7 +129,9 @@ class Excerpt:
     grade: float  # textstat.flesch_kincaid_grade(text); stored rounded to cents
 
 
-def _printable(text: str) -> bool:
+def printable(text: str) -> bool:
+    """No character of any Unicode "C" category (control, format, surrogate,
+    private use, unassigned). Also seed_names' rule for SEC titles (auditor F1)."""
     return not any(unicodedata.category(char).startswith("C") for char in text)
 
 
@@ -144,7 +146,7 @@ def select_excerpt(description: str | None) -> Excerpt | None:
             if len(window) < size:
                 continue
             text = " ".join(window)
-            if len(text) > MAX_SUMMARY_CHARS or not _printable(text):
+            if len(text) > MAX_SUMMARY_CHARS or not printable(text):
                 continue
             grade = float(textstat.flesch_kincaid_grade(text))
             if grade <= MAX_GRADE:
@@ -234,7 +236,7 @@ def _source_name(adapter: DescriptionAdapter) -> str | None:
     name = getattr(adapter, "source_name", None)
     if not isinstance(name, str) or name != name.strip():
         return None
-    if not 0 < len(name) <= MAX_SOURCE_NAME_CHARS or not _printable(name):
+    if not 0 < len(name) <= MAX_SOURCE_NAME_CHARS or not printable(name):
         return None
     return name
 
