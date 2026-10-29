@@ -26,7 +26,7 @@ The current production publication.
 - **Conditional request:** `If-None-Match` with the current tag returns `304` with no body.
 - **`404 no_current_publication`:** when nothing is current.
 
-`watchlist` is `publications.output`, verbatim: `{schema_version, ranking_version, generated_at, popular_stable, affordable_growing, unresolved, errors}`. Each record has `ticker`, `bucket`, `rank`, `market_cap`, `signals`, `source_dates` and `warnings`. The API never recomputes or reshapes it; it equals `replay()` of the publication.
+`watchlist` is `publications.output`, verbatim: `{schema_version, ranking_version, generated_at, popular_stable, affordable_growing, unresolved, errors}`. Each record has `ticker`, `bucket`, `rank`, `market_cap`, `signals`, `source_dates` and `warnings`. The API never recomputes or reshapes it; it equals `replay()` of the publication, with one exception: ARK's share price is never served (decision 95, L5 a). Ranking `watchlist-v5` doesn't publish it, and for an older publication that stores it, the API drops `signals.ark.share_price` from every record, in `/v1/watchlist` and in `/v1/securities/{symbol}`'s `entry`. The stored publication is unchanged.
 
 ### The `publication` object
 

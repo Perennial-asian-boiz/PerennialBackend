@@ -613,7 +613,7 @@
         },
         "watchlist": {
           "additionalProperties": true,
-          "description": "publications.output, verbatim",
+          "description": "publications.output, verbatim except ARK's share price",
           "title": "Watchlist",
           "type": "object"
         }

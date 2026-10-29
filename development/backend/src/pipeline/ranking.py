@@ -19,8 +19,19 @@ from typing import Any, Mapping, Sequence, cast
 # own disclosure: a trade cannot be reported before it happens, so the date is
 # a filer's typo (e.g. a 2025 trade written as 2026), and it would otherwise
 # become the ticker's "most recent" buy. Stored rows keep the date as filed.
-VERSION = "watchlist-v4"
-VERSIONS = ("watchlist-v1", "watchlist-v2", "watchlist-v3", "watchlist-v4")
+# v5 is v4 without share_price in the ARK signal: no source has a licence to
+# display a price (decision 95, L5 a).
+VERSION = "watchlist-v5"
+VERSIONS = (
+    "watchlist-v1",
+    "watchlist-v2",
+    "watchlist-v3",
+    "watchlist-v4",
+    "watchlist-v5",
+)
+# Versions with v4's candidate cap and its after-disclosure filter.
+_CAPPED = ("watchlist-v4", "watchlist-v5")
+_ARK_KEYS = ("funds", "fund_count", "total_weight")
 DEFAULT_CONFIG = {
     "market_cap_threshold": "10000000000",
     "max_congress_candidates": 100,
@@ -37,13 +48,13 @@ def candidate_symbols(
     Symbols a publication evaluates (and fetches market caps for).
 
     v1-v3: every Congress purchase symbol plus every ARK holding.
-    v4: the top `max_congress_candidates` Congress purchase symbols, by
+    v4, v5: the top `max_congress_candidates` Congress purchase symbols, by
     distinct buyers, then buy count, then most recent transaction, then
     symbol, counting only purchases with a plausible date; plus every ARK
     holding.
     """
     ark = {r["symbol"] for r in rows["ark_holdings"]}
-    if version != "watchlist-v4":
+    if version not in _CAPPED:
         return sorted(
             {
                 r["symbol"]
@@ -138,7 +149,7 @@ def calculate(
     congress_rows = rows["congress_trades"]
     if version != "watchlist-v1":
         congress_rows = _cross_provider_purchases(congress_rows)
-    if version == "watchlist-v4":
+    if version in _CAPPED:
         congress_rows = [r for r in congress_rows if not dated_after_disclosure(r)]
     for row in congress_rows:
         if "purchase" in row["trade_type"].lower():
@@ -183,9 +194,10 @@ def calculate(
                 "most_recent_buy": max(r["transaction_date"] for r in i),
             }
         if a:
-            ars = {
-                k: a[k] for k in ("funds", "fund_count", "total_weight", "share_price")
-            }
+            keys = (
+                _ARK_KEYS if version == "watchlist-v5" else (*_ARK_KEYS, "share_price")
+            )
+            ars = {k: a[k] for k in keys}
         if si:
             sis = {
                 "short_position_shares": si["short_interest_shares"],

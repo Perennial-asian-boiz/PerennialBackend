@@ -173,7 +173,7 @@ def test_v1_publication_replays_baseline_output_and_new_publication_is_current(e
                             retrieved_at=datetime.now(timezone.utc)) for s in ('ZZAA', 'ZZBB')}
     new = publish(engine, runs, observations)
     saved = current(engine)
-    assert saved['ranking_version'] == saved['output']['ranking_version'] == ranking.VERSION == 'watchlist-v4'
+    assert saved['ranking_version'] == saved['output']['ranking_version'] == ranking.VERSION == 'watchlist-v5'
     assert saved['ranking_config']['max_congress_candidates'] == 100
     assert replay(engine, new) == saved['output']
     assert canonical_json_bytes(replay(engine, old)) == canonical_json_bytes(expected)
