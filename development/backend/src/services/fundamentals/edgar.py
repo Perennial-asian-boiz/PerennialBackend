@@ -3,18 +3,28 @@
 SEC fair-access rules: at most 10 requests a second, and a User-Agent that names
 a contact (Settings.sec_user_agent). Retries, size caps and JSON validation come
 from the shared collectors._get_json.
+
+S1-12 (ED-2, ED-6) adds a company's submissions list and raw archive documents
+(10-K HTML) through the same paced _get.
 """
 
 import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import urlsplit
 
 import requests
 from src.ingestion.collectors import _get_json
 
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
+SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+ARCHIVE_HOST = "www.sec.gov"
+ARCHIVE_PATH = "/Archives/edgar/data/"
+# Bounds the HTML parsing work per 10-K (F1). The download itself is still
+# bounded by the shared collectors.MAX_RESPONSE_BYTES (50 MiB).
+MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 MIN_REQUEST_INTERVAL_SECONDS = 0.12
 ANNUAL_FORMS = frozenset({"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"})
 FISCAL_YEARS_KEPT = 6  # 3-year growth, last year's trend and the 5-year chart
@@ -185,14 +195,14 @@ class EdgarClient:
         self.interval, self.monotonic, self.sleep = interval, monotonic, sleep
         self._last: float | None = None
 
-    def _get(self, url: str, allowed: tuple[int, ...] = ()) -> Any:
+    def _get(self, url: str, allowed: tuple[int, ...] = (), raw: bool = False) -> Any:
         if self._last is not None:
             wait = self.interval - (self.monotonic() - self._last)
             if wait > 0:
                 self.sleep(wait)
         self._last = self.monotonic()
         response = _get_json(
-            self.session, url, headers=self.headers, allowed_status=allowed
+            self.session, url, headers=self.headers, allowed_status=allowed, raw=raw
         )
         if not response.ok:
             raise EdgarError(response.code or "request_failed")
@@ -220,3 +230,41 @@ class EdgarClient:
         if not isinstance(facts, dict):
             raise EdgarError("facts_malformed")
         return facts
+
+    def submissions(self, cik: int) -> dict[str, Any] | None:
+        """The company's submissions list, or None when SEC has none for this CIK (404)."""
+        response = self._get(SUBMISSIONS_URL.format(cik=cik), allowed=(404,))
+        if response.status == 404:
+            return None
+        if not isinstance(response.data, dict):
+            raise EdgarError("submissions_malformed")
+        return response.data
+
+    def document(self, url: str) -> bytes | None:
+        """An archive document's raw bytes; None when it's gone (404) or over a cap.
+
+        Only https://www.sec.gov/Archives/edgar/data/ URLs without "." or ".."
+        path segments are fetched; anything else is a bug in the caller and is
+        refused before any request.
+        """
+        parts = urlsplit(url)
+        if (
+            parts.scheme != "https"
+            or parts.netloc != ARCHIVE_HOST
+            or not parts.path.startswith(ARCHIVE_PATH)
+            or any(segment in (".", "..") for segment in parts.path.split("/"))
+            or parts.query
+            or parts.fragment
+        ):
+            raise EdgarError("invalid_url")
+        # A 404 or an oversized body is a permanent per-filing condition, not a failure.
+        try:
+            response = self._get(url, allowed=(404,), raw=True)
+        except EdgarError as exc:
+            if exc.args == ("response_too_large",):
+                return None
+            raise
+        body: bytes | None = response.data
+        if response.status == 404 or body is None or len(body) > MAX_DOCUMENT_BYTES:
+            return None
+        return body

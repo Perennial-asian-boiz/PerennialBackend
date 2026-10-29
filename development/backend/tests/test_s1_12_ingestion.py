@@ -19,9 +19,9 @@ The seam (one module, src.ingestion.company_summaries):
   consensus_members(engine).
 
 The synthetic sentences were graded with textstat 0.7.13 while these tests were
-written: EASY ones are about grade -2 to 0, HARD ones about 34, and every mixed
-window used below is above 15. A test reads textstat only to check the stored
-grade and the pin.
+written: EASY ones are about grade -2 to 0, HARD ones about 38, and every mixed
+window used below is above 19 (above MAX_GRADE 16). A test reads textstat only
+to check the stored grade and the pin.
 """
 
 import hashlib
@@ -43,13 +43,17 @@ EASY = [
     "It has a small team.",
     "Most of its tools are for gardens.",
 ]
+# Lengthened 2026-10-28 for MAX_GRADE 16: with the shorter originals, a window
+# of three EASY sentences and one HARD graded 15.5-16.0 and would now pass.
 HARD = [
     "The corporation manufactures sophisticated semiconductor instrumentation, metrology"
     " equipment, and computational lithography infrastructure for multinational"
-    " manufacturing organizations.",
+    " manufacturing organizations, governmental laboratories, and international"
+    " telecommunications operators.",
     "Additionally, the organization provides comprehensive consulting, implementation,"
     " integration, and maintenance capabilities supporting enterprise digital"
-    " transformation initiatives internationally.",
+    " transformation initiatives internationally, alongside specialized educational"
+    " certification programs administered collaboratively.",
 ]
 URL = "https://profiles.example.com/zz/profile"
 SOURCE = "Synthetic Profiles"
@@ -186,7 +190,7 @@ def test_cs2_the_first_passing_window_is_taken_verbatim(case):
         assert excerpt is None
     else:
         assert excerpt is not None and excerpt.text == expected
-        assert float(excerpt.grade) <= 13.0  # MAX_GRADE, 8 until 2026-10-26
+        assert float(excerpt.grade) <= 16.0  # MAX_GRADE: 8, 13 on 10-26, 16 on 10-28
 
 
 def test_cs2_a_none_description_is_unavailable():
