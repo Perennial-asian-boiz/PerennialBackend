@@ -203,7 +203,7 @@ policy is implemented; only failed-run diagnostics currently expire.
 | `ark_holdings`, `short_interest` | Rows keyed by `(batch_id, security_id)`. |
 | `run_dependencies` | Exact upstream batches used by each downstream run. |
 | `publications`, `publication_sources` | Saved ranking/output and its four source runs/batches. |
-| `market_cap_observations`, `publication_market_caps` | Immutable cap values, with the FMP `sector` and `industry` from the same profile response, and the observations used by each publication. |
+| `market_cap_observations`, `publication_market_caps` | Immutable cap values, with the provider's `sector` and `industry` from the same profile response (FMP; Finnhub gives `industry` only), and the observations used by each publication. |
 | `current_publication` | One atomic production pointer; imports alone never move it. |
 
 Rules worth knowing:

@@ -1014,11 +1014,53 @@ def _fixture_case(settings):
     return ADAPTERS["fixture"](settings), FixtureMarketCapAdapter(fail_with="timeout"), _Offline()
 
 
+class _FinnhubProfiles:
+    """Synthetic /stock/profile2 answers; the "synthetic-limited" key is always 429."""
+
+    PROFILES = {
+        "ZZAA": {"ticker": "ZZAA", "currency": "USD", "marketCapitalization": 1234.5,
+                 "finnhubIndustry": "Synthetic"},
+        "ZZB-B": {"ticker": "ZZB.B", "currency": "USD", "marketCapitalization": 20000},
+    }
+
+    def get(self, url, params=None, headers=None, timeout=None, stream=False):
+        assert stream and timeout and "token" not in (params or {})
+        if headers["X-Finnhub-Token"] == "synthetic-limited":
+            return _FakeHttp(429, {})
+        return _FakeHttp(200, self.PROFILES.get(params["symbol"], {}))
+
+
+class _FakeHttp:
+    def __init__(self, status, body):
+        self.status_code, self.headers = status, {}
+        self._raw = json.dumps(body).encode()
+
+    def iter_content(self, chunk_size=1):
+        yield self._raw
+
+    def close(self):
+        pass
+
+
+def _finnhub_case(settings):
+    from pydantic import SecretStr
+
+    from src.ingestion.market_caps import ADAPTERS, FinnhubMarketCapAdapter
+
+    keyed = settings.model_copy(update={"finnhub_api_key": SecretStr("synthetic-key")})
+    return (
+        ADAPTERS["finnhub"](keyed),
+        FinnhubMarketCapAdapter("synthetic-limited"),
+        _FinnhubProfiles(),
+    )
+
+
 # Every registered adapter needs a case here: name -> (build(settings) returning
 # (adapter, the same adapter set up to fail, session), symbols with and without a
 # value). A live adapter's session is a fake transport serving synthetic responses.
 CONFORMANCE_CASES = {
     "fixture": (_fixture_case, ["ZZAA", "ZZB.B", "ZZZZ"]),
+    "finnhub": (_finnhub_case, ["ZZAA", "ZZB.B", "ZZZZ"]),
 }
 
 

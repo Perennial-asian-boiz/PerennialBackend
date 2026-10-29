@@ -30,7 +30,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Any
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import requests
 # ── shared path resolution (see paths.py) ──
 import sys as _sys
@@ -42,6 +42,7 @@ _sys.path.insert(0, str(next(
     p for p in _Path(__file__).resolve().parents if p.name == "backend"
 )))
 from paths import LOCAL_DATA_DIR, local_data_dir
+from src.ingestion.finnhub_profile import PROFILE_URL, parse_profile
 from src.settings import ProviderSettings, load_provider_settings
 
 
@@ -56,13 +57,14 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
+FINNHUB_PROFILE_URL = PROFILE_URL
+REQUEST_DELAY = 1.1  # as insider.REQUEST_DELAY: Finnhub's free tier is 60 calls a minute
 
 MARKET_CAP_THRESHOLD = 10_000_000_000  # $10 Billion
 # Congress candidates evaluated per run, strongest first (same rule as the
 # database ranking's watchlist-v4). Complete House Clerk data has ~650
-# purchased tickers a year, and each candidate costs one FMP market-cap
-# request against a 250-a-day free plan.
+# purchased tickers a year, and each candidate costs one market-cap request
+# (Finnhub, paced at 60 a minute; the cap dates from FMP's 250-a-day plan).
 MAX_CONGRESS_CANDIDATES = 100
 
 
@@ -403,44 +405,74 @@ def load_short_interest_signals(file_path: Optional[Path] = None) -> Dict[str, D
 # MARKET CAP LOOKUP
 # ─────────────────────────────────────────────────────────
 
+def _insider_fetcher() -> Any:
+    """The insider fetcher (symbol spelling, 429 waits), imported on first use:
+    it reads .env at import, and importing consensus must not (test_settings)."""
+    fetchers = str(_Path(__file__).resolve().parent / "fetchers")
+    if fetchers not in _sys.path:
+        _sys.path.insert(0, fetchers)
+    import insider
+
+    return insider
+
+
 def fetch_market_cap(
     ticker: str,
     cache: Dict[str, Optional[float]],
     session: Optional[requests.Session] = None,
     api_key: Optional[str] = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Optional[float]:
     """
-    Looks up market capitalization using cached values or FMP stable profile endpoint.
-    Endpoint: GET https://financialmodelingprep.com/stable/profile?symbol={ticker}&apikey={KEY}
+    Looks up market capitalization (USD) using cached values or Finnhub's free
+    company profile.
+    Endpoint: GET https://finnhub.io/api/v1/stock/profile2?symbol={ticker}
+    with the key in the X-Finnhub-Token header. Finnhub reports millions;
+    parse_profile returns whole dollars. Requests are paced REQUEST_DELAY
+    apart (the free tier allows 60 a minute), and a 429 waits for the window
+    to reset. The symbol is spelled as the insider fetcher spells it (BRK.B ->
+    BRK-B); a listing with no US symbol, or a non-USD profile, has no value.
     """
     if ticker in cache:
         return cache[ticker]
 
-    if not api_key or api_key.lower().startswith("your_"):
+    insider = _insider_fetcher()
+    symbol = insider.provider_symbol(ticker)
+    if not api_key or api_key.lower().startswith("your_") or symbol is None:
         cache[ticker] = None
         return None
 
     req_session = session or requests.Session()
 
     try:
-        resp = req_session.get(
-            FMP_PROFILE_URL,
-            params={"symbol": ticker, "apikey": api_key},
-            timeout=10
-        )
+        for attempt in range(insider.RATE_LIMIT_RETRIES + 1):
+            resp = req_session.get(
+                FINNHUB_PROFILE_URL,
+                params={"symbol": symbol},
+                headers={"X-Finnhub-Token": api_key},
+                timeout=10,
+            )
+            if resp.status_code != 429 or attempt == insider.RATE_LIMIT_RETRIES:
+                break
+            sleep(insider.legacy_rate_limit_wait(resp))
+        sleep(REQUEST_DELAY)
         if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and data:
-                item = data[0]
-                mcap = item.get("mktCap") or item.get("marketCap")
-                if mcap is not None:
-                    mcap_val = float(mcap)
-                    cache[ticker] = mcap_val
-                    return mcap_val
+            profile = parse_profile(resp.json(), symbol)
+            if (
+                profile is not None
+                and profile.market_cap is not None
+                and profile.currency == "USD"
+            ):
+                mcap_val = float(profile.market_cap)
+                cache[ticker] = mcap_val
+                return mcap_val
+        else:
+            logger.warning(f"Market cap lookup for {ticker}: HTTP {resp.status_code}")
         cache[ticker] = None
         return None
     except Exception as e:
-        logger.warning(f"Market cap lookup failed for {ticker}: {e}")
+        # The type only: the key travels in a header, but keep messages out.
+        logger.warning(f"Market cap lookup failed for {ticker}: {type(e).__name__}")
         cache[ticker] = None
         return None
 
@@ -576,8 +608,8 @@ def run(
     """
     provider_settings = provider_settings or load_provider_settings()
     api_key = (
-        provider_settings.fmp_api_key.get_secret_value()
-        if provider_settings.fmp_api_key is not None else None
+        provider_settings.finnhub_api_key.get_secret_value()
+        if provider_settings.finnhub_api_key is not None else None
     )
     logger.info("Starting Consensus Watchlist Aggregation...")
 

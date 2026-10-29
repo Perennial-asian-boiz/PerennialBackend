@@ -123,12 +123,17 @@ def test_consensus_market_cap_receives_provider_key_explicitly():
     from src.services.consensus_watchlist import consensus
 
     class Session:
-        def get(self, url, *, params, timeout):
-            assert params == {"symbol": "ZZAA", "apikey": "synthetic"}
+        def get(self, url, *, params, headers, timeout):
+            assert params == {"symbol": "ZZAA"}
+            assert headers == {"X-Finnhub-Token": "synthetic"}
             assert timeout == 10
-            return type("Response", (), {"status_code": 200, "json": lambda self: [{"marketCap": 42}]})()
+            body = {"ticker": "ZZAA", "currency": "USD", "marketCapitalization": 42}
+            return type("Response", (), {"status_code": 200, "json": lambda self: body})()
 
-    assert consensus.fetch_market_cap("ZZAA", {}, session=Session(), api_key="synthetic") == 42
+    got = consensus.fetch_market_cap(
+        "ZZAA", {}, session=Session(), api_key="synthetic", sleep=lambda s: None
+    )
+    assert got == 42_000_000  # Finnhub reports millions
 
 
 def test_source_policy_defaults_follow_d7():

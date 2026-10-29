@@ -35,6 +35,7 @@ Policy, as in src/ingestion/collectors.py:
     records only live runs (adapter_mode_mismatch otherwise).
 """
 
+import logging
 import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -46,12 +47,21 @@ from typing import Any, Literal, Protocol
 
 import requests
 
-from src.ingestion.collectors import MAX_PLANNED_REQUESTS, _Tracker, _upstream_row_ok
+from src.ingestion.collectors import (
+    MAX_PLANNED_REQUESTS,
+    _fetcher,
+    _get_json,
+    _Tracker,
+    _upstream_row_ok,
+)
 from src.ingestion.files import read_json_bounded
+from src.ingestion.finnhub_profile import PROFILE_URL, MalformedProfile, parse_profile
 from src.ingestion.importer import CollectionOutcome
 from src.ingestion.schemas import normalize_symbol
 from src.pipeline.ranking import candidate_symbols
 from src.settings import Settings
+
+logger = logging.getLogger(__name__)
 
 SOURCE = "market_caps"
 UNIT_KIND = "market-cap tickers"
@@ -180,12 +190,111 @@ def _fixture_quote(item: Any) -> MarketCapQuote:
     )
 
 
+class FinnhubMarketCapAdapter:
+    """Live market caps from Finnhub's free company profile (60 calls a minute).
+
+    One request per symbol, REQUEST_DELAY apart, with the key in a header. The
+    symbol sent is insider.provider_symbol's spelling (BRK.B -> BRK-B), the
+    same mapping the insider collector uses. Values are company-wide
+    (issuer_level) and USD only. These have no value: an unknown symbol, a
+    listing with no US symbol, a profile in another currency, and a 403 (not
+    on the free plan). A 403 for more than MAX_403_SHARE of the plan, or for
+    all of it, is a key or plan problem and fails, like FMP's 402 (decision 84).
+    Any other failure fails the fetch with its unit code.
+    """
+
+    name = "finnhub"
+    collection_mode: Literal["live", "fixture"] = "live"
+    REQUEST_DELAY = 1.1  # as insider.REQUEST_DELAY: the free tier is 60/minute
+    MAX_403_SHARE = 0.25
+
+    def __init__(self, api_key: str | None) -> None:
+        self.api_key = api_key
+
+    def fetch(
+        self,
+        symbols: Sequence[str],
+        *,
+        session: requests.Session | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> dict[str, MarketCapQuote | None]:
+        key = self.api_key
+        if not key or key.lower().startswith("your_"):
+            raise MarketCapAdapterError("missing_credential")
+        insider = _fetcher("insider")
+        owned = session is None
+        session = session or requests.Session()
+        quotes: dict[str, MarketCapQuote | None] = {}
+        refused = other_currency = 0
+        try:
+            for index, symbol in enumerate(symbols):
+                provider_symbol = insider.provider_symbol(symbol)
+                if provider_symbol is None:  # no US listing to ask about
+                    quotes[symbol] = None
+                    continue
+                if index:
+                    sleep(self.REQUEST_DELAY)
+                resp = _get_json(
+                    session,
+                    PROFILE_URL,
+                    params={"symbol": provider_symbol},
+                    headers={"X-Finnhub-Token": key},
+                    sleep=sleep,
+                )
+                if not resp.ok and resp.code == "http_403":
+                    refused += 1
+                    quotes[symbol] = None
+                    continue
+                if not resp.ok:
+                    raise MarketCapAdapterError(resp.code or "failed")
+                try:
+                    profile = parse_profile(resp.data, provider_symbol)
+                except MalformedProfile:
+                    raise MarketCapAdapterError("malformed_response") from None
+                if profile is None or profile.market_cap is None:
+                    quotes[symbol] = None
+                elif profile.currency != CURRENCY:
+                    other_currency += 1
+                    quotes[symbol] = None
+                else:
+                    quotes[symbol] = MarketCapQuote(
+                        value=profile.market_cap,
+                        currency=CURRENCY,
+                        issuer_level=True,
+                        observed_at=None,
+                        sector=None,
+                        industry=profile.industry,
+                    )
+        finally:
+            if owned:
+                session.close()
+        if refused and (
+            refused == len(symbols) or refused > self.MAX_403_SHARE * len(symbols)
+        ):
+            logger.warning("market caps finnhub_403=%d of %d", refused, len(symbols))
+            raise MarketCapAdapterError("http_403")
+        if refused or other_currency:
+            logger.info(
+                "market caps unavailable: finnhub_403=%d non_usd=%d of %d",
+                refused,
+                other_currency,
+                len(symbols),
+            )
+        return quotes
+
+
 def _fixture_adapter(settings: Settings) -> MarketCapAdapter:
     return FixtureMarketCapAdapter()
 
 
+def _finnhub_adapter(settings: Settings) -> MarketCapAdapter:
+    key = settings.finnhub_api_key
+    return FinnhubMarketCapAdapter(None if key is None else key.get_secret_value())
+
+
 ADAPTERS: dict[str, Callable[[Settings], MarketCapAdapter]] = {
     "fixture": _fixture_adapter,
+    "finnhub": _finnhub_adapter,
 }
 
 
