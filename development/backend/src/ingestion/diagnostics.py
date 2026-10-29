@@ -133,6 +133,11 @@ FAILURE_CODES = frozenset(
         "file_too_large",
         "pagination_exhausted",
         "deadline_exceeded",
+        # S1-12 description adapters (SEC EDGAR, FMP)
+        "submissions_malformed",
+        "ticker_map_malformed",
+        "request_failed",
+        "unexpected_error",
     }
 )
 _REQUEST_ERRORS = frozenset(
