@@ -17,8 +17,8 @@ Pinned interface, src/services/scores/job.py:
   makes sentiment missing for everyone.
 * derive_explanations(engine): a derived score_explanations run on the
   current scores batch (named in run_dependencies), one row per score row, with
-  company_score_id. A stored explanation whose inputs are unchanged is carried
-  forward unchanged (03-AC4), also into a new scores batch.
+  company_score_id. Re-explaining the same scores row returns its stored
+  explanation unchanged (03-AC4); a new scores batch regenerates (decision D1).
 * run_once(settings) for `--job scores`: derive_scores, then derive_explanations.
 
 recommended = status ok, score >= 60, and the security is listed in the current
@@ -603,15 +603,36 @@ def test_every_claim_cites_a_record_the_score_used(engine, world):
             assert claim["record"]["id"] == scores[t][f"{component}_record_id"]
 
 
-def test_rerunning_explanations_on_unchanged_scores_writes_nothing_new(engine, world):
-    scores_ok(engine)
+def served_explanation_id(engine, symbol):
+    """The score_explanations row the API serves for a symbol: the newest for the
+    pointer's score row (test_read_api_score.py)."""
+    with engine.connect() as conn:
+        return conn.execute(
+            text(
+                "SELECT e.id FROM perennial.current_scores p"
+                " JOIN perennial.company_scores c ON c.batch_id = p.batch_id"
+                " JOIN perennial.securities s ON s.id = c.security_id"
+                " JOIN perennial.score_explanations e ON e.company_score_id = c.id"
+                " WHERE p.channel = 'production' AND s.symbol = :s ORDER BY e.id DESC LIMIT 1"
+            ),
+            {"s": symbol},
+        ).scalar_one()
+
+
+def test_a_rerun_with_unchanged_inputs_serves_the_same_explanation_row(engine, world):
+    """03-AC4 (decision D1): the scores run is skipped, the pointer is unchanged, and the
+    API serves the same score_explanations row, with no new explanations batch."""
+    first_pointer = scores_ok(engine)
     explanations_ok(engine)
     first_batch, first = latest_explanations(engine)
+    served = {t: served_explanation_id(engine, t) for t in TICKERS}
     count = batches(engine, "score_explanations")
+    assert scores_ok(engine) == first_pointer
     explanations_ok(engine)
     second_batch, second = latest_explanations(engine)
     assert (second_batch, second) == (first_batch, first)
     assert batches(engine, "score_explanations") == count
+    assert {t: served_explanation_id(engine, t) for t in TICKERS} == served
 
 
 def _reword(engine, batch, symbol):
@@ -628,12 +649,32 @@ def _reword(engine, batch, symbol):
         )
 
 
-def test_an_unchanged_explanation_carries_forward_into_a_new_scores_batch(
-    engine, world
+def test_re_explaining_the_same_score_row_returns_the_stored_explanation(
+    engine, world, monkeypatch
 ):
-    """03-AC4. A new publication listing the same companies makes a new scores batch, but
-    ZZJA's score and the records it cites are unchanged: its stored explanation is
-    returned, not regenerated, now pointing at ZZJA's new score row."""
+    """03-AC4: for the same scores row an equal digest returns the stored explanation, not
+    a regenerated one. Here the wording code changes between the two runs (same
+    template_version): the stored wording must still be served."""
+    scores_ok(engine)
+    explanations_ok(engine)
+    _, before = latest_explanations(engine)
+    served = served_explanation_id(engine, "ZZJA")
+    real = explain_module().claims_for
+
+    def reworded(*args, **kwargs):
+        return [dict(c, text="new wording") for c in real(*args, **kwargs)]
+
+    monkeypatch.setattr(explain_module(), "claims_for", reworded)
+    explanations_ok(engine)
+    _, after = latest_explanations(engine)
+    assert after["ZZJA"]["claims"] == before["ZZJA"]["claims"]
+    assert all(c["text"] != "new wording" for c in after["ZZJA"]["claims"])
+    assert served_explanation_id(engine, "ZZJA") == served
+
+
+def test_a_new_scores_batch_regenerates_even_with_identical_values(engine, world):
+    """Decision D1: the digest keeps the rows' ids, so a new scores batch (here a new
+    publication listing the same companies) regenerates, citing the current rows."""
     scores_ok(engine)
     explanations_ok(engine)
     batch, _ = latest_explanations(engine)
@@ -643,11 +684,12 @@ def test_an_unchanged_explanation_carries_forward_into_a_new_scores_batch(
     explanations_ok(engine)
     new_batch, stored = latest_explanations(engine)
     assert new_batch != batch
-    assert [c["text"] for c in stored["ZZJA"]["claims"]] == ["stored wording"] * 3
-    assert (
-        stored["ZZJA"]["company_score_id"]
-        == rows(engine, "company_scores", current.batch_id)["ZZJA"]["id"]
-    )
+    assert stored["ZZJA"]["status"] == "ok"
+    assert all(c["text"] != "stored wording" for c in stored["ZZJA"]["claims"])
+    score = rows(engine, "company_scores", current.batch_id)["ZZJA"]
+    assert stored["ZZJA"]["company_score_id"] == score["id"]
+    for c in stored["ZZJA"]["claims"]:
+        assert c["record"]["id"] == score[f"{c['component']}_record_id"]
 
 
 def test_a_changed_input_regenerates_the_explanation(engine, world):
