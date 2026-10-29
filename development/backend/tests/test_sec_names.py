@@ -273,8 +273,9 @@ def test_one_request_to_secs_list_with_only_the_user_agent(engine, no_retries):
 def test_a_failed_or_malformed_list_writes_nothing(engine, no_retries, answer):
     security(engine, "ZZNA")
     before = snapshot(engine)
+    step = seed_names()  # outside raises: a missing module is not the failure
     with pytest.raises(Exception) as caught:
-        seed_names().run(engine, client(FakeList(ROWS, answer=answer)))
+        step.run(engine, client(FakeList(ROWS, answer=answer)))
     assert "synthetic provider body" not in str(caught.value)
     assert snapshot(engine) == before
 
