@@ -18,9 +18,16 @@ Policy:
     with single spaces (runs of whitespace inside a sentence become one space;
     no word changes). A window with a control or format character, or longer
     than the summary column allows, never passes.
-  * The run is all-or-nothing: every description is fetched before anything is
-    written, and a DescriptionAdapterError fails the run with no row touched
-    (stale-good). Other exceptions propagate, also before any write.
+  * Other sources first (ED-9, decision 93 E1 (b)): before the first fetch, in
+    its own committed transaction, every stored summary from another source
+    (summary_source_name set and not the adapter's) is cleared, on every
+    profile, not only this run's members. So that text stops showing even if
+    the run then fails. Rows with no source name, or the adapter's own, are
+    left alone.
+  * Otherwise the run is all-or-nothing: every description is fetched before
+    any summary is written, and a DescriptionAdapterError fails the run with
+    no summary written (stale-good). Other exceptions propagate, also before
+    any summary write.
   * No description, an empty one, no passing window, an oversized description
     or a link that isn't https is a per-security "unavailable" outcome. The run
     still succeeds. A member without a company profile has nowhere to store a
@@ -188,7 +195,7 @@ class DescriptionAdapter(Protocol):
 
 @dataclass(frozen=True)
 class SummaryResult:
-    """One run. On failure the counts are zero and nothing was written."""
+    """One run. On failure the counts are zero and no summary was written."""
 
     succeeded: bool
     error_code: str | None
@@ -281,6 +288,29 @@ def _failed(code: str) -> SummaryResult:
     return SummaryResult(False, code, 0, 0, 0)
 
 
+def _clear_other_sources(engine: Engine, source_name: str) -> int:
+    """NULL the summary columns of every row stored from another source (ED-9)."""
+    with engine.begin() as conn:
+        return conn.execute(
+            update(company_profiles)
+            .where(
+                and_(
+                    company_profiles.c.summary_source_name.is_not(None),
+                    company_profiles.c.summary_source_name != source_name,
+                )
+            )
+            .values(
+                summary=None,
+                summary_grade=None,
+                summary_status=None,
+                summary_source_name=None,
+                summary_source_url=None,
+                summary_as_of=None,
+                description_digest=None,
+            )
+        ).rowcount
+
+
 def summarize(
     engine: Engine,
     adapter: DescriptionAdapter,
@@ -293,7 +323,8 @@ def summarize(
         logger.warning("company summaries failed: invalid source name; nothing written")
         return _failed("invalid_source_name")
     members = sorted(set(consensus_members(engine) if symbols is None else symbols))
-    with engine.connect() as conn:
+    cleared = _clear_other_sources(engine, source_name)
+    with engine.connect() as conn:  # after the clear: it resets digests and statuses
         rows = conn.execute(
             select(
                 securities.c.symbol,
@@ -326,7 +357,7 @@ def summarize(
             if len(withheld) > FMP_MAX_402_SHARE * requested:
                 logger.warning(
                     "company summaries failed: not_entitled=%s of %s requested"
-                    " profiles, over the share; nothing written",
+                    " profiles, over the share; no summary written",
                     len(withheld),
                     requested,
                 )
@@ -335,7 +366,7 @@ def summarize(
         except DescriptionAdapterError as exc:
             code = failure_code(exc.code)
             logger.warning(
-                "company summaries failed symbol=%s code=%s; nothing written",
+                "company summaries failed symbol=%s code=%s; no summary written",
                 symbol,
                 code,
             )
@@ -347,7 +378,7 @@ def summarize(
         ):
             logger.warning(
                 "company summaries failed symbol=%s code=malformed_response;"
-                " nothing written",
+                " no summary written",
                 symbol,
             )
             return _failed("collection_failed")
@@ -355,7 +386,7 @@ def summarize(
     if withheld and len(withheld) == requested:
         logger.warning(
             "company summaries failed: every requested profile not_entitled;"
-            " nothing written"
+            " no summary written"
         )
         return _failed("collection_failed")
 
@@ -410,7 +441,8 @@ def summarize(
     )
     logger.info(
         "company summaries members=%s with_summary=%s unavailable=%s"
-        " no_profile=%s fetched=%s rewritten=%s skipped_402=%s selector=%s",
+        " no_profile=%s fetched=%s rewritten=%s skipped_402=%s"
+        " cleared_other_source=%s selector=%s",
         result_counts.members,
         result_counts.with_summary,
         result_counts.unavailable,
@@ -418,6 +450,7 @@ def summarize(
         len(fetched),
         rewritten,
         result_counts.skipped_402,
+        cleared,
         SELECTOR_VERSION,
     )
     return result_counts
