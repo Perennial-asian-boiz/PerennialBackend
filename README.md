@@ -417,7 +417,9 @@ used by the frontend dashboard:
 }
 ```
 
-The adapter already accepts `name`, `sector`, `price`, `change_percent`, and
+`price` is always `null`, in both modes: no source has a licence to display a
+price (decision 95, L5 a). The field stays so the frontend's shape doesn't
+change. The adapter already accepts `name`, `sector`, `change_percent`, and
 `confidence_score` when the publication pipeline provides them. The current
 ranking publication only contains tickers, market caps, and raw signals, so
 missing display fields remain explicit fallbacks until company metadata is

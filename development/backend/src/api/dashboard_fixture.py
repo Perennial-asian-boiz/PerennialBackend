@@ -151,7 +151,7 @@ def _company(
         name=name,
         ticker=ticker,
         sector=sector,
-        price=round(24.5 + (index % 9) * 18.35, 2),
+        price=None,  # decision 95 (L5 a): no price is shown
         change_percent=round(
             (0.42 + (index % 5) * 0.27) if affordable else (0.18 + (index % 4) * 0.16),
             2,
