@@ -100,7 +100,12 @@ later.
 
 Bootstrap also grants owner CREATE in `public` for Alembic's version table. Grant phase transfers the explicitly listed tables
 and their attached identity sequences to the owner, and fails if the migrated
-schema does not match the policy. Custom groups are available through `--owner`,
+schema does not match the policy: an unlisted table, or a listed table that's
+missing at the code's head. The one exception is a database whose Alembic revision is
+older than the code's head (grants run before the upgrade): its missing tables are
+skipped with a warning, "rerun the grants after the upgrade", and stay without
+grants until you do. So always run grants (and `provision_api_role.py`) after
+`alembic upgrade head`. Custom groups are available through `--owner`,
 `--importer`, and `--reader`. An administrator separately creates authenticated
 logins and grants exactly the corresponding group. Run migrations as owner
 (e.g. by the migration login's session role configuration), then run workers
@@ -376,10 +381,11 @@ the administrative login, against the new target database:
    the code: its `schema_revision` is in the manifest. At the current revision
    this does nothing, so always run it. It runs as the administrative login, not
    the migration login as in a deployment, because the restorer owns every
-   restored object until step 4. Skipping it fails closed: a backup at `0009`
-   makes `--phase grants` refuse ("table policy differs"), and one at `0010`
-   (any backup from before the account tables) passes grants, then
-   `provision_api_role.py` fails on the missing `app.email_is_registered`.
+   restored object until step 4. Skipping it never widens access, but it leaves the
+   database behind the code: with a backup older than the code's head,
+   `--phase grants` warns to rerun the grants after the upgrade, and the newer
+   tables don't exist. For any backup from before the account tables,
+   `provision_api_role.py` then fails on the missing `app.email_is_registered`.
 4. **Provision again:** `provision_roles.py --phase grants`, then
    `provision_api_role.py`. They re-own schemas `perennial` and `app` with their
    tables and sequences to the owner role, re-grant both schemas, and re-create
