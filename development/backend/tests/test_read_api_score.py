@@ -11,7 +11,8 @@ Pinned:
   company_scores -> score_explanations (explicit columns only: the API can't
   read watchlist_publication_id or input_digest).
 * as_of is current_scores.promoted_at (P8), for the score and the explanation.
-* §3.4's shapes. Numbers are JSON numbers. Claims are served as stored.
+* §3.4's shapes. Numbers are JSON numbers. Claims are served through the typed
+  Claim model: the stored keys of TEST-3's claim shape, and nothing else.
 * The OpenAPI snapshot and API.md cover the route (API-4); /v1/securities/{symbol}
   and its schemas stay exactly as they were.
 
@@ -202,6 +203,25 @@ def test_a_full_score_with_its_breakdown_and_explanation(engine, api):  # noqa: 
     )
     assert as_of(explanation["as_of"]) == PROMOTED
     assert explanation["claims"] == explanation_row()["claims"]  # served as stored
+
+
+@pytest.mark.db
+def test_unknown_claim_keys_are_never_served(engine, api):  # noqa: F811
+    """Auditor (API-2): claims are untyped JSONB, so they are served through the typed
+    Claim model and only its keys reach a client, at the top level and in record."""
+    clean = explanation_row()["claims"]
+    dirty = [
+        {
+            **c,
+            "internal_note": "never served",
+            "record": {**c["record"], "debug": "never served"},
+        }
+        for c in clean
+    ]
+    scored(engine, "ZZSK", recommended(), explanation_row(claims=dirty))
+    response = get(api, "ZZSK")
+    assert response.json()["explanation"]["claims"] == clean
+    assert "never served" not in response.text
 
 
 @pytest.mark.db
