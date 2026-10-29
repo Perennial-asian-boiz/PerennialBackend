@@ -1130,6 +1130,7 @@ company_scores = Table(
     ),
     *(part for name in SCORE_COMPONENTS for part in _score_component(name)),
     UniqueConstraint("batch_id", "security_id"),
+    UniqueConstraint("id", "security_id"),  # score_explanations' composite FK target
     CheckConstraint(_in("status", SCORE_STATUSES), name="status"),
     CheckConstraint("score IS NULL OR score BETWEEN 0 AND 100", name="score"),
     CheckConstraint("(status = 'ok') = (score IS NOT NULL)", name="status_score"),
@@ -1162,11 +1163,11 @@ score_explanations = Table(
     _id(),
     _batch_fk(),
     _security_fk(),
-    Column(
-        "company_score_id",
-        BigInteger,
-        ForeignKey(f"{SCHEMA}.company_scores.id"),
-        nullable=False,
+    Column("company_score_id", BigInteger, nullable=False),
+    # Composite (checker F1): an explanation can only name a score of its own security.
+    ForeignKeyConstraint(
+        ["company_score_id", "security_id"],
+        [f"{SCHEMA}.company_scores.id", f"{SCHEMA}.company_scores.security_id"],
     ),
     Column("status", String(16), nullable=False),
     Column("reason", String(32)),

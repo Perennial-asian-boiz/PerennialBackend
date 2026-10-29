@@ -11,7 +11,8 @@ Expand only (output/sprint-2/s2-stories-plan.md §3.1, §4). Adds 'ticker_sentim
   input as-of, input version and record id (no FK: the record's table follows from
   the component).
 * score_explanations: one row per (batch, security), naming the company_scores row
-  it explains, with at most 3 claims.
+  it explains through (company_score_id, security_id), so never another security's
+  score, with at most 3 claims.
 * current_scores: (channel, batch_id), the scores batch the API serves, like
   current_publication.
 
@@ -132,6 +133,8 @@ def upgrade():
                            name=op.f('ck_company_scores_recommended')),
         sa.ForeignKeyConstraint(['watchlist_publication_id'], ['perennial.publications.id'],
                                 name=op.f('fk_company_scores_watchlist_publication_id_publications')),
+        # The target of score_explanations' composite FK (checker F1).
+        sa.UniqueConstraint('id', 'security_id', name=op.f('uq_company_scores_id_security_id')),
         schema='perennial',
     )
     op.create_index('ix_company_scores_security_id', 'company_scores', ['security_id'], unique=False,
@@ -156,7 +159,9 @@ def upgrade():
         sa.CheckConstraint("(status = 'ok') = (claims <> '[]'::jsonb)",
                            name=op.f('ck_score_explanations_status_claims')),
         sa.CheckConstraint("input_digest ~ '^[0-9a-f]{64}$'", name=op.f('ck_score_explanations_input_digest')),
-        sa.ForeignKeyConstraint(['company_score_id'], ['perennial.company_scores.id'],
+        # Composite (checker F1): an explanation can only name a score of its own security.
+        sa.ForeignKeyConstraint(['company_score_id', 'security_id'],
+                                ['perennial.company_scores.id', 'perennial.company_scores.security_id'],
                                 name=op.f('fk_score_explanations_company_score_id_company_scores')),
         schema='perennial',
     )
