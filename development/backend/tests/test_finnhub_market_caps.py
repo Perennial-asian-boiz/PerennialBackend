@@ -38,10 +38,11 @@ class FakeSession:
         return answer.pop(0) if isinstance(answer, list) else answer
 
 
-def profile(ticker, millions, currency="USD", industry="Synthetic"):
+def profile(ticker, millions, currency="USD", industry="Synthetic", country="US"):
     return FakeHttp(
         body={
             "ticker": ticker,
+            "country": country,
             "currency": currency,
             "marketCapitalization": millions,
             "finnhubIndustry": industry,
@@ -55,28 +56,56 @@ def profile(ticker, millions, currency="USD", industry="Synthetic"):
 def test_millions_become_whole_dollars():
     from src.ingestion.finnhub_profile import parse_profile
 
-    got = parse_profile({"ticker": "ZZAA", "currency": "USD", "marketCapitalization": 10000.5}, "ZZAA")
+    got = parse_profile({"ticker": "ZZAA", "currency": "usd", "marketCapitalization": 10000.5})
     assert got.market_cap == Decimal("10000500000.0")  # above the $10B threshold
-    assert got.currency == "USD"
+    assert got.currency == "USD" and got.ticker == "ZZAA"
 
 
 @pytest.mark.parametrize("raw", [None, 0])
 def test_null_or_zero_market_cap_is_no_value(raw):
     from src.ingestion.finnhub_profile import parse_profile
 
-    assert parse_profile({"ticker": "ZZAA", "marketCapitalization": raw}, "ZZAA").market_cap is None
+    assert parse_profile({"ticker": "ZZAA", "marketCapitalization": raw}).market_cap is None
 
 
-def test_unknown_symbol_is_none_and_share_class_spellings_match():
+def test_unknown_symbol_is_none():
     from src.ingestion.finnhub_profile import parse_profile
 
-    assert parse_profile({}, "ZZZZ") is None
-    assert parse_profile({"ticker": "ZZB.B", "marketCapitalization": 1}, "ZZB-B").market_cap == Decimal(1_000_000)
+    assert parse_profile({}) is None
+
+
+# Shapes seen live on 2026-10-30 (synthetic tickers): Finnhub answers with the
+# company's primary listing, e.g. BRK-B as BRK.A (US, USD) and TSM as 2330.TW.
+@pytest.mark.parametrize(
+    ("asked", "body", "expected"),
+    [
+        ("ZZB-B", {"ticker": "ZZB.B", "country": "US", "currency": "USD"}, Decimal(5_000_000)),
+        ("ZZB-B", {"ticker": "ZZB.A", "country": "US", "currency": "USD"}, Decimal(5_000_000)),
+        ("ZZAA", {"country": "US", "currency": "USD"}, Decimal(5_000_000)),
+        ("ZZNL", {"ticker": "ZZNL", "country": "NL", "currency": "USD"}, Decimal(5_000_000)),
+        ("ZZTW", {"ticker": "9999.TW", "country": "TW", "currency": "TWD"}, None),
+        ("ZZGB", {"ticker": "ZZGB.L", "country": "GB", "currency": "USD"}, None),
+        ("ZZCA", {"ticker": "ZZCA.TO", "country": "CA", "currency": "USD"}, None),
+        ("ZZAA", {"ticker": "ZZAA", "country": "US", "currency": "EUR"}, None),
+    ],
+)
+def test_usd_value_keeps_only_plainly_usd_values_for_this_company(asked, body, expected):
+    from src.ingestion.finnhub_profile import parse_profile, usd_value
+
+    got = usd_value(parse_profile(body | {"marketCapitalization": 5}), asked)
+    assert got == expected
+
+
+def test_usd_value_of_nothing_is_none():
+    from src.ingestion.finnhub_profile import parse_profile, usd_value
+
+    assert usd_value(None, "ZZAA") is None
+    assert usd_value(parse_profile({"ticker": "ZZAA", "currency": "USD"}), "ZZAA") is None
 
 
 @pytest.mark.parametrize(
     "payload",
-    [[], "x", {"ticker": "ZZOTHER"}, {"ticker": 5}, {"marketCapitalization": "12"},
+    [[], "x", {"ticker": 5}, {"marketCapitalization": "12"},
      {"marketCapitalization": True}, {"marketCapitalization": -1},
      {"marketCapitalization": float("inf")}, {"marketCapitalization": 1e17}],
 )
@@ -84,7 +113,7 @@ def test_malformed_profiles_raise(payload):
     from src.ingestion.finnhub_profile import MalformedProfile, parse_profile
 
     with pytest.raises(MalformedProfile):
-        parse_profile(payload, "ZZAA")
+        parse_profile(payload)
 
 
 # ── FinnhubMarketCapAdapter (database pipeline) ──────────
@@ -128,6 +157,16 @@ def test_non_usd_profile_and_non_us_listing_have_no_value():
     assert [c[1]["symbol"] for c in session.calls] == ["ZZAA"]  # no request for ZZCC/U
 
 
+def test_primary_listing_answers_are_kept_for_us_companies_only():
+    session = FakeSession({
+        "ZZB-B": profile("ZZB.A", 1000000),  # a US share class: the company total
+        "ZZTW": profile("9999.TW", 5000, currency="USD", country="TW"),  # foreign primary
+    })
+    got = adapter().fetch(["ZZB.B", "ZZTW"], session=session, sleep=lambda s: None)
+    assert got["ZZB.B"].value == Decimal("1000000000000") and got["ZZB.B"].issuer_level
+    assert got["ZZTW"] is None
+
+
 def test_a_few_403s_are_unavailable_but_too_many_fail():
     from src.ingestion.market_caps import MarketCapAdapterError
 
@@ -145,7 +184,7 @@ def test_a_few_403s_are_unavailable_but_too_many_fail():
 @pytest.mark.parametrize(
     ("answer", "code"),
     [(FakeHttp(500), "http_500"), (FakeHttp(401), "http_401"),
-     (FakeHttp(body={"ticker": "ZZOTHER"}), "malformed_response")],
+     (FakeHttp(body={"marketCapitalization": "12"}), "malformed_response")],
 )
 def test_other_failures_fail_the_fetch(answer, code):
     from src.ingestion.market_caps import MarketCapAdapterError
@@ -198,7 +237,7 @@ def test_legacy_lookup_waits_out_a_429_then_retries():
 
 @pytest.mark.parametrize(
     "answer", [FakeHttp(403), FakeHttp(body={}), profile("ZZAA", 3000, currency="EUR"),
-               FakeHttp(body={"ticker": "ZZOTHER"})],
+               profile("ZZAA.L", 3000, country="GB"), FakeHttp(body={"marketCapitalization": "x"})],
 )
 def test_legacy_lookup_without_a_usable_value_is_none(answer):
     from src.services.consensus_watchlist import consensus

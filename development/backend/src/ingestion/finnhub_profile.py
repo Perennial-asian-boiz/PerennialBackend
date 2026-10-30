@@ -3,10 +3,17 @@
 Shared by the database adapter (market_caps.FinnhubMarketCapAdapter) and the
 legacy JSON pipeline (consensus.py), so both read the response the same way.
 
-Finnhub reports marketCapitalization in MILLIONS of the profile's currency;
-parse_profile returns whole units. The value is company-wide: every share
-class of one company reports the same total. An unknown symbol is an empty
-object, and a missing, null or zero marketCapitalization means "no value".
+Finnhub reports marketCapitalization in MILLIONS; parse_profile returns whole
+units. The value is company-wide: every share class of one company reports
+the same total. An unknown symbol is an empty object, and a missing, null or
+zero marketCapitalization means "no value".
+
+A profile describes the company's primary listing, which need not be the
+symbol asked for: BRK-B answers as BRK.A, TSM as 2330.TW, ASML as ASML.AS.
+usd_value() keeps a value only when it is plainly US dollars for a US company
+or for the listing asked for. For a foreign primary listing the `currency`
+field can disagree with the listing's own currency (AZN.L, GIL.TO and WPM.TO
+all say USD), so the number may not be dollars and is not used.
 """
 
 from decimal import Decimal, InvalidOperation
@@ -21,10 +28,12 @@ class Profile(NamedTuple):
     market_cap: Decimal | None  # whole units of `currency`
     currency: str | None
     industry: str | None  # Finnhub's single finnhubIndustry label
+    ticker: str | None  # the listing the profile describes
+    country: str | None
 
 
 class MalformedProfile(ValueError):
-    """The response is not a Finnhub profile for the requested symbol."""
+    """The response is not a Finnhub company profile."""
 
 
 def _spelling(symbol: str) -> str:
@@ -32,16 +41,18 @@ def _spelling(symbol: str) -> str:
     return symbol.strip().upper().replace(".", "-")
 
 
-def parse_profile(payload: Any, symbol: str) -> Profile | None:
-    """The profile for `symbol` (the spelling sent to Finnhub), or None if unknown."""
+def _text(value: Any) -> str | None:
+    return value.strip().upper() if isinstance(value, str) else None
+
+
+def parse_profile(payload: Any) -> Profile | None:
+    """The profile in a /stock/profile2 response, or None for an unknown symbol."""
     if not isinstance(payload, dict):
         raise MalformedProfile
     if not payload:
         return None
     ticker = payload.get("ticker")
-    if ticker is not None and (
-        not isinstance(ticker, str) or _spelling(ticker) != _spelling(symbol)
-    ):
+    if ticker is not None and not isinstance(ticker, str):
         raise MalformedProfile
     raw = payload.get("marketCapitalization")
     market_cap = None
@@ -58,10 +69,23 @@ def parse_profile(payload: Any, symbol: str) -> Profile | None:
             market_cap = millions * MILLION
             if market_cap >= MAX_VALUE:
                 raise MalformedProfile
-    currency = payload.get("currency")
     industry = payload.get("finnhubIndustry")
     return Profile(
         market_cap=market_cap,
-        currency=currency.strip().upper() if isinstance(currency, str) else None,
+        currency=_text(payload.get("currency")),
         industry=industry if isinstance(industry, str) else None,
+        ticker=_text(ticker),
+        country=_text(payload.get("country")),
     )
+
+
+def usd_value(profile: Profile | None, asked: str) -> Decimal | None:
+    """The company-wide USD market cap to use for `asked`, or None."""
+    if profile is None or profile.market_cap is None or profile.currency != "USD":
+        return None
+    same_listing = profile.ticker is None or _spelling(profile.ticker) == _spelling(
+        asked
+    )
+    if same_listing or profile.country == "US":  # e.g. BRK-B answered as BRK.A
+        return profile.market_cap
+    return None

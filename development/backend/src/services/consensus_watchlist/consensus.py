@@ -42,7 +42,7 @@ _sys.path.insert(0, str(next(
     p for p in _Path(__file__).resolve().parents if p.name == "backend"
 )))
 from paths import LOCAL_DATA_DIR, local_data_dir
-from src.ingestion.finnhub_profile import PROFILE_URL, parse_profile
+from src.ingestion.finnhub_profile import PROFILE_URL, parse_profile, usd_value
 from src.settings import ProviderSettings, load_provider_settings
 
 
@@ -431,7 +431,10 @@ def fetch_market_cap(
     parse_profile returns whole dollars. Requests are paced REQUEST_DELAY
     apart (the free tier allows 60 a minute), and a 429 waits for the window
     to reset. The symbol is spelled as the insider fetcher spells it (BRK.B ->
-    BRK-B); a listing with no US symbol, or a non-USD profile, has no value.
+    BRK-B). A listing with no US symbol has no value, and so does a profile
+    whose value is not plainly USD for this company: Finnhub answers with the
+    primary listing (BRK-B as BRK.A, which is kept; TSM as 2330.TW, which is
+    not). See finnhub_profile.usd_value.
     """
     if ticker in cache:
         return cache[ticker]
@@ -457,13 +460,9 @@ def fetch_market_cap(
             sleep(insider.legacy_rate_limit_wait(resp))
         sleep(REQUEST_DELAY)
         if resp.status_code == 200:
-            profile = parse_profile(resp.json(), symbol)
-            if (
-                profile is not None
-                and profile.market_cap is not None
-                and profile.currency == "USD"
-            ):
-                mcap_val = float(profile.market_cap)
+            value = usd_value(parse_profile(resp.json()), symbol)
+            if value is not None:
+                mcap_val = float(value)
                 cache[ticker] = mcap_val
                 return mcap_val
         else:

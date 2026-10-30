@@ -55,7 +55,12 @@ from src.ingestion.collectors import (
     _upstream_row_ok,
 )
 from src.ingestion.files import read_json_bounded
-from src.ingestion.finnhub_profile import PROFILE_URL, MalformedProfile, parse_profile
+from src.ingestion.finnhub_profile import (
+    PROFILE_URL,
+    MalformedProfile,
+    parse_profile,
+    usd_value,
+)
 from src.ingestion.importer import CollectionOutcome
 from src.ingestion.schemas import normalize_symbol
 from src.pipeline.ranking import candidate_symbols
@@ -197,8 +202,9 @@ class FinnhubMarketCapAdapter:
     symbol sent is insider.provider_symbol's spelling (BRK.B -> BRK-B), the
     same mapping the insider collector uses. Values are company-wide
     (issuer_level) and USD only. These have no value: an unknown symbol, a
-    listing with no US symbol, a profile in another currency, and a 403 (not
-    on the free plan). A 403 for more than MAX_403_SHARE of the plan, or for
+    listing with no US symbol, a profile whose value is not plainly USD for
+    this company (finnhub_profile.usd_value: a foreign primary listing such
+    as 2330.TW for TSM), and a 403 (not on the free plan). A 403 for more than MAX_403_SHARE of the plan, or for
     all of it, is a key or plan problem and fails, like FMP's 402 (decision 84).
     Any other failure fails the fetch with its unit code.
     """
@@ -225,7 +231,7 @@ class FinnhubMarketCapAdapter:
         owned = session is None
         session = session or requests.Session()
         quotes: dict[str, MarketCapQuote | None] = {}
-        refused = other_currency = 0
+        refused = not_usd = 0
         try:
             for index, symbol in enumerate(symbols):
                 provider_symbol = insider.provider_symbol(symbol)
@@ -248,17 +254,18 @@ class FinnhubMarketCapAdapter:
                 if not resp.ok:
                     raise MarketCapAdapterError(resp.code or "failed")
                 try:
-                    profile = parse_profile(resp.data, provider_symbol)
+                    profile = parse_profile(resp.data)
                 except MalformedProfile:
                     raise MarketCapAdapterError("malformed_response") from None
+                value = usd_value(profile, provider_symbol)
                 if profile is None or profile.market_cap is None:
                     quotes[symbol] = None
-                elif profile.currency != CURRENCY:
-                    other_currency += 1
+                elif value is None:
+                    not_usd += 1
                     quotes[symbol] = None
                 else:
                     quotes[symbol] = MarketCapQuote(
-                        value=profile.market_cap,
+                        value=value,
                         currency=CURRENCY,
                         issuer_level=True,
                         observed_at=None,
@@ -273,11 +280,11 @@ class FinnhubMarketCapAdapter:
         ):
             logger.warning("market caps finnhub_403=%d of %d", refused, len(symbols))
             raise MarketCapAdapterError("http_403")
-        if refused or other_currency:
+        if refused or not_usd:
             logger.info(
-                "market caps unavailable: finnhub_403=%d non_usd=%d of %d",
+                "market caps unavailable: finnhub_403=%d not_usd=%d of %d",
                 refused,
-                other_currency,
+                not_usd,
                 len(symbols),
             )
         return quotes
