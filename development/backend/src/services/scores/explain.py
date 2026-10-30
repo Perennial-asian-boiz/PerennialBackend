@@ -5,10 +5,16 @@ ticker_sentiment as plain mappings): no network, no database, no model.
 
 A claim is {order, text, component, measure, record: {table, id, batch_id},
 as_of, value}: every sentence cites the stored record and value it came from
-(S2-03 AC2). Candidates are the fundamentals measures the fundamentals score
-uses, by points descending (ties in MEASURES order), then sentiment; the first
-three are kept (AC1). A component the score lists as missing produces no claim
-(AC3). Claims are generated only for a recommended score.
+(S2-03 AC2). Only a supporting signal is a claim (decision 103 (c)): a
+fundamentals measure worth at least 50 points, and sentiment that leans
+positive. Supporting measures go by points descending (ties in MEASURES order),
+and positive sentiment always keeps the last of the three places (AC1). A
+component the score lists as missing produces no claim (AC3). Claims are
+generated only for a recommended score; one with no supporting signal is
+unavailable for insufficient supporting data (AC5).
+
+The sentiment claim reads the ticker_sentiment row of the PR #85 contract: its
+news and social counts, and the UTC dates of first_at and last_at (the as-of).
 
 The input digest is SHA-256 over the canonical JSON of the score row and the
 records it cites. An equal digest under the same template returns the stored
@@ -18,7 +24,7 @@ explanation unchanged (AC4), so the wording a user saw doesn't drift.
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -26,6 +32,9 @@ from src.services.fundamentals.scoring import MEASURES, breakdown, key_reasons
 
 TEMPLATE_VERSION = "explain-v1"
 MAX_CLAIMS = 3
+# Decision 103 (c): a measure at the midpoint of its range or above supports a
+# recommendation. Below it are losses, declines and slow growth.
+SUPPORTING_POINTS = 50
 
 
 @dataclass(frozen=True)
@@ -54,9 +63,17 @@ def _cited(
     return row
 
 
+def _supports(measure: str, value: float, points: float) -> bool:
+    if points < SUPPORTING_POINTS:
+        return False
+    # key_reasons() rounds the trend to whole points: "improved 0 points" says nothing.
+    return measure != "operating_margin_trend" or f"{abs(value) * 100:.0f}" != "0"
+
+
 def _fundamentals_claims(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     parts = breakdown(row)
-    ordered = sorted(parts, key=lambda k: (-parts[k]["points"], MEASURES.index(k)))
+    supporting = [k for k, p in parts.items() if _supports(k, p["value"], p["points"])]
+    ordered = sorted(supporting, key=lambda k: (-parts[k]["points"], MEASURES.index(k)))
     claims = []
     for measure in ordered:
         only = {
@@ -82,21 +99,44 @@ def _fundamentals_claims(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     return claims
 
 
-def _sentiment_claim(row: Mapping[str, Any]) -> dict[str, Any]:
-    value: Decimal = row["value"]
-    count = int(row["article_count"])
-    start: date = row["window_start"]
-    end: date = row["window_end"]
-    days = (end - start).days + 1
-    articles = f"{count} article{'' if count == 1 else 's'}"
-    if value > 0:
-        lean = "leaned positive"
-    elif value < 0:
-        lean = "leaned negative"
+def _utc_date(moment: datetime) -> date:
+    return moment.astimezone(timezone.utc).date()
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _span(first: date, last: date) -> str:
+    def day(d: date) -> str:
+        return f"{d:%b} {d.day}" + ("" if first.year == last.year else f", {d.year}")
+
+    return (
+        f"on {day(last)}" if first == last else f"between {day(first)} and {day(last)}"
+    )
+
+
+def _sentiment_claim(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The sentiment claim when the row leans positive; nothing otherwise."""
+    value: Decimal | None = row["value"]
+    if value is None or value <= 0:
+        return None
+    news, social = int(row["news_count"]), int(row["social_count"])
+    if news and social:
+        subject = "News and social posts"
     else:
-        lean = "was neutral"
+        subject = "News coverage" if news else "Social posts"
+    counts = " and ".join(
+        part
+        for part in (
+            news and _plural(news, "news article"),
+            social and _plural(social, "social post"),
+        )
+        if part
+    )
+    first, last = _utc_date(row["first_at"]), _utc_date(row["last_at"])
     return {
-        "text": f"News coverage over the last {days} days {lean} ({articles}).",
+        "text": f"{subject} {_span(first, last)} leaned positive ({counts}).",
         "component": "sentiment",
         "measure": "value",
         "record": {
@@ -104,7 +144,7 @@ def _sentiment_claim(row: Mapping[str, Any]) -> dict[str, Any]:
             "id": row["id"],
             "batch_id": row["batch_id"],
         },
-        "as_of": end.isoformat(),
+        "as_of": last.isoformat(),
         "value": str(value),
     }
 
@@ -114,18 +154,13 @@ def claims_for(
     fundamentals_row: Mapping[str, Any] | None,
     sentiment_row: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
-    """Up to three claims, in order, from the records the score cites."""
-    candidates: list[dict[str, Any]] = []
+    """Up to three supporting claims, in order, from the records the score cites."""
     fundamentals = _cited(score_row, "fundamentals", fundamentals_row)
-    if fundamentals is not None:
-        candidates.extend(_fundamentals_claims(fundamentals))
     sentiment = _cited(score_row, "sentiment", sentiment_row)
-    if sentiment is not None:
-        candidates.append(_sentiment_claim(sentiment))
-    return [
-        {"order": order, **claim}
-        for order, claim in enumerate(candidates[:MAX_CLAIMS], start=1)
-    ]
+    lean = _sentiment_claim(sentiment) if sentiment is not None else None
+    measures = _fundamentals_claims(fundamentals) if fundamentals is not None else []
+    claims = measures[: MAX_CLAIMS - (lean is not None)] + ([lean] if lean else [])
+    return [{"order": order, **claim} for order, claim in enumerate(claims, start=1)]
 
 
 def _json_default(value: object) -> str:
