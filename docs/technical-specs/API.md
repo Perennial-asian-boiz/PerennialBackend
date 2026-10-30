@@ -91,6 +91,84 @@ A short excerpt of a published company description, stored at ingestion. The API
 - The route has no `ETag` (`Cache-Control: no-cache`). If one is ever added, it must cover `as_of`.
 - The profile's readability grade and description digest are never served.
 
+## `GET /v1/securities/{symbol}/score`
+
+A security's current Confidence Score (S2-01), its breakdown (S2-02) and why Perennial recommends it (S2-03). One request serves all three.
+
+- **Symbol handling and errors:** as `/v1/securities/{symbol}`: `404 unknown_security` for an unknown ticker, `422 invalid_request` for an invalid one. An alias finds the canonical security, and `symbol` in the body is the canonical ticker.
+- **What is served:** the row for the security in the batch that `current_scores` points at (channel `production`), and the newest explanation written for that row. Re-pointing `current_scores` is the rollback. The API never reads a newer, unpromoted batch, and never serves `watchlist_publication_id` or the explanation's `input_digest`.
+- **`200` with `score.status: "unavailable"`** when there is no row for the security in the current batch (or no batch is current): `reason: "not_scored"`. It's never a `404`.
+- **Headers:** `Cache-Control: no-cache` and an `ETag`. The `ETag` changes when the pointer moves and when the explanation is written (explanations are derived after the scores batch is promoted). `If-None-Match` with a matching tag returns `304` with no body. The `read` rate-limit bucket.
+- **Numbers** are JSON numbers. The body is canonical JSON, like the other `/v1` routes.
+
+Full score (score-v1 always lists `event_exposure` as missing):
+
+```json
+{"api_version": "v1", "symbol": "ZZSA",
+ "score": {"status": "ok", "value": 74.3, "score_version": "score-v1",
+   "as_of": "2026-11-05T17:02:11+00:00", "recommended": true,
+   "components": [
+     {"name": "fundamentals", "status": "ok", "value": 78.0, "nominal_weight": 0.6, "weight": 0.7059,
+      "contribution": 55.06, "input_as_of": "2025-06-30", "input_version": "fundamentals-v1",
+      "record": {"table": "fundamental_scores", "id": 812}},
+     {"name": "sentiment", "status": "ok", "value": 65.5, "nominal_weight": 0.25, "weight": 0.2941,
+      "contribution": 19.26, "input_as_of": "2026-11-04", "input_version": "sentiment-rollup-v1",
+      "record": {"table": "ticker_sentiment", "id": 77}},
+     {"name": "event_exposure", "status": "unavailable", "value": null, "nominal_weight": 0.15,
+      "weight": 0.0, "contribution": 0.0, "input_as_of": null, "input_version": null, "record": null,
+      "note": "weight redistributed to the remaining components"}],
+   "missing": ["event_exposure"]},
+ "explanation": {"status": "ok", "template_version": "explain-v1", "as_of": "2026-11-05T17:02:11+00:00",
+   "claims": [
+     {"order": 1, "text": "Keeps 42 cents of every sales dollar as operating profit.", "component": "fundamentals",
+      "measure": "operating_margin", "record": {"table": "fundamental_scores", "id": 812, "batch_id": 5},
+      "as_of": "2025-06-30", "value": "0.420000"},
+     {"order": 2, "text": "Revenue grew 18% a year over the last 3 years.", "component": "fundamentals",
+      "measure": "revenue_growth_3y", "record": {"table": "fundamental_scores", "id": 812, "batch_id": 5},
+      "as_of": "2025-06-30", "value": "0.180000"},
+     {"order": 3, "text": "News coverage over the last 7 days leaned positive (12 articles).", "component": "sentiment",
+      "measure": "value", "record": {"table": "ticker_sentiment", "id": 77, "batch_id": 9},
+      "as_of": "2026-11-04", "value": "0.3100"}]}}
+```
+
+Score unavailable:
+
+```json
+{"api_version": "v1", "symbol": "ZZSU",
+ "score": {"status": "unavailable", "reason": "only_fundamentals", "value": null, "score_version": "score-v1",
+   "as_of": "2026-11-05T17:02:11+00:00", "recommended": false, "components": [],
+   "missing": ["sentiment", "event_exposure"]},
+ "explanation": {"status": "unavailable", "reason": "score_unavailable", "template_version": "explain-v1",
+   "as_of": "2026-11-05T17:02:11+00:00", "claims": []}}
+```
+
+### The `score` object
+
+| field | type | meaning |
+|---|---|---|
+| `status` | string | `ok` or `unavailable` |
+| `reason` | string | only when unavailable: `no_fundamentals`, `only_fundamentals` (a score needs fundamentals and at least one other component), or `not_scored` |
+| `value` | number or null | 0-100, to 0.1; `null` when unavailable |
+| `score_version` | string or null | e.g. `score-v1`; `null` when `not_scored` |
+| `as_of` | string or null | when the scores batch was promoted (`current_scores.promoted_at`), ISO 8601 UTC |
+| `recommended` | boolean | score `ok`, at least 60, and in the production watchlist publication it was judged against |
+| `components` | list | fundamentals, sentiment, event_exposure, in that order; empty when unavailable |
+| `missing` | list of strings | the components that had no input |
+
+Each component has `name`, `status` (`ok` or `unavailable`), `value` (0-100 or `null`), `nominal_weight` (score-v1: 0.60, 0.25, 0.15), `weight` (the effective weight: a missing component's weight is redistributed over the present ones, so score-v1 gives 0.7059 and 0.2941), `contribution` (`value` x `weight`, to 0.01; the contributions add up to `value` to its rounding), `input_as_of`, `input_version` and `record` (`{table, id}` of the stored input, or `null`). An unavailable component also has `note`: "weight redistributed to the remaining components". The breakdown is recomputed by score-v1 from the stored values: a stored row that disagrees with it is never served.
+
+### The `explanation` object
+
+| field | type | meaning |
+|---|---|---|
+| `status` | string | `ok`, `not_recommended` (claims are written only for a recommended score) or `unavailable` |
+| `reason` | string | only when unavailable: `score_unavailable`, `insufficient_supporting_data` (recommended, but no component had a claim to cite), `not_scored`, or `not_explained_yet` (the score is promoted but its explanation isn't written yet) |
+| `template_version` | string | e.g. `explain-v1`; absent when no explanation is stored |
+| `as_of` | string | as the score's `as_of`; absent when no explanation is stored |
+| `claims` | list | up to three, in `order` |
+
+A claim is `{order, text, component, measure, record: {table, id, batch_id}, as_of, value}`: a sentence and the stored record, measure, value and date it came from. Fundamentals measures come first, highest points first, then the news sentiment lean. A missing component never has a claim. Claims are served through a typed model, so a stored key outside that shape is never served.
+
 ## `GET /v1/market-status`
 
 Whether the US stock market (the NYSE calendar, `XNYS`) is in regular hours, and its next open and close (S1-11). It's public, touches no database and takes no input: query parameters and headers don't change the answer. Unlike the other routes, its body has no `api_version`.
