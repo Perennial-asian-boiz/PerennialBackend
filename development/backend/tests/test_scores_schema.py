@@ -1,8 +1,9 @@
 """Sprint 2 DB-1..DB-5 and TEST-5: migration 0018, its models, schemas and grants.
 
-Spec: output/sprint-2/s2-stories-plan.md §3.1, §3.4 and §5 (a) and (e); the
-ticker_sentiment contract is Bryan's comment on issue #76 (frozen, pinned exactly).
-Synthetic rows only.
+Spec: output/sprint-2/s2-stories-plan.md §3.1, §3.4 and §5 (a) and (e). The
+ticker_sentiment contract is decision 108 (pinned exactly): PR #85's table at
+fccd07f plus model_version, created by 0018. A row per security; an empty row
+(no news or posts counted) has a NULL value. Synthetic rows only.
 
 Where the plan leaves a column open, these tests pin the test maker's proposed
 default (each marked "proposed"); the handoff lists them.
@@ -23,7 +24,7 @@ import ast
 import json
 import re
 import secrets
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -67,17 +68,18 @@ BATCH_AND_SECURITY = {
 }
 # {column: (format_type, NOT NULL)}
 SHAPES = {
-    "ticker_sentiment": {  # Bryan's contract (#76), exactly
+    "ticker_sentiment": {  # decision 108: #85's table plus model_version, exactly
         **BATCH_AND_SECURITY,
         "row_number": ("integer", True),
-        "value": ("numeric(5,4)", True),
+        "value": ("numeric(5,4)", False),
+        "plain_average": ("numeric(5,4)", False),
         "article_count": ("integer", True),
-        "window_start": ("date", True),
-        "window_end": ("date", True),
-        "model_version": ("character varying(64)", True),
-        "source_weights_version": ("character varying(32)", True),
-        "method": ("character varying(32)", True),
-        "rollup_version": ("character varying(32)", True),
+        "news_count": ("integer", True),
+        "social_count": ("integer", True),
+        "first_at": ("timestamp with time zone", False),
+        "last_at": ("timestamp with time zone", False),
+        "weights_version": ("character varying(32)", True),
+        "model_version": ("character varying(64)", False),
     },
     "company_scores": {
         **BATCH_AND_SECURITY,
@@ -140,18 +142,50 @@ def claim(order=1, component="fundamentals", **extra):
     }
 
 
+FIRST_AT = datetime(2026, 10, 29, 14, 5, tzinfo=timezone.utc)
+LAST_AT = datetime(2026, 11, 4, 16, 30, tzinfo=timezone.utc)
+
+
 def sentiment_row(**over):
+    """A scored row: 12 news articles, no social posts."""
     return {
         "value": Decimal("0.3100"),
+        "plain_average": Decimal("0.2800"),
         "article_count": 12,
-        "window_start": date(2026, 10, 29),
-        "window_end": date(2026, 11, 4),
+        "news_count": 12,
+        "social_count": 0,
+        "first_at": FIRST_AT,
+        "last_at": LAST_AT,
+        "weights_version": "weights-v1",
         "model_version": "ProsusAI/finbert@synthetic0001",
-        "source_weights_version": "weights-v1",
-        "method": "credibility_weighted_mean",
-        "rollup_version": "sentiment-rollup-v1",
         **over,
     }
+
+
+def empty_sentiment_row(**over):
+    """Nothing counted for the security in the window: sentiment is missing."""
+    empty = {
+        "value": None,
+        "plain_average": None,
+        "article_count": 0,
+        "news_count": 0,
+        "social_count": 0,
+        "first_at": None,
+        "last_at": None,
+        "model_version": None,
+    }
+    return sentiment_row(**{**empty, **over})
+
+
+def social_sentiment_row(**over):
+    """Social posts only: no news article, so no model_version (decision 108)."""
+    social = {
+        "article_count": 5,
+        "news_count": 0,
+        "social_count": 5,
+        "model_version": None,
+    }
+    return sentiment_row(**{**social, **over})
 
 
 def score_row(**over):
@@ -180,7 +214,7 @@ def score_row(**over):
             Decimal("0.2941"),
             Decimal("19.26"),
             date(2026, 11, 4),
-            "sentiment-rollup-v1",
+            "weights-v1",
         ),
         "event_exposure": (
             None,
@@ -537,11 +571,21 @@ ACCEPTED = {
     "sentiment_baseline": ("ticker_sentiment", sentiment_row()),
     "sentiment_minus_one": ("ticker_sentiment", sentiment_row(value=Decimal("-1"))),
     "sentiment_plus_one": ("ticker_sentiment", sentiment_row(value=Decimal("1"))),
-    "sentiment_one_article": ("ticker_sentiment", sentiment_row(article_count=1)),
-    "sentiment_one_day_window": (
+    "sentiment_plain_average_bounds": (
         "ticker_sentiment",
-        sentiment_row(window_start=date(2026, 11, 4)),
+        sentiment_row(plain_average=Decimal("-1")),
     ),
+    "sentiment_one_article": (
+        "ticker_sentiment",
+        sentiment_row(article_count=1, news_count=1),
+    ),
+    "sentiment_empty": ("ticker_sentiment", empty_sentiment_row()),
+    "sentiment_social_only": ("ticker_sentiment", social_sentiment_row()),
+    "sentiment_news_and_social": (
+        "ticker_sentiment",
+        sentiment_row(article_count=12, news_count=9, social_count=3),
+    ),
+    "sentiment_one_instant": ("ticker_sentiment", sentiment_row(first_at=LAST_AT)),
     "score_ok": ("company_scores", score_row()),
     "score_zero": ("company_scores", score_row(score=Decimal("0.0"))),
     "score_hundred": ("company_scores", score_row(score=Decimal("100.0"))),
@@ -582,17 +626,54 @@ ACCEPTED = {
     ),
 }
 REFUSED = {
-    # ticker_sentiment (#76): value -1..1, article_count >= 1
+    # ticker_sentiment (decision 108): #85's three checks, plus model_version
     "sentiment_below_minus_one": (
         "ticker_sentiment",
         sentiment_row(value=Decimal("-1.0001")),
     ),
     "sentiment_above_one": ("ticker_sentiment", sentiment_row(value=Decimal("1.0001"))),
-    "sentiment_no_articles": ("ticker_sentiment", sentiment_row(article_count=0)),
-    "sentiment_window_backwards": (
+    "sentiment_plain_average_above_one": (
         "ticker_sentiment",
-        sentiment_row(window_start=date(2026, 11, 5)),
-    ),  # proposed
+        sentiment_row(plain_average=Decimal("1.0001")),
+    ),
+    "sentiment_counts_dont_add_up": (
+        "ticker_sentiment",
+        sentiment_row(article_count=13),
+    ),
+    "sentiment_negative_count": (
+        "ticker_sentiment",
+        sentiment_row(article_count=12, news_count=13, social_count=-1),
+    ),
+    "sentiment_counted_without_a_value": (
+        "ticker_sentiment",
+        empty_sentiment_row(
+            article_count=12, news_count=12, model_version="ProsusAI/finbert@x"
+        ),
+    ),
+    "sentiment_a_value_with_nothing_counted": (
+        "ticker_sentiment",
+        sentiment_row(article_count=0, news_count=0, model_version=None),
+    ),
+    "sentiment_value_without_plain_average": (
+        "ticker_sentiment",
+        sentiment_row(plain_average=None),
+    ),
+    "sentiment_value_without_last_at": (
+        "ticker_sentiment",
+        sentiment_row(last_at=None),
+    ),
+    "sentiment_first_after_last": (
+        "ticker_sentiment",
+        sentiment_row(first_at=LAST_AT, last_at=FIRST_AT),
+    ),
+    "sentiment_news_without_model_version": (
+        "ticker_sentiment",
+        sentiment_row(model_version=None),
+    ),
+    "sentiment_model_version_without_news": (
+        "ticker_sentiment",
+        social_sentiment_row(model_version="ProsusAI/finbert@synthetic0001"),
+    ),
     "sentiment_row_number_zero": ("ticker_sentiment", sentiment_row(row_number=0)),
     # company_scores: score 0-100, weights 0..1, status, missing
     "score_below_zero": ("company_scores", score_row(score=Decimal("-0.1"))),
@@ -922,26 +1003,48 @@ def _same(stored, expected):
     return {k: stored[k] for k in expected} == expected
 
 
+SENTIMENT_ENVELOPE = {
+    "weights_version": "weights-v1",
+    "window_days": 7,
+    "universe": 3,
+    "scored": 2,
+    "no_data_count": 1,
+    "news_used": 12,
+    "social_used": 5,
+    "social_batch_fresh": True,
+    "publishers_unknown": 0,
+}
+
+
+def test_db3_ticker_sentiment_envelope_keys_are_85s_exactly():
+    from src.ingestion.envelope import ENVELOPE_KEYS
+
+    keys = ENVELOPE_KEYS["ticker_sentiment"]
+    assert len(keys) == len(set(keys)) and set(keys) == set(SENTIMENT_ENVELOPE)
+
+
 @pytest.mark.db
 def test_db3_ticker_sentiment_imports_through_the_contract(engine):
     seed_security(engine, "ZZTA")
     seed_security(engine, "ZZTB")
     rows = {
         "ZZTA": sentiment_row(),
-        "ZZTB": sentiment_row(value=Decimal("-0.5000"), article_count=1),
+        "ZZTB": social_sentiment_row(value=Decimal("-0.5000")),
+        "ZZTC": empty_sentiment_row(),
     }
+    seed_security(engine, "ZZTC")
     result = _import(
         engine,
         "ticker_sentiment",
         [{"ticker": t, **_json_ready(r)} for t, r in rows.items()],
-        envelope={"rollup_version": "sentiment-rollup-v1"},
+        envelope=SENTIMENT_ENVELOPE,
     )
     assert result.succeeded, (result.error_code, result.error_summary)
     stored = _stored(engine, "ticker_sentiment", result.batch_id)
     assert set(stored) == set(rows)
     for symbol, row in rows.items():
         assert _same(stored[symbol], row), symbol
-    assert sorted(r["row_number"] for r in stored.values()) == [1, 2]
+    assert sorted(r["row_number"] for r in stored.values()) == [1, 2, 3]
 
 
 @pytest.mark.db
@@ -995,13 +1098,48 @@ INVALID_RECORDS = {
         "ticker_sentiment",
         sentiment_row(value=Decimal("1.5")),
     ),
-    "sentiment_no_articles": ("ticker_sentiment", sentiment_row(article_count=0)),
-    "sentiment_window_backwards": (
+    "sentiment_plain_average_below_minus_one": (
         "ticker_sentiment",
-        sentiment_row(window_start=date(2026, 11, 5)),
+        sentiment_row(plain_average=Decimal("-1.5")),
     ),
-    "sentiment_no_model_version": ("ticker_sentiment", sentiment_row(model_version="")),
-    "sentiment_no_window_end": ("ticker_sentiment", sentiment_row(window_end=None)),
+    "sentiment_counts_dont_add_up": (
+        "ticker_sentiment",
+        sentiment_row(article_count=13),
+    ),
+    "sentiment_negative_count": (
+        "ticker_sentiment",
+        sentiment_row(article_count=12, news_count=13, social_count=-1),
+    ),
+    "sentiment_counted_without_a_value": (
+        "ticker_sentiment",
+        empty_sentiment_row(
+            article_count=12, news_count=12, model_version="ProsusAI/finbert@x"
+        ),
+    ),
+    "sentiment_a_value_with_nothing_counted": (
+        "ticker_sentiment",
+        sentiment_row(article_count=0, news_count=0, model_version=None),
+    ),
+    "sentiment_first_after_last": (
+        "ticker_sentiment",
+        sentiment_row(first_at=LAST_AT, last_at=FIRST_AT),
+    ),
+    "sentiment_naive_last_at": (
+        "ticker_sentiment",
+        sentiment_row(last_at=datetime(2026, 11, 4, 16, 30)),
+    ),
+    "sentiment_no_weights_version": (
+        "ticker_sentiment",
+        sentiment_row(weights_version=""),
+    ),
+    "sentiment_news_without_model_version": (
+        "ticker_sentiment",
+        sentiment_row(model_version=None),
+    ),
+    "sentiment_model_version_without_news": (
+        "ticker_sentiment",
+        social_sentiment_row(model_version="ProsusAI/finbert@synthetic0001"),
+    ),
     "score_above_hundred": ("company_scores", score_row(score=Decimal("100.1"))),
     "score_bad_status": ("company_scores", score_row(status="partial")),
     "score_unknown_missing": ("company_scores", score_row(missing=["insider"])),
