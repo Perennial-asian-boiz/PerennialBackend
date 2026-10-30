@@ -29,7 +29,14 @@ REPO = Path(__file__).resolve().parents[3]
 SNAPSHOT = Path(__file__).parent / "fixtures" / "api" / "openapi_v1.json"
 
 WATCHLIST = models.WATCHLIST_SOURCES
-FULL_TABLES = ("publications", "current_publication", "securities", "security_identifiers")
+FULL_TABLES = (
+    "publications",
+    "current_publication",
+    "securities",
+    "security_identifiers",
+    "current_scores",  # Sprint 2: the scores pointer
+)
+_SCORE_PARTS = ("value", "nominal_weight", "weight", "contribution", "input_as_of", "input_version", "record_id")
 COLUMNS = {
     # S1-12: the API also reads the stored summary (never summary_grade or description_digest).
     "company_profiles": (
@@ -43,6 +50,29 @@ COLUMNS = {
         "summary_as_of",
     ),
     "publication_events": ("id", "publication_id", "kind", "checks", "created_at"),
+    # Sprint 2 (S2-01..03): never watchlist_publication_id or input_digest.
+    "company_scores": (
+        "id",
+        "batch_id",
+        "security_id",
+        "status",
+        "unavailable_reason",
+        "score",
+        "score_version",
+        "missing",
+        "recommended",
+        *(f"{c}_{p}" for c in ("fundamentals", "sentiment", "event_exposure") for p in _SCORE_PARTS),
+    ),
+    "score_explanations": (
+        "id",
+        "batch_id",
+        "security_id",
+        "company_score_id",
+        "status",
+        "reason",
+        "template_version",
+        "claims",
+    ),
 }
 PUBLICATION_KEYS = {
     "id",

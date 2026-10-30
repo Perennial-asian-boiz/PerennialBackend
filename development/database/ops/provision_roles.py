@@ -40,15 +40,26 @@ REFERENCE = ("company_profiles",)
 IMMUTABLE += ("market_caps", "publication_market_cap_rows")
 IMMUTABLE += ("fundamentals", "fundamental_scores")  # pattern evaluation
 IMMUTABLE += ("news_articles", "news_coverage")  # S1-03 news ingestion
+# Sprint 2 scores: batch tables, and the pointer the scores job moves.
+IMMUTABLE += ("ticker_sentiment", "company_scores", "score_explanations")
+MUTABLE += ("current_scores",)
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # M5 read API (perennial_api): published data only, never raw source tables,
 # runs or operator text. Two grants are column-level, so code selects columns.
-API_TABLES = ("publications", "current_publication", "securities", "security_identifiers")
+API_TABLES = ("publications", "current_publication", "securities", "security_identifiers", "current_scores")
 API_COLUMNS = {
     # S1-12: the stored summary it serves; never summary_grade or description_digest.
     "company_profiles": ("id", "sector", "industry", "summary", "summary_status",
                          "summary_source_name", "summary_source_url", "summary_as_of"),
     "publication_events": ("id", "publication_id", "kind", "checks", "created_at"),
+    # Sprint 2: the score, its breakdown and its explanation; never watchlist_publication_id or input_digest.
+    "company_scores": ("id", "batch_id", "security_id", "status", "unavailable_reason", "score", "score_version",
+                       "missing", "recommended",
+                       *(f"{c}_{p}" for c in ("fundamentals", "sentiment", "event_exposure")
+                         for p in ("value", "nominal_weight", "weight", "contribution", "input_as_of",
+                                   "input_version", "record_id"))),
+    "score_explanations": ("id", "batch_id", "security_id", "company_score_id", "status", "reason",
+                           "template_version", "claims"),
 }
 # What the S1-12 summary job (importer) may write on company_profiles.
 SUMMARY_COLUMNS = ("summary", "summary_grade", "summary_status", "summary_source_name",

@@ -46,6 +46,8 @@ CANONICAL_ONLY_SOURCES = frozenset({"market_caps"})
 CANONICAL_ONLY_SOURCES |= {"fundamentals", "fundamental_scores"}
 # S1-03 news ingestion plans from the same published watchlist.
 CANONICAL_ONLY_SOURCES |= {"news_articles"}
+# Sprint 2 scores derive from securities the platform already resolved.
+CANONICAL_ONLY_SOURCES |= {"ticker_sentiment", "company_scores", "score_explanations"}
 
 UNRESOLVED = "unresolved"
 INACTIVE = "inactive_security"
