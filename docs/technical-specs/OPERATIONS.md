@@ -191,7 +191,12 @@ python -m src.pipeline.scheduler --once --job scores
 it, then derives `score_explanations` for that batch. It exits 0 only when both
 succeed. Unchanged inputs reuse the stored batches, and the pointer (and the
 API's `as_of`) doesn't move. With no `ticker_sentiment` batch at all, every
-score is unavailable (`only_fundamentals`).
+score is unavailable (`only_fundamentals`); so is a security whose sentiment row
+counted nothing (a NULL value). If a cited `ticker_sentiment` batch's envelope
+has no positive whole-number `window_days`, the explanations run fails
+`invalid_upstream` and writes nothing, and `--job scores` exits 1. The scores
+batch it ran on is already current, with no explanations of its own; fix the
+sentiment producer's batch and rerun.
 
 Supervise the process and send logs to the deployment's log sink. Monitor worker
 availability, publication age, source freshness, repeated failed/abandoned runs,

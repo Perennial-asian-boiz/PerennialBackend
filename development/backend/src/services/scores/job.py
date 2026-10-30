@@ -8,7 +8,9 @@ Two derived ingestion runs, each writing an immutable batch
 * company_scores: score-v1 (scoring.blend) over the latest successful
   fundamental_scores batch and, when there is one, the latest successful
   ticker_sentiment batch, both named in run_dependencies. One row per security
-  in the fundamentals batch. recommended is judged against the current
+  in the fundamentals batch. ticker_sentiment is PR #85's table plus
+  model_version (decision 108): a row with a NULL value (nothing counted), or
+  no row, is missing sentiment. recommended is judged against the current
   production watchlist publication, whose id every row stores. Then
   current_scores['production'] points at the batch; the API reads scores only
   through it.
@@ -16,6 +18,9 @@ Two derived ingestion runs, each writing an immutable batch
   run_dependencies), one row per score row. A stored explanation for the same
   score row with an equal input digest is carried forward (S2-03 AC4); the
   digest covers the rows' ids, so a new scores batch regenerates (decision D1).
+  A sentiment claim's window is the cited ticker_sentiment batch envelope's
+  window_days; a cited batch without a positive int one fails the run
+  invalid_upstream before anything is written.
 
 Unchanged inputs give identical content, so the importer reuses the stored
 batch (as fundamental_scores does) and the pointer, with its promoted_at, stays
@@ -25,8 +30,8 @@ ids means a new publication or a new score version is never missed.
 
 import logging
 import sys
-from collections.abc import Mapping, Sequence
-from datetime import date
+from collections.abc import Callable, Mapping, Sequence
+from datetime import date, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -49,10 +54,14 @@ CHANNEL = "production"
 RECOMMENDED_AT = Decimal("60")
 # Whether "unresolved" candidates count is open (plan §8); they don't in v1.
 MEMBER_BUCKETS = ("popular_stable", "affordable_growing")
-# Per component: the cited record's as-of column and version column.
-CITED = {
-    "fundamentals": ("fiscal_year_end", "score_version"),
-    "sentiment": ("window_end", "rollup_version"),
+# Per component: the cited record's as-of and version.
+CITED: dict[str, tuple[Callable[[Mapping[str, Any]], date], str]] = {
+    "fundamentals": (lambda r: r["fiscal_year_end"], "score_version"),
+    # Decision 108: last_at's UTC date, whatever the session's time zone.
+    "sentiment": (
+        lambda r: r["last_at"].astimezone(timezone.utc).date(),
+        "weights_version",
+    ),
 }
 
 
@@ -71,8 +80,8 @@ def _plain(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def read_ticker_sentiment(conn: Connection, batch_id: int) -> dict[int, dict[str, Any]]:
-    """{security_id: row} of one ticker_sentiment batch. A component's as-of is
-    window_end; a security with no row has no sentiment coverage."""
+    """{security_id: row} of one ticker_sentiment batch, empty rows included. A
+    NULL value (nothing counted) or no row means the security has no sentiment."""
     source = conn.execute(
         select(m.source_batches.c.source).where(m.source_batches.c.id == batch_id)
     ).scalar_one_or_none()
@@ -124,7 +133,7 @@ def score_record(
     values: dict[str, Decimal | None] = {}
     if fundamentals.get("score") is not None:
         values["fundamentals"] = fundamentals["score"]
-    if sentiment is not None:
+    if sentiment is not None and sentiment.get("value") is not None:
         values["sentiment"] = scoring.normalize_sentiment(sentiment["value"])
     result = scoring.blend(values, weights)
     recommended = (
@@ -160,7 +169,7 @@ def score_record(
         row = cited.get(c.name)
         if c.value is not None and row is not None and c.name in CITED:
             as_of, version = CITED[c.name]
-            record[f"{c.name}_input_as_of"] = _text(row[as_of])
+            record[f"{c.name}_input_as_of"] = _text(as_of(row))
             record[f"{c.name}_input_version"] = row[version]
             record[f"{c.name}_record_id"] = row["id"]
     return record
@@ -316,6 +325,35 @@ def _previous_explanations(
     return out
 
 
+class InvalidUpstream(Exception):
+    """A cited upstream batch can't be used; the run fails invalid_upstream."""
+
+
+def _window_days(conn: Connection, batch_ids: set[int]) -> dict[int, int]:
+    """Each cited ticker_sentiment batch's envelope window_days: a positive int
+    (not a bool), else InvalidUpstream."""
+    batches = m.source_batches
+    found = dict(
+        conn.execute(
+            select(batches.c.id, batches.c.payload["envelope"]["window_days"]).where(
+                batches.c.id.in_(batch_ids), batches.c.source == SENTIMENT
+            )
+        )
+        .tuples()
+        .all()
+    )
+    for batch_id in batch_ids:
+        days = found.get(batch_id)
+        if type(days) is not int or days < 1:
+            logger.warning(
+                "score explanations: ticker_sentiment batch_id=%s has no usable "
+                "window_days",
+                batch_id,
+            )
+            raise InvalidUpstream
+    return found
+
+
 def _explanations_outcome(conn: Connection, scores_batch: int) -> CollectionOutcome:
     scores = sorted(batch_rows(conn, SCORES, scores_batch), key=lambda r: r["symbol"])
     fundamentals = _by_id(
@@ -328,17 +366,20 @@ def _explanations_outcome(conn: Connection, scores_batch: int) -> CollectionOutc
         m.ticker_sentiment,
         [r["sentiment_record_id"] for r in scores if r["sentiment_record_id"]],
     )
+    windows = _window_days(conn, {row["batch_id"] for row in sentiment.values()})
     previous = _previous_explanations(conn, [r["id"] for r in scores])
     records = []
     carried = 0
     for row in scores:
         score = _plain(row)
         before = previous.get(score["id"])
+        cited = sentiment.get(score["sentiment_record_id"])
         explanation = explain_module.explain(
             score,
             fundamentals.get(score["fundamentals_record_id"]),
-            sentiment.get(score["sentiment_record_id"]),
+            cited,
             before,
+            window_days=windows[cited["batch_id"]] if cited else None,
         )
         carried += before is not None and (
             before.get("input_digest"),
@@ -386,6 +427,10 @@ def derive_explanations(engine: Engine) -> ImportResult:
                 try:
                     with engine.connect() as conn:
                         outcome = _explanations_outcome(conn, scores_batch)
+                except InvalidUpstream:  # before any write; no row data
+                    outcome = CollectionOutcome.failure(
+                        EXPLANATIONS, "derived", "invalid_upstream"
+                    )
                 except Exception as exc:  # a bug here: record it, write nothing
                     outcome = CollectionOutcome.failure(
                         EXPLANATIONS,
