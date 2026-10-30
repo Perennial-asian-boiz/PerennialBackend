@@ -667,7 +667,7 @@ Archives are encrypted to a recipient **certificate**: the public half, which
 the backup host holds. Only the matching **private key** decrypts them. Losing
 the key makes every archive unreadable; leaking it, together with storage access,
 exposes every archive. Agents never create, hold or see the real key. The
-commands below are for Bryan, on his own machine.
+commands below are for Bryan to run on Bryan's own machine.
 
 **Key and certificate.** Generate an RSA-3072 key that is encrypted at rest from
 the start, plus a self-signed certificate for it:
