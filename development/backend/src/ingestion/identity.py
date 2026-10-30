@@ -48,6 +48,8 @@ CANONICAL_ONLY_SOURCES |= {"fundamentals", "fundamental_scores"}
 CANONICAL_ONLY_SOURCES |= {"news_articles"}
 # Sprint 2 scores derive from securities the platform already resolved.
 CANONICAL_ONLY_SOURCES |= {"ticker_sentiment", "company_scores", "score_explanations"}
+# S1-05: social posts are filtered to stored canonical tickers before import.
+CANONICAL_ONLY_SOURCES |= {"social_posts", "article_sentiment"}
 
 UNRESOLVED = "unresolved"
 INACTIVE = "inactive_security"
