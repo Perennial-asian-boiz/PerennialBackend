@@ -364,6 +364,29 @@ def test_a_sentiment_claim_without_a_window_is_refused():
         explain(fundamentals=row, window_days=None)
 
 
+@pytest.mark.parametrize("window_days", [0, -3, 7.5, "7", True])
+def test_a_window_that_is_not_a_positive_int_is_refused(window_days):
+    """Checker F2: explain guards itself, as the job does; bool is not an int here."""
+    row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
+    with pytest.raises(ValueError):
+        explain(fundamentals=row, window_days=window_days)
+    with pytest.raises(ValueError):
+        explain_module().claims_for(
+            score_row(), row, sentiment_row(), window_days=window_days
+        )
+
+
+def test_a_naive_last_at_is_refused():
+    """Checker F1: a timezone-less last_at is neither host-local nor UTC; refuse it,
+    as the TickerSentiment record model does."""
+    row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
+    naive = sentiment_row(last_at=datetime(2026, 11, 4, 16, 30))
+    with pytest.raises(ValueError):
+        explain(fundamentals=row, sentiment=naive)
+    with pytest.raises(ValueError):
+        explain_module().claims_for(score_row(), row, naive, window_days=7)
+
+
 @pytest.mark.parametrize(
     "last_at,as_of",
     [
