@@ -1,0 +1,33 @@
+{
+  "version": "weights-v1",
+  "tiers": {
+    "wire_and_major": {
+      "weight": 1.0,
+      "sources": [
+        "reuters.com", "bloomberg.com", "wsj.com", "cnbc.com", "ft.com", "apnews.com",
+        "nytimes.com", "washingtonpost.com", "economist.com"
+      ]
+    },
+    "financial_media": {
+      "weight": 0.7,
+      "sources": [
+        "barrons.com", "marketwatch.com", "benzinga.com", "fool.com", "247wallst.com",
+        "zacks.com", "seekingalpha.com", "yahoo.com", "investors.com", "morningstar.com",
+        "forbes.com", "businessinsider.com", "thestreet.com", "investopedia.com",
+        "kiplinger.com"
+      ]
+    },
+    "aggregator_release_blog": {
+      "weight": 0.4,
+      "sources": [
+        "globenewswire.com", "prnewswire.com", "businesswire.com", "accesswire.com",
+        "stocktwits.com", "cryptoprowl.com", "insidermonkey.com", "gurufocus.com",
+        "tipranks.com", "investing.com"
+      ]
+    },
+    "social": {
+      "weight": 0.2,
+      "sources": ["reddit", "bluesky", "mastodon", "youtube"]
+    }
+  }
+}

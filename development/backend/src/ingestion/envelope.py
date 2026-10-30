@@ -152,6 +152,20 @@ ENVELOPE_KEYS.update(
         "match_rule_version",
     ),
 )
+# S1-05 source credibility weighting (ticker_sentiment's keys are below).
+ENVELOPE_KEYS.update(
+    social_posts=(
+        "source",
+        "window_days",
+        "fresh",
+        "stale",
+        "missing",
+        "posts",
+        "skipped_tickers",
+        "skipped_tickers_count",
+    ),
+    article_sentiment=("model", "input_batch_id", "articles_scored"),
+)
 
 # Sprint 2 scores (derived runs). company_scores keeps score-v1's envelope
 # (score_version and weights as "component:weight" strings) and the input batches.
