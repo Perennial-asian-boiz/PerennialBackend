@@ -97,8 +97,13 @@ def _sentiment_claim(row: Mapping[str, Any], window_days: int | None) -> dict[st
     last_at: datetime | None = row.get("last_at")
     if value is None or last_at is None:
         raise ValueError("the cited sentiment row has no value: nothing was scored")
-    if window_days is None:
-        raise ValueError("a sentiment claim needs the batch's window_days")
+    if last_at.tzinfo is None or last_at.utcoffset() is None:
+        raise ValueError("the cited sentiment row's last_at has no time zone")
+    # Exactly an int of at least 1: not a bool, and nothing is coerced.
+    if type(window_days) is not int or window_days < 1:
+        raise ValueError(
+            "a sentiment claim needs the batch's window_days, a positive int"
+        )
     news, social = int(row["news_count"]), int(row["social_count"])
     if news and social:
         subject = "News and social posts"
@@ -109,7 +114,7 @@ def _sentiment_claim(row: Mapping[str, Any], window_days: int | None) -> dict[st
         subject, counted = "News coverage", _plural(news, "article")
     else:
         raise ValueError("the cited sentiment row counts no articles or posts")
-    days = _plural(int(window_days), "day")
+    days = _plural(window_days, "day")
     if value > 0:
         lean = "leaned positive"
     elif value < 0:
