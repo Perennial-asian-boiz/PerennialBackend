@@ -13,23 +13,26 @@ Pinned interface, src/services/scores/job.py:
   then current_scores['production'] points at the batch. Unchanged inputs leave
   the pointer (and its promoted_at, the API's as_of) where it was.
 * read_ticker_sentiment(conn, batch_id) -> {security_id: row}, the contract
-  reader (PR #85's table, decision 108). A row with a NULL value is sentiment
-  missing; the component's as-of is last_at's UTC date and its version
-  weights_version. No ticker_sentiment batch at all makes sentiment missing
-  for everyone.
+  reader, empty rows included. Decision 108: ticker_sentiment is #85's table
+  plus model_version. Sentiment is missing for a security whose row has a NULL
+  value (nothing counted) or that has no row; no ticker_sentiment batch at all
+  makes it missing for everyone. The component's as-of is last_at's UTC date
+  and its version is weights_version.
 * derive_explanations(engine): a derived score_explanations run on the
   current scores batch (named in run_dependencies), one row per score row, with
   company_score_id. Re-explaining the same scores row returns its stored
   explanation unchanged (03-AC4); a new scores batch regenerates (decision D1).
+  The explanation's window is the cited ticker_sentiment batch envelope's
+  window_days, passed to explain() as window_days.
 * run_once(settings) for `--job scores`: derive_scores, then derive_explanations.
 
 recommended = status ok, score >= 60, and the security is listed in the current
-production publication: "on the current consensus list", the sprint matrix's
-S2-03 definition, so any bucket, unresolved included (§8's open question).
-Every row names the publication it was judged against.
+production publication (popular_stable or affordable_growing here; whether
+"unresolved" counts is open, §8). Every row names the publication it was judged
+against.
 """
 
-from datetime import date, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -62,16 +65,11 @@ def explain_module():
 # ── seeding through the ingestion contract ───────────────
 
 
-WINDOW_DAYS = 7
-# What #85's weighting run stores; explain() takes the window from it (decision 108).
-ENVELOPES = {
-    "ticker_sentiment": {"weights_version": "weights-v1", "window_days": WINDOW_DAYS}
-}
-
-
-def _import(engine, source, records):
+def _import(engine, source, records, envelope=None):
     from src.ingestion.importer import CollectionOutcome, import_collection
 
+    if envelope is None and source == "ticker_sentiment":
+        envelope = sentiment_envelope()
     result = import_collection(
         engine,
         CollectionOutcome.success(
@@ -79,7 +77,7 @@ def _import(engine, source, records):
             "derived",
             records,
             coverage={"complete": True, "scope": "derivation"},
-            envelope=ENVELOPES.get(source),
+            envelope=envelope,
         ),
     )
     assert result.succeeded, (source, result.error_code, result.error_summary)
@@ -111,36 +109,52 @@ def fundamentals_record(ticker, score, *, growth="0.18", margin="0.42", trend=No
     }
 
 
-LAST_AT = "2026-11-04T17:02:00+00:00"
-
-
-def sentiment_record(ticker, value, count=12, last_at=LAST_AT):
-    """A ticker_sentiment record of the PR #85 contract (decision 108). value None:
-    nothing to score, so a row with zero counts and no value, averages or times."""
-    if value is None:
-        return {
-            "ticker": ticker,
-            "value": None,
-            "plain_average": None,
-            "article_count": 0,
-            "news_count": 0,
-            "social_count": 0,
-            "first_at": None,
-            "last_at": None,
-            "weights_version": "weights-v1",
-            "model_version": None,
-        }
+def sentiment_record(
+    ticker, value, count=12, *, social=0, last_at="2026-11-04T16:30:00+00:00"
+):
+    """A scored #85 row: `count` news articles and `social` posts."""
     return {
         "ticker": ticker,
         "value": value,
         "plain_average": value,
-        "article_count": count,
+        "article_count": count + social,
         "news_count": count,
-        "social_count": 0,
-        "first_at": "2026-10-29T13:00:00+00:00",
+        "social_count": social,
+        "first_at": "2026-10-29T14:05:00+00:00",
         "last_at": last_at,
         "weights_version": "weights-v1",
-        "model_version": "ProsusAI/finbert@synthetic0001",
+        "model_version": "ProsusAI/finbert@synthetic0001" if count else None,
+    }
+
+
+def empty_sentiment_record(ticker):
+    """Nothing counted for the security in the window: a NULL value."""
+    return {
+        "ticker": ticker,
+        "value": None,
+        "plain_average": None,
+        "article_count": 0,
+        "news_count": 0,
+        "social_count": 0,
+        "first_at": None,
+        "last_at": None,
+        "weights_version": "weights-v1",
+        "model_version": None,
+    }
+
+
+def sentiment_envelope(window_days=7):
+    """#85's ticker_sentiment envelope keys."""
+    return {
+        "weights_version": "weights-v1",
+        "window_days": window_days,
+        "universe": 5,
+        "scored": 4,
+        "no_data_count": 1,
+        "news_used": 27,
+        "social_used": 6,
+        "social_batch_fresh": True,
+        "publishers_unknown": 0,
     }
 
 
@@ -177,8 +191,9 @@ TICKERS = ("ZZJA", "ZZJB", "ZZJC", "ZZJD", "ZZJE")
 
 @pytest.fixture
 def world(engine):
-    """A: 78 and +0.31, listed. B: 50 and -0.5, listed (42.6). C: 78, no sentiment.
-    D: no fundamentals score, has sentiment. E: 90 and +0.9, not listed."""
+    """A: 78 and +0.31, listed. B: 50 and -0.5, listed (42.6). C: 78, an empty
+    sentiment row (nothing counted). D: no fundamentals score, has sentiment.
+    E: 90 and +0.9 from social posts only, not listed."""
     for t in TICKERS:
         seed_security(engine, t)
     fundamentals = _import(
@@ -198,8 +213,9 @@ def world(engine):
         [
             sentiment_record("ZZJA", "0.3100"),
             sentiment_record("ZZJB", "-0.5000", 3),
+            empty_sentiment_record("ZZJC"),
             sentiment_record("ZZJD", "0.2000"),
-            sentiment_record("ZZJE", "0.9000"),
+            sentiment_record("ZZJE", "0.9000", 0, social=6),
         ],
     )
     publication = publish(engine, popular=("ZZJA", "ZZJB"), affordable=("ZZJC", "ZZJD"))
@@ -285,8 +301,16 @@ def expected_score_row(fund, sent, publication, member):
         "watchlist_publication_id": publication,
     }
     cited = {
-        "fundamentals": (fund, lambda r: r["fiscal_year_end"], "score_version"),
-        "sentiment": (sent, lambda r: utc_date(r["last_at"]), "weights_version"),
+        "fundamentals": (
+            fund,
+            lambda r: r["fiscal_year_end"],
+            lambda r: r["score_version"],
+        ),
+        "sentiment": (  # decision 108
+            sent,
+            lambda r: r["last_at"].astimezone(timezone.utc).date(),
+            lambda r: r["weights_version"],
+        ),
     }
     for c in result.components:
         row[f"{c.name}_value"] = c.value
@@ -296,13 +320,9 @@ def expected_score_row(fund, sent, publication, member):
         record, as_of, version = cited.get(c.name, (None, None, None))
         present = c.value is not None and record is not None
         row[f"{c.name}_input_as_of"] = as_of(record) if present else None
-        row[f"{c.name}_input_version"] = record[version] if present else None
+        row[f"{c.name}_input_version"] = version(record) if present else None
         row[f"{c.name}_record_id"] = record["id"] if present else None
     return row
-
-
-def utc_date(moment):
-    return moment.astimezone(timezone.utc).date()
 
 
 def same(stored, expected):
@@ -388,50 +408,67 @@ def test_recommended_starts_at_exactly_60(engine):
     }
 
 
-def test_the_sentiment_as_of_is_last_ats_utc_date(engine, world):
-    """Decision 108: the component's as-of is last_at's UTC date; its version is
-    weights_version."""
+def test_the_sentiment_as_of_is_last_at_and_its_version_the_weights(engine, world):
     stored = rows(engine, "company_scores", scores_ok(engine).batch_id)
     assert stored["ZZJA"]["sentiment_input_as_of"] == date(2026, 11, 4)
     assert stored["ZZJA"]["fundamentals_input_as_of"] == date(2025, 6, 30)
     assert stored["ZZJA"]["sentiment_input_version"] == "weights-v1"
+    assert stored["ZZJE"]["sentiment_input_version"] == "weights-v1"  # social only
 
 
-def test_a_late_evening_last_at_in_another_zone_is_dated_in_utc(engine):
-    seed_security(engine, "ZZJA")
-    _import(engine, "fundamental_scores", [fundamentals_record("ZZJA", "78.0")])
-    late = "2026-11-04T23:30:00-08:00"  # 2026-11-05 07:30 UTC
+def test_the_sentiment_as_of_is_last_ats_utc_date_whatever_the_session_zone(engine):
+    """03:30 UTC on Nov 5 is still Nov 4 in New York: the as-of is the UTC date."""
+    from sqlalchemy import create_engine
+
+    seed_security(engine, "ZZJM")
+    _import(engine, "fundamental_scores", [fundamentals_record("ZZJM", "78.0")])
+    late = "2026-11-05T03:30:00+00:00"
     _import(
-        engine, "ticker_sentiment", [sentiment_record("ZZJA", "0.3100", last_at=late)]
+        engine, "ticker_sentiment", [sentiment_record("ZZJM", "0.3100", last_at=late)]
     )
-    publish(engine, popular=("ZZJA",))
-    stored = rows(engine, "company_scores", scores_ok(engine).batch_id)
-    assert stored["ZZJA"]["sentiment_input_as_of"] == date(2026, 11, 5)
-
-
-def test_a_sentiment_row_with_no_value_is_sentiment_missing(engine):
-    """Decision 108: #85 writes a row for every watchlist security; a NULL value
-    means nothing was scored, which the score treats like no row at all."""
-    seed_security(engine, "ZZJA")
-    _import(engine, "fundamental_scores", [fundamentals_record("ZZJA", "78.0")])
-    sentiment = _import(engine, "ticker_sentiment", [sentiment_record("ZZJA", None)])
-    publish(engine, popular=("ZZJA",))
-    current = scores_ok(engine)
-    row = rows(engine, "company_scores", current.batch_id)["ZZJA"]
-    assert (row["status"], row["unavailable_reason"]) == (
-        "unavailable",
-        "only_fundamentals",
+    publish(engine, popular=("ZZJM",))
+    new_york = create_engine(
+        engine.url, connect_args={"options": "-c timezone=America/New_York"}
     )
-    assert list(row["missing"]) == ["sentiment", "event_exposure"]
-    assert (row["sentiment_value"], row["sentiment_record_id"]) == (None, None)
-    assert dependencies(engine, current.batch_id)["ticker_sentiment"] == sentiment
+    try:
+        result = job().derive_scores(new_york)
+    finally:
+        new_york.dispose()
+    assert result.succeeded, getattr(result, "error_code", None)
+    stored = rows(engine, "company_scores", pointer(engine).batch_id)
+    assert stored["ZZJM"]["sentiment_input_as_of"] == date(2026, 11, 5)
 
 
-def test_an_unresolved_candidate_is_on_the_consensus_list(engine, world):
-    """The matrix's S2-03 definition: on the current consensus list, every bucket."""
-    publish(engine, popular=("ZZJA",), unresolved=("ZZJE",))
+def test_an_empty_row_and_no_row_are_both_missing_sentiment(engine):
+    """Decision 108: a NULL value (nothing counted) and no row at all both mean missing."""
+    for t in ("ZZJA", "ZZJC", "ZZJH"):
+        seed_security(engine, t)
+    _import(
+        engine,
+        "fundamental_scores",
+        [fundamentals_record(t, "78.0") for t in ("ZZJA", "ZZJC", "ZZJH")],
+    )
+    _import(
+        engine,
+        "ticker_sentiment",
+        [sentiment_record("ZZJA", "0.3100"), empty_sentiment_record("ZZJC")],
+    )
+    publish(engine, popular=("ZZJA", "ZZJC", "ZZJH"))
     stored = rows(engine, "company_scores", scores_ok(engine).batch_id)
-    assert (stored["ZZJE"]["score"], stored["ZZJE"]["recommended"]) == (D("91.5"), True)
+    assert stored["ZZJA"]["status"] == "ok"
+    for t in ("ZZJC", "ZZJH"):
+        row = stored[t]
+        assert (row["status"], row["unavailable_reason"]) == (
+            "unavailable",
+            "only_fundamentals",
+        ), t
+        assert list(row["missing"]) == ["sentiment", "event_exposure"], t
+        assert (
+            row["sentiment_value"],
+            row["sentiment_input_as_of"],
+            row["sentiment_input_version"],
+            row["sentiment_record_id"],
+        ) == (None, None, None, None), t
 
 
 def test_every_ok_row_reproduces_through_breakdown(engine, world):
@@ -510,6 +547,14 @@ def test_a_new_publication_rejudges_recommended(engine, world):
         "ZZJE": True,
     }
     assert {r["watchlist_publication_id"] for r in stored.values()} == {newer}
+
+
+def test_an_unresolved_candidate_is_on_the_consensus_list(engine, world):
+    """Hong's reading of §8's open question: "on the current consensus list", the
+    matrix's S2-03 definition, is every bucket, unresolved included."""
+    publish(engine, popular=("ZZJA",), unresolved=("ZZJE",))
+    stored = rows(engine, "company_scores", scores_ok(engine).batch_id)
+    assert (stored["ZZJE"]["score"], stored["ZZJE"]["recommended"]) == (D("91.5"), True)
 
 
 def test_without_any_sentiment_batch_sentiment_is_missing_for_everyone(engine):
@@ -594,15 +639,24 @@ def test_read_ticker_sentiment_keys_rows_by_security(engine, world):
             .tuples()
             .all()
         )
-    assert set(found) == {ids[t] for t in ("ZZJA", "ZZJB", "ZZJD", "ZZJE")}
+    assert set(found) == {ids[t] for t in TICKERS}  # the empty row too
     row = found[ids["ZZJA"]]
     assert (
         row["value"],
-        row["article_count"],
-        utc_date(row["last_at"]),
+        row["news_count"],
+        row["social_count"],
+        row["last_at"],
         row["batch_id"],
-    ) == (D("0.3100"), 12, date(2026, 11, 4), world.sentiment)
+    ) == (
+        D("0.3100"),
+        12,
+        0,
+        datetime(2026, 11, 4, 16, 30, tzinfo=timezone.utc),
+        world.sentiment,
+    )
     assert row["weights_version"] == "weights-v1" and isinstance(row["id"], int)
+    assert row["model_version"] == "ProsusAI/finbert@synthetic0001"
+    assert found[ids["ZZJC"]]["value"] is None
 
 
 def test_read_ticker_sentiment_refuses_another_sources_batch(engine, world):
@@ -645,7 +699,7 @@ def test_one_explanation_per_score_row_matching_explain(engine, world):
         assert len(row["input_digest"]) == 64
         if scores[t]["recommended"]:
             claims = explain_module().claims_for(
-                scores[t], fund[t], sent.get(t), window_days=WINDOW_DAYS
+                scores[t], fund[t], sent.get(t), window_days=7
             )
             assert (row["status"], row["reason"], row["claims"]) == (
                 "ok",
@@ -656,7 +710,7 @@ def test_one_explanation_per_score_row_matching_explain(engine, world):
         t: (r["status"], r["reason"], len(r["claims"])) for t, r in stored.items()
     }
     assert summary == {
-        # Decision 103 (c), PR #93: growth of 18% (45 points) is not a reason, so the
+        # Decision 103 (c), #93: growth of 18% (45 points) is not a reason, so the
         # 42-cent margin and the positive sentiment.
         "ZZJA": ("ok", None, 2),
         "ZZJB": ("not_recommended", None, 0),
@@ -664,6 +718,41 @@ def test_one_explanation_per_score_row_matching_explain(engine, world):
         "ZZJD": ("unavailable", "score_unavailable", 0),
         "ZZJE": ("not_recommended", None, 0),
     }
+    assert stored["ZZJA"]["claims"][-1]["text"] == (
+        "News coverage over the last 7 days leaned positive (12 articles)."
+    )
+
+
+def test_the_explanation_window_is_the_sentiment_envelopes_window_days(engine):
+    for t in ("ZZJA", "ZZJS"):
+        seed_security(engine, t)
+    _import(
+        engine,
+        "fundamental_scores",
+        [fundamentals_record("ZZJA", "78.0"), fundamentals_record("ZZJS", "78.0")],
+    )
+    _import(
+        engine,
+        "ticker_sentiment",
+        [
+            sentiment_record("ZZJA", "0.3100", 9, social=3),
+            # Positive: under decision 103 (c), #93, only a positive lean is a claim.
+            sentiment_record("ZZJS", "0.2000", 0, social=4),
+        ],
+        envelope=sentiment_envelope(window_days=3),
+    )
+    publish(engine, popular=("ZZJA", "ZZJS"))
+    scores_ok(engine)
+    explanations_ok(engine)
+    _, stored = latest_explanations(engine)
+    assert stored["ZZJA"]["claims"][-1]["text"] == (
+        "News and social posts over the last 3 days leaned positive"
+        " (9 articles, 3 posts)."
+    )
+    assert stored["ZZJS"]["claims"][-1]["text"] == (
+        "Social posts over the last 3 days leaned positive (4 posts)."
+    )
+    assert stored["ZZJS"]["claims"][-1]["as_of"] == "2026-11-04"
 
 
 def test_every_claim_cites_a_record_the_score_used(engine, world):
@@ -677,23 +766,6 @@ def test_every_claim_cites_a_record_the_score_used(engine, world):
             component = claim["component"]
             assert component not in scores[t]["missing"]
             assert claim["record"]["id"] == scores[t][f"{component}_record_id"]
-
-
-def test_the_sentiment_claims_window_is_its_batch_envelopes(engine, monkeypatch):
-    """Decision 108: derive_explanations passes the ticker_sentiment batch's window_days."""
-    monkeypatch.setitem(
-        ENVELOPES["ticker_sentiment"], "window_days", 3
-    )  # a 3-day roll-up
-    seed_security(engine, "ZZJA")
-    _import(engine, "fundamental_scores", [fundamentals_record("ZZJA", "78.0")])
-    _import(engine, "ticker_sentiment", [sentiment_record("ZZJA", "0.3100")])
-    publish(engine, popular=("ZZJA",))
-    scores_ok(engine)
-    explanations_ok(engine)
-    _, stored = latest_explanations(engine)
-    assert stored["ZZJA"]["claims"][-1]["text"] == (
-        "News coverage over the last 3 days leaned positive (12 articles)."
-    )
 
 
 def served_explanation_id(engine, symbol):
@@ -806,6 +878,99 @@ def test_a_changed_input_regenerates_the_explanation(engine, world):
     _, stored = latest_explanations(engine)
     assert stored["ZZJA"]["status"] == "ok"
     assert all(c["text"] != "stored wording" for c in stored["ZZJA"]["claims"])
+
+
+def _bad_window_world(engine, envelope, listed=True):
+    """ZZJA scores ok from a ticker_sentiment batch whose envelope has this window."""
+    seed_security(engine, "ZZJA")
+    _import(engine, "fundamental_scores", [fundamentals_record("ZZJA", "78.0")])
+    _import(
+        engine,
+        "ticker_sentiment",
+        [sentiment_record("ZZJA", "0.3100")],
+        envelope=envelope,
+    )
+    publish(engine, popular=("ZZJA",) if listed else ())
+    return scores_ok(engine)
+
+
+def _explanations_run(engine, run_id):
+    with engine.connect() as conn:
+        return (
+            conn.execute(
+                text(
+                    "SELECT status, error_code, error_summary, CAST(diagnostics AS text) AS diagnostics"
+                    " FROM perennial.ingestion_runs WHERE id = :r"
+                ),
+                {"r": run_id},
+            )
+            .mappings()
+            .one()
+        )
+
+
+def _without(key):
+    return {k: v for k, v in sentiment_envelope().items() if k != key}
+
+
+BAD_WINDOWS = {
+    "absent": _without("window_days"),
+    "null": {**sentiment_envelope(), "window_days": None},
+    "zero": {**sentiment_envelope(), "window_days": 0},
+    "negative": {**sentiment_envelope(), "window_days": -3},
+    "text": {**sentiment_envelope(), "window_days": "7"},
+    "fraction": {**sentiment_envelope(), "window_days": 7.5},
+    "boolean": {**sentiment_envelope(), "window_days": True},
+}
+
+
+@pytest.mark.parametrize("case", sorted(BAD_WINDOWS))
+def test_a_sentiment_envelope_without_a_usable_window_fails_closed(engine, case):
+    """No positive int window_days on the cited ticker_sentiment batch: the run fails
+    invalid_upstream, writes no explanations batch, and leaves the pointer alone."""
+    import logging
+
+    from src.ingestion.diagnostics import ERROR_SUMMARIES
+
+    current = _bad_window_world(engine, BAD_WINDOWS[case])
+    records = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    loggers = [logging.getLogger(n) for n in ("src", "src.services.scores.job")]
+    saved = [(lg.disabled, lg.level) for lg in loggers]
+    handler = Keep(level=logging.DEBUG)
+    for lg in loggers:
+        lg.disabled = False
+        lg.setLevel(logging.DEBUG)
+    loggers[0].addHandler(handler)
+    try:
+        result = job().derive_explanations(engine)
+    finally:
+        loggers[0].removeHandler(handler)
+        for lg, (disabled, level) in zip(loggers, saved):
+            lg.disabled, lg.level = disabled, level
+    assert (result.succeeded, result.error_code) == (False, "invalid_upstream")
+    assert "invalid_upstream" in ERROR_SUMMARIES
+    assert batches(engine, "score_explanations") == 0
+    assert pointer(engine) == current
+    run = _explanations_run(engine, result.run_id)
+    assert (run["status"], run["error_code"]) == ("failed", "invalid_upstream")
+    assert records, "the job logs its outcome"
+    seen = " ".join([*records, run["error_summary"] or "", run["diagnostics"] or ""])
+    for row_data in ("ZZJA", "0.3100", "0.31", "ProsusAI", "weights-v1"):
+        assert row_data not in seen, row_data
+
+
+def test_an_unlisted_score_citing_a_windowless_batch_also_fails_closed(engine):
+    """The rule is on the cited batch, not on whether a claim needs the window."""
+    current = _bad_window_world(engine, _without("window_days"), listed=False)
+    result = job().derive_explanations(engine)
+    assert (result.succeeded, result.error_code) == (False, "invalid_upstream")
+    assert batches(engine, "score_explanations") == 0
+    assert pointer(engine) == current
 
 
 def test_without_a_current_scores_batch_explanations_fail_missing_upstream(engine):

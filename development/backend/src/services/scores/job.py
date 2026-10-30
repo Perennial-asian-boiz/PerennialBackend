@@ -290,11 +290,10 @@ def _latest_explanations(
     return latest
 
 
-def _window_days(conn: Connection, batch_ids: set[int]) -> dict[int, Any]:
-    """Each ticker_sentiment batch's window, from its envelope (decision 108).
-
-    Passed to explain() as stored: explain refuses anything but a positive int.
-    """
+def _window_days(conn: Connection, batch_ids: set[int]) -> dict[int, int] | None:
+    """Each cited ticker_sentiment batch's window, from its envelope (decision 108),
+    or None when any of them has no positive int window_days. The rule is on the
+    cited batch, whether or not a claim ends up needing the window."""
     if not batch_ids:
         return {}
     found = conn.execute(
@@ -302,10 +301,13 @@ def _window_days(conn: Connection, batch_ids: set[int]) -> dict[int, Any]:
             m.source_batches.c.id.in_(batch_ids)
         )
     ).tuples()
-    return {
+    windows = {
         batch_id: (payload.get("envelope") or {}).get("window_days")
         for batch_id, payload in found
     }
+    # Exactly an int of at least 1, as explain() requires: not a bool, nothing coerced.
+    usable = {b: w for b, w in windows.items() if type(w) is int and w >= 1}
+    return usable if len(usable) == len(windows) else None
 
 
 def _explanations_outcome(conn: Connection, scores_batch: int) -> CollectionOutcome:
@@ -321,6 +323,8 @@ def _explanations_outcome(conn: Connection, scores_batch: int) -> CollectionOutc
         {r["sentiment_record_id"] for r in scores if r["sentiment_record_id"]},
     )
     windows = _window_days(conn, {r["batch_id"] for r in sentiment.values()})
+    if windows is None:
+        return CollectionOutcome.failure(EXPLANATIONS, "derived", "invalid_upstream")
     previous = _latest_explanations(conn, {r["id"] for r in scores})
     records = []
     carried = 0
