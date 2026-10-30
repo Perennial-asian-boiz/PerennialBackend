@@ -921,39 +921,55 @@ def _known(value: Optional[str], allowed: frozenset[str], what: str) -> Optional
 
 
 class TickerSentiment(SourceRecord):
-    """The sentiment contract (issue #76): one security's rolled-up sentiment for a window."""
+    """One security's credibility-weighted sentiment over the window: PR #85's record
+    plus model_version (decision 108). Nothing counted means no value and no dates."""
 
     DB_COLUMNS = (
         "value",
+        "plain_average",
         "article_count",
-        "window_start",
-        "window_end",
+        "news_count",
+        "social_count",
+        "first_at",
+        "last_at",
+        "weights_version",
         "model_version",
-        "source_weights_version",
-        "method",
-        "rollup_version",
     )
 
-    value: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
-    article_count: int = Field(ge=1, le=2**31 - 1, strict=True)
-    window_start: RequiredDate
-    window_end: RequiredDate  # the component's as-of
-    model_version: Annotated[str, BeforeValidator(_text_validator(64, required=True))]
-    source_weights_version: Version
-    method: Version
-    rollup_version: Version
+    value: Annotated[Optional[Decimal], BeforeValidator(_signed_decimal(4, 5))] = None
+    plain_average: Annotated[
+        Optional[Decimal], BeforeValidator(_signed_decimal(4, 5))
+    ] = None
+    article_count: int = Field(ge=0, le=2**31 - 1, strict=True)
+    news_count: int = Field(ge=0, le=2**31 - 1, strict=True)
+    social_count: int = Field(ge=0, le=2**31 - 1, strict=True)
+    first_at: Optional[datetime] = None
+    last_at: Optional[datetime] = None
+    weights_version: Version
+    model_version: Annotated[Optional[str], BeforeValidator(_text_validator(64))] = None
 
-    @field_validator("value")
+    @field_validator("value", "plain_average")
     @classmethod
-    def _unit_range(cls, v: Decimal) -> Decimal:
-        if not Decimal(-1) <= v <= Decimal(1):
+    def _unit_range(cls, v: Optional[Decimal]) -> Optional[Decimal]:
+        if v is not None and not Decimal(-1) <= v <= Decimal(1):
             raise ValueError("sentiment must be between -1 and 1")
         return v
 
     @model_validator(mode="after")
-    def _window(self) -> "TickerSentiment":
-        if self.window_start > self.window_end:
-            raise ValueError("window_start is after window_end")
+    def _scored_or_empty(self) -> "TickerSentiment":
+        if self.article_count != self.news_count + self.social_count:
+            raise ValueError("article_count must equal news_count + social_count")
+        empty = self.article_count == 0
+        fields = (self.value, self.plain_average, self.first_at, self.last_at)
+        if any((f is None) != empty for f in fields):
+            raise ValueError("values and dates are present exactly when counted")
+        if self.first_at is not None and self.last_at is not None:
+            if self.first_at.tzinfo is None or self.last_at.tzinfo is None:
+                raise ValueError("dates must be timezone-aware")
+            if self.first_at > self.last_at:
+                raise ValueError("first_at must not be after last_at")
+        if (self.news_count == 0) != (self.model_version is None):
+            raise ValueError("model_version is present exactly when news is counted")
         return self
 
 
