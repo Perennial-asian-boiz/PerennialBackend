@@ -106,7 +106,12 @@ def point(conn, batch, promoted_at=PROMOTED):
 def cited(**over):
     """An ok score row citing its fundamentals and sentiment records, as the job stores it."""
     return score_row(
-        **{"fundamentals_record_id": 812, "sentiment_record_id": 77, **over}
+        **{
+            "fundamentals_record_id": 812,
+            "sentiment_record_id": 77,
+            "sentiment_input_version": "weights-v1",
+            **over,
+        }
     )
 
 
@@ -142,7 +147,7 @@ FULL_COMPONENTS = [
         "weight": 0.2941,
         "contribution": 19.26,
         "input_as_of": "2026-11-04",
-        "input_version": "sentiment-rollup-v1",
+        "input_version": "weights-v1",  # decision 108: #85's weights_version
         "record": {"table": "ticker_sentiment", "id": 77},
     },
     {
