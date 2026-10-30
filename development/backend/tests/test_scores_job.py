@@ -62,6 +62,13 @@ def explain_module():
 # ── seeding through the ingestion contract ───────────────
 
 
+WINDOW_DAYS = 7
+# What #85's weighting run stores; explain() takes the window from it (decision 108).
+ENVELOPES = {
+    "ticker_sentiment": {"weights_version": "weights-v1", "window_days": WINDOW_DAYS}
+}
+
+
 def _import(engine, source, records):
     from src.ingestion.importer import CollectionOutcome, import_collection
 
@@ -72,6 +79,7 @@ def _import(engine, source, records):
             "derived",
             records,
             coverage={"complete": True, "scope": "derivation"},
+            envelope=ENVELOPES.get(source),
         ),
     )
     assert result.succeeded, (source, result.error_code, result.error_summary)
@@ -636,7 +644,9 @@ def test_one_explanation_per_score_row_matching_explain(engine, world):
         assert row["template_version"] == "explain-v1"
         assert len(row["input_digest"]) == 64
         if scores[t]["recommended"]:
-            claims = explain_module().claims_for(scores[t], fund[t], sent.get(t))
+            claims = explain_module().claims_for(
+                scores[t], fund[t], sent.get(t), window_days=WINDOW_DAYS
+            )
             assert (row["status"], row["reason"], row["claims"]) == (
                 "ok",
                 None,
@@ -667,6 +677,23 @@ def test_every_claim_cites_a_record_the_score_used(engine, world):
             component = claim["component"]
             assert component not in scores[t]["missing"]
             assert claim["record"]["id"] == scores[t][f"{component}_record_id"]
+
+
+def test_the_sentiment_claims_window_is_its_batch_envelopes(engine, monkeypatch):
+    """Decision 108: derive_explanations passes the ticker_sentiment batch's window_days."""
+    monkeypatch.setitem(
+        ENVELOPES["ticker_sentiment"], "window_days", 3
+    )  # a 3-day roll-up
+    seed_security(engine, "ZZJA")
+    _import(engine, "fundamental_scores", [fundamentals_record("ZZJA", "78.0")])
+    _import(engine, "ticker_sentiment", [sentiment_record("ZZJA", "0.3100")])
+    publish(engine, popular=("ZZJA",))
+    scores_ok(engine)
+    explanations_ok(engine)
+    _, stored = latest_explanations(engine)
+    assert stored["ZZJA"]["claims"][-1]["text"] == (
+        "News coverage over the last 3 days leaned positive (12 articles)."
+    )
 
 
 def served_explanation_id(engine, symbol):

@@ -290,6 +290,24 @@ def _latest_explanations(
     return latest
 
 
+def _window_days(conn: Connection, batch_ids: set[int]) -> dict[int, Any]:
+    """Each ticker_sentiment batch's window, from its envelope (decision 108).
+
+    Passed to explain() as stored: explain refuses anything but a positive int.
+    """
+    if not batch_ids:
+        return {}
+    found = conn.execute(
+        select(m.source_batches.c.id, m.source_batches.c.payload).where(
+            m.source_batches.c.id.in_(batch_ids)
+        )
+    ).tuples()
+    return {
+        batch_id: (payload.get("envelope") or {}).get("window_days")
+        for batch_id, payload in found
+    }
+
+
 def _explanations_outcome(conn: Connection, scores_batch: int) -> CollectionOutcome:
     scores = sorted(batch_rows(conn, SCORES, scores_batch), key=lambda r: r["symbol"])
     fundamentals = _rows_by_id(
@@ -302,17 +320,20 @@ def _explanations_outcome(conn: Connection, scores_batch: int) -> CollectionOutc
         m.ticker_sentiment,
         {r["sentiment_record_id"] for r in scores if r["sentiment_record_id"]},
     )
+    windows = _window_days(conn, {r["batch_id"] for r in sentiment.values()})
     previous = _latest_explanations(conn, {r["id"] for r in scores})
     records = []
     carried = 0
     for row in scores:
         score = {k: v for k, v in row.items() if k != "symbol"}  # the table's columns
         before = previous.get(score["id"])
+        cited = sentiment.get(score["sentiment_record_id"])
         explanation = explanations.explain(
             score,
             fundamentals.get(score["fundamentals_record_id"]),
-            sentiment.get(score["sentiment_record_id"]),
+            cited,
             before,
+            window_days=windows.get(cited["batch_id"]) if cited else None,
         )
         carried += (
             before is not None and before["input_digest"] == explanation.input_digest
