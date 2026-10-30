@@ -872,6 +872,55 @@ class NewsArticle(SourceRecord):
 RECORD_MODELS.update(news_articles=NewsArticle)
 
 
+# ── S1-05 source credibility weighting (src/services/credibility) ──
+# ticker_sentiment's record is TickerSentiment below, with the Sprint 2 scores.
+
+
+def _between(v: Optional[Decimal], lo: int, hi: int) -> Optional[Decimal]:
+    if v is not None and not lo <= v <= hi:
+        raise ValueError(f"must be between {lo} and {hi}")
+    return v
+
+
+class SocialPost(SourceRecord):
+    """One scored social post or comment about one security (1-10 scale)."""
+
+    DB_COLUMNS = ("platform", "post_id", "score")
+
+    platform: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
+    post_id: Annotated[str, BeforeValidator(_text_validator(500, required=True))]
+    score: Annotated[Decimal, BeforeValidator(_required_signed(2, 4))]
+
+    @field_validator("platform")
+    @classmethod
+    def _platform(cls, v: str) -> str:
+        if v not in ("reddit", "bluesky", "mastodon", "youtube"):
+            raise ValueError("unknown platform")
+        return v
+
+    @field_validator("score")
+    @classmethod
+    def _score(cls, v: Decimal) -> Decimal:
+        _between(v, 1, 10)
+        return v
+
+
+class ArticleSentiment(SourceRecord):
+    """S1-04's score for one stored news article, in [-1, 1]."""
+
+    DB_COLUMNS = ("news_article_id", "score", "model")
+
+    news_article_id: int = Field(gt=0, le=BIGINT_MAX, strict=True)
+    score: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
+    model: Annotated[str, BeforeValidator(_text_validator(64, required=True))]
+
+    @field_validator("score")
+    @classmethod
+    def _score(cls, v: Decimal) -> Decimal:
+        _between(v, -1, 1)
+        return v
+
+
 # ── Sprint 2 scores (src/services/scores) ────────────────
 
 _SCORE_COMPONENTS = (
@@ -1136,6 +1185,8 @@ RECORD_MODELS.update(
     ticker_sentiment=TickerSentiment,
     company_scores=CompanyScore,
     score_explanations=ScoreExplanation,
+    social_posts=SocialPost,
+    article_sentiment=ArticleSentiment,
 )
 ONE_ROW_PER_SECURITY = ONE_ROW_PER_SECURITY | {
     "ticker_sentiment",
