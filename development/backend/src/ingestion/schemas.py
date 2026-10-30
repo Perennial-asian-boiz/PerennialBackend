@@ -870,3 +870,259 @@ class NewsArticle(SourceRecord):
 
 
 RECORD_MODELS.update(news_articles=NewsArticle)
+
+
+# ── Sprint 2 scores (src/services/scores) ────────────────
+
+_SCORE_COMPONENTS = (
+    "fundamentals",
+    "sentiment",
+    "event_exposure",
+)  # models.SCORE_COMPONENTS
+_SCORE_UNAVAILABLE_REASONS = frozenset({"no_fundamentals", "only_fundamentals"})
+_EXPLANATION_STATUSES = frozenset({"ok", "not_recommended", "unavailable"})
+_EXPLANATION_REASONS = frozenset({"insufficient_supporting_data", "score_unavailable"})
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _at_most(
+    places: int, digits: int, ceiling: str, *, required: bool = False
+) -> Callable[[Any], Optional[Decimal]]:
+    """A non-negative NUMERIC(digits, places) no greater than ceiling."""
+    base = _decimal_validator(places, digits)
+    limit = Decimal(ceiling)
+
+    def validate(value: Any) -> Optional[Decimal]:
+        dec = base(value)
+        if dec is None:
+            if required:
+                raise ValueError("number is required")
+            return None
+        if dec > limit:
+            raise ValueError(f"number must be at most {ceiling}")
+        return dec
+
+    return validate
+
+
+Points = Annotated[Optional[Decimal], BeforeValidator(_at_most(1, 4, "100"))]
+Weight = Annotated[Optional[Decimal], BeforeValidator(_at_most(4, 5, "1"))]
+NominalWeight = Annotated[Decimal, BeforeValidator(_at_most(4, 5, "1", required=True))]
+Contribution = Annotated[Optional[Decimal], BeforeValidator(_at_most(2, 5, "100"))]
+Version = Annotated[str, BeforeValidator(_text_validator(32, required=True))]
+OptionalVersion = Annotated[Optional[str], BeforeValidator(_text_validator(32))]
+RecordId = Optional[int]
+
+
+def _known(value: Optional[str], allowed: frozenset[str], what: str) -> Optional[str]:
+    if value is not None and value not in allowed:
+        raise ValueError(f"unknown {what}")
+    return value
+
+
+class TickerSentiment(SourceRecord):
+    """The sentiment contract (issue #76): one security's rolled-up sentiment for a window."""
+
+    DB_COLUMNS = (
+        "value",
+        "article_count",
+        "window_start",
+        "window_end",
+        "model_version",
+        "source_weights_version",
+        "method",
+        "rollup_version",
+    )
+
+    value: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
+    article_count: int = Field(ge=1, le=2**31 - 1, strict=True)
+    window_start: RequiredDate
+    window_end: RequiredDate  # the component's as-of
+    model_version: Annotated[str, BeforeValidator(_text_validator(64, required=True))]
+    source_weights_version: Version
+    method: Version
+    rollup_version: Version
+
+    @field_validator("value")
+    @classmethod
+    def _unit_range(cls, v: Decimal) -> Decimal:
+        if not Decimal(-1) <= v <= Decimal(1):
+            raise ValueError("sentiment must be between -1 and 1")
+        return v
+
+    @model_validator(mode="after")
+    def _window(self) -> "TickerSentiment":
+        if self.window_start > self.window_end:
+            raise ValueError("window_start is after window_end")
+        return self
+
+
+class CompanyScore(SourceRecord):
+    """Derived: one security's score-v1 blend and its per-component breakdown."""
+
+    DB_COLUMNS = (
+        "status",
+        "unavailable_reason",
+        "score",
+        "score_version",
+        "missing",
+        "recommended",
+        "watchlist_publication_id",
+        *(
+            f"{c}_{f}"
+            for c in _SCORE_COMPONENTS
+            for f in (
+                "value",
+                "nominal_weight",
+                "weight",
+                "contribution",
+                "input_as_of",
+                "input_version",
+                "record_id",
+            )
+        ),
+    )
+
+    status: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
+    unavailable_reason: Optional[str] = None
+    score: Points = None
+    score_version: Version
+    missing: List[str] = Field(default_factory=list)
+    recommended: bool = Field(strict=True)
+    watchlist_publication_id: RecordId = Field(
+        default=None, gt=0, le=BIGINT_MAX, strict=True
+    )
+    fundamentals_value: Points = None
+    fundamentals_nominal_weight: NominalWeight
+    fundamentals_weight: Weight = None
+    fundamentals_contribution: Contribution = None
+    fundamentals_input_as_of: OptionalDate = None
+    fundamentals_input_version: OptionalVersion = None
+    fundamentals_record_id: RecordId = Field(
+        default=None, gt=0, le=BIGINT_MAX, strict=True
+    )
+    sentiment_value: Points = None
+    sentiment_nominal_weight: NominalWeight
+    sentiment_weight: Weight = None
+    sentiment_contribution: Contribution = None
+    sentiment_input_as_of: OptionalDate = None
+    sentiment_input_version: OptionalVersion = None
+    sentiment_record_id: RecordId = Field(
+        default=None, gt=0, le=BIGINT_MAX, strict=True
+    )
+    event_exposure_value: Points = None
+    event_exposure_nominal_weight: NominalWeight
+    event_exposure_weight: Weight = None
+    event_exposure_contribution: Contribution = None
+    event_exposure_input_as_of: OptionalDate = None
+    event_exposure_input_version: OptionalVersion = None
+    event_exposure_record_id: RecordId = Field(
+        default=None, gt=0, le=BIGINT_MAX, strict=True
+    )
+
+    @field_validator("status")
+    @classmethod
+    def _status(cls, v: str) -> str:
+        if v not in ("ok", "unavailable"):
+            raise ValueError("unknown score status")
+        return v
+
+    @field_validator("unavailable_reason")
+    @classmethod
+    def _reason(cls, v: Optional[str]) -> Optional[str]:
+        return _known(v, _SCORE_UNAVAILABLE_REASONS, "unavailable reason")
+
+    @field_validator("missing")
+    @classmethod
+    def _missing(cls, v: List[str]) -> List[str]:
+        if any(c not in _SCORE_COMPONENTS for c in v) or len(set(v)) != len(v):
+            raise ValueError("unknown or repeated missing component")
+        return v
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "CompanyScore":
+        if (self.status == "ok") != (self.score is not None):
+            raise ValueError("a score is present exactly when the status is ok")
+        if (self.status == "unavailable") != (self.unavailable_reason is not None):
+            raise ValueError("an unavailable score needs a reason, an ok one none")
+        if self.recommended and not (
+            self.status == "ok"
+            and self.score is not None
+            and self.score >= 60
+            and self.watchlist_publication_id is not None
+        ):
+            raise ValueError(
+                "recommended needs an ok score of at least 60 and its watchlist"
+            )
+        for component in _SCORE_COMPONENTS:
+            if (getattr(self, f"{component}_value") is None) != (
+                component in self.missing
+            ):
+                raise ValueError("a component is missing exactly when it has no value")
+        return self
+
+
+class ScoreExplanation(SourceRecord):
+    """Derived: up to 3 plain-language claims for one company_scores row."""
+
+    DB_COLUMNS = (
+        "company_score_id",
+        "status",
+        "reason",
+        "template_version",
+        "claims",
+        "input_digest",
+    )
+
+    company_score_id: int = Field(gt=0, le=BIGINT_MAX, strict=True)
+    status: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
+    reason: Optional[str] = None
+    template_version: Version
+    claims: List[Dict[str, Any]] = Field(max_length=3)
+    input_digest: Annotated[str, BeforeValidator(_text_validator(64, required=True))]
+
+    @field_validator("status")
+    @classmethod
+    def _status(cls, v: str) -> str:
+        if v not in _EXPLANATION_STATUSES:
+            raise ValueError("unknown explanation status")
+        return v
+
+    @field_validator("reason")
+    @classmethod
+    def _reason(cls, v: Optional[str]) -> Optional[str]:
+        return _known(v, _EXPLANATION_REASONS, "explanation reason")
+
+    @field_validator("claims")
+    @classmethod
+    def _claims(cls, v: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if any(c.get("component") not in _SCORE_COMPONENTS for c in v):
+            raise ValueError("a claim must cite a score component")
+        return v
+
+    @field_validator("input_digest")
+    @classmethod
+    def _digest(cls, v: str) -> str:
+        if not _SHA256.fullmatch(v):
+            raise ValueError("input_digest must be a SHA-256 hex digest")
+        return v
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "ScoreExplanation":
+        if (self.status == "ok") != bool(self.claims):
+            raise ValueError("an ok explanation has claims, any other none")
+        if (self.status == "unavailable") != (self.reason is not None):
+            raise ValueError("an unavailable explanation needs a reason, others none")
+        return self
+
+
+RECORD_MODELS.update(
+    ticker_sentiment=TickerSentiment,
+    company_scores=CompanyScore,
+    score_explanations=ScoreExplanation,
+)
+ONE_ROW_PER_SECURITY = ONE_ROW_PER_SECURITY | {
+    "ticker_sentiment",
+    "company_scores",
+    "score_explanations",
+}

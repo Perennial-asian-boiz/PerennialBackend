@@ -58,6 +58,13 @@ PINNED_ROW_SOURCES: tuple[str, ...] = ("market_caps",)
 FUNDAMENTALS_SOURCES: tuple[str, ...] = ("fundamentals", "fundamental_scores")
 # S1-03 news ingestion (src/services/news): articles per security from Finnhub.
 NEWS_SOURCES: tuple[str, ...] = ("news_articles",)
+# Sprint 2 scores (src/services/scores): the ticker sentiment contract (#76), the
+# derived score-v1 blend and its explanations. Per security, never in the watchlist.
+SCORE_SOURCES: tuple[str, ...] = (
+    "ticker_sentiment",
+    "company_scores",
+    "score_explanations",
+)
 # The closed source vocabulary (CHECKs, CLI, locks). Append only; lifecycle lock
 # keys are explicit per source (SOURCE_LOCK_KEYS).
 SOURCES = (
@@ -66,6 +73,7 @@ SOURCES = (
     + PINNED_ROW_SOURCES
     + FUNDAMENTALS_SOURCES
     + NEWS_SOURCES
+    + SCORE_SOURCES
 )
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live", "derived")
@@ -1043,3 +1051,165 @@ news_coverage = Table(
 Index("ix_news_coverage_security_id", news_coverage.c.security_id)
 
 SOURCE_TABLES.update(news_articles=news_articles)
+
+# Sprint 2 scores (output/sprint-2/s2-stories-plan.md §3.1, §4). The API reads a
+# batch only through current_scores, like current_publication.
+SCORE_COMPONENTS = ("fundamentals", "sentiment", "event_exposure")  # fixed order
+SCORE_STATUSES = ("ok", "unavailable")
+SCORE_UNAVAILABLE_REASONS = ("no_fundamentals", "only_fundamentals")
+EXPLANATION_STATUSES = ("ok", "not_recommended", "unavailable")
+EXPLANATION_REASONS = ("insufficient_supporting_data", "score_unavailable")
+EXPLANATION_MAX_CLAIMS = 3
+
+# The sentiment contract (issue #76): one row per (batch, security); no row, no coverage.
+ticker_sentiment = Table(
+    "ticker_sentiment",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("value", Numeric(5, 4), nullable=False),  # -1..1
+    Column("article_count", Integer, nullable=False),
+    Column("window_start", Date, nullable=False),
+    Column("window_end", Date, nullable=False),  # the component's as-of
+    Column("model_version", String(64), nullable=False),
+    Column("source_weights_version", String(32), nullable=False),
+    Column("method", String(32), nullable=False),
+    Column("rollup_version", String(32), nullable=False),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "security_id"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint("value BETWEEN -1 AND 1", name="value"),
+    CheckConstraint("article_count >= 1", name="article_count"),
+    CheckConstraint("window_start <= window_end", name="window"),
+)
+Index("ix_ticker_sentiment_security_id", ticker_sentiment.c.security_id)
+
+
+def _score_component(name: str) -> list[Any]:
+    """One component's breakdown; record_id has no FK (its table follows from the component)."""
+    return [
+        Column(f"{name}_value", Numeric(4, 1)),
+        Column(f"{name}_nominal_weight", Numeric(5, 4), nullable=False),
+        Column(f"{name}_weight", Numeric(5, 4)),  # effective, after redistribution
+        Column(f"{name}_contribution", Numeric(5, 2)),
+        Column(f"{name}_input_as_of", Date),
+        Column(f"{name}_input_version", String(32)),
+        Column(f"{name}_record_id", BigInteger),
+        CheckConstraint(
+            f"({name}_value IS NULL OR {name}_value BETWEEN 0 AND 100)"
+            f" AND {name}_nominal_weight BETWEEN 0 AND 1"
+            f" AND ({name}_weight IS NULL OR {name}_weight BETWEEN 0 AND 1)"
+            f" AND ({name}_contribution IS NULL OR {name}_contribution BETWEEN 0 AND 100)",
+            name=name,
+        ),
+        # A component is listed as missing exactly when it has no value.
+        CheckConstraint(
+            f"({name}_value IS NULL) = ('{name}' = ANY (missing))",
+            name=f"{name}_missing",
+        ),
+    ]
+
+
+company_scores = Table(
+    "company_scores",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("status", String(16), nullable=False),
+    Column("unavailable_reason", String(32)),
+    Column("score", Numeric(4, 1)),  # NULL: unavailable; see unavailable_reason
+    Column("score_version", String(32), nullable=False),
+    Column("missing", ARRAY(String(32)), nullable=False),
+    Column("recommended", Boolean, nullable=False),
+    # The watchlist publication `recommended` was judged against.
+    Column(
+        "watchlist_publication_id", BigInteger, ForeignKey(f"{SCHEMA}.publications.id")
+    ),
+    *(part for name in SCORE_COMPONENTS for part in _score_component(name)),
+    UniqueConstraint("batch_id", "security_id"),
+    UniqueConstraint("id", "security_id"),  # score_explanations' composite FK target
+    CheckConstraint(_in("status", SCORE_STATUSES), name="status"),
+    CheckConstraint("score IS NULL OR score BETWEEN 0 AND 100", name="score"),
+    CheckConstraint("(status = 'ok') = (score IS NOT NULL)", name="status_score"),
+    CheckConstraint(
+        "(status = 'unavailable') = (unavailable_reason IS NOT NULL)",
+        name="status_reason",
+    ),
+    CheckConstraint(
+        "unavailable_reason IS NULL OR "
+        + _in("unavailable_reason", SCORE_UNAVAILABLE_REASONS),
+        name="unavailable_reason",
+    ),
+    CheckConstraint(
+        "missing <@ ARRAY["
+        + ", ".join(f"'{c}'" for c in SCORE_COMPONENTS)
+        + "]::varchar[]",
+        name="missing_components",
+    ),
+    CheckConstraint(
+        "NOT recommended OR (status = 'ok' AND score >= 60"
+        " AND watchlist_publication_id IS NOT NULL)",
+        name="recommended",
+    ),
+)
+Index("ix_company_scores_security_id", company_scores.c.security_id)
+
+score_explanations = Table(
+    "score_explanations",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("company_score_id", BigInteger, nullable=False),
+    # Composite (checker F1): an explanation can only name a score of its own security.
+    ForeignKeyConstraint(
+        ["company_score_id", "security_id"],
+        [f"{SCHEMA}.company_scores.id", f"{SCHEMA}.company_scores.security_id"],
+    ),
+    Column("status", String(16), nullable=False),
+    Column("reason", String(32)),
+    Column("template_version", String(32), nullable=False),
+    Column("claims", JSONB, nullable=False),
+    Column("input_digest", String(64), nullable=False),
+    UniqueConstraint("batch_id", "security_id"),
+    CheckConstraint(_in("status", EXPLANATION_STATUSES), name="status"),
+    CheckConstraint(
+        "(status = 'unavailable') = (reason IS NOT NULL)", name="status_reason"
+    ),
+    CheckConstraint(
+        "reason IS NULL OR " + _in("reason", EXPLANATION_REASONS), name="reason"
+    ),
+    # CASE, not AND: jsonb_array_length raises on a non-array instead of failing the check.
+    CheckConstraint(
+        "CASE WHEN jsonb_typeof(claims) = 'array' THEN jsonb_array_length(claims) <= "
+        f"{EXPLANATION_MAX_CLAIMS} ELSE false END",
+        name="claims",
+    ),
+    CheckConstraint("(status = 'ok') = (claims <> '[]'::jsonb)", name="status_claims"),
+    CheckConstraint("input_digest ~ '^[0-9a-f]{64}$'", name="input_digest"),
+)
+Index("ix_score_explanations_security_id", score_explanations.c.security_id)
+Index("ix_score_explanations_company_score_id", score_explanations.c.company_score_id)
+
+SOURCE_TABLES.update(
+    ticker_sentiment=ticker_sentiment,
+    company_scores=company_scores,
+    score_explanations=score_explanations,
+)
+
+# The scores batch each channel serves; the API reads company_scores only through it.
+current_scores = Table(
+    "current_scores",
+    metadata,
+    Column("channel", String(32), primary_key=True),
+    Column(
+        "batch_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.source_batches.id"),
+        nullable=False,
+    ),
+    Column("promoted_at", DateTime(timezone=True), nullable=False),
+)

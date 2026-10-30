@@ -193,6 +193,9 @@ SOURCE_LOCK_KEYS = {
     "fundamentals": 170018,
     "fundamental_scores": 170019,
     "news_articles": 170020,
+    "ticker_sentiment": 170021,
+    "company_scores": 170022,
+    "score_explanations": 170023,
     "pipeline": 170098,
 }
 
