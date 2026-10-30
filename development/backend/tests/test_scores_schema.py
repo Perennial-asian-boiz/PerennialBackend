@@ -366,23 +366,80 @@ def test_db1_current_scores_is_a_pointer_per_channel_to_a_batch(engine):
 
 @pytest.mark.db
 def test_db1_explanations_reference_their_score_row(engine):  # proposed
+    """Checker F1: one composite FK, (company_score_id, security_id) -> company_scores
+    (id, security_id), backed by UNIQUE (id, security_id), so an explanation can only
+    name a score of its own security. No single-column FK beside it."""
     with engine.connect() as conn:
         found = inspect(conn)
-        foreign = {
-            tuple(f["constrained_columns"]): (
+        foreign = [
+            (
+                tuple(f["constrained_columns"]),
                 f["referred_table"],
                 tuple(f["referred_columns"]),
             )
             for f in found.get_foreign_keys("score_explanations", schema="perennial")
-        }
+        ]
         indexes = [
             i["column_names"]
             for i in found.get_indexes("score_explanations", schema="perennial")
         ]
-    assert foreign[("company_score_id",)] == ("company_scores", ("id",))
+        uniques = [
+            tuple(u["column_names"])
+            for u in found.get_unique_constraints("company_scores", schema="perennial")
+        ]
+    to_scores = [f for f in foreign if f[1] == "company_scores"]
+    assert to_scores == [
+        (("company_score_id", "security_id"), "company_scores", ("id", "security_id"))
+    ]
+    assert ("id", "security_id") in uniques
     assert any(cols[0] == "company_score_id" for cols in indexes), (
         indexes
     )  # supports the FK
+
+
+def _cross_security(engine):
+    """Two securities with a committed score each; returns (A's score id, A, B)."""
+    with engine.begin() as conn:
+        a, b = _security(conn, "ZZXA"), _security(conn, "ZZXB")
+        batch = _batch(conn, "company_scores")
+        score_a = _insert(
+            conn, "company_scores", score_row(), batch_id=batch, security_id=a
+        )
+        _insert(conn, "company_scores", score_row(), batch_id=batch, security_id=b)
+        explanations = _batch(conn, "score_explanations")
+    return score_a, a, b, explanations
+
+
+def _explain_as(engine, role, score_id, security_id, batch):
+    """Insert one explanation as `role`; None, or the refusing SQLSTATE."""
+    with as_role(engine, role) as conn:
+        try:
+            with conn.begin_nested():
+                _insert(
+                    conn,
+                    "score_explanations",
+                    {"company_score_id": score_id, **explanation_row()},
+                    batch_id=batch,
+                    security_id=security_id,
+                )
+        except DBAPIError as exc:
+            return exc.orig.sqlstate
+    return None
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("role", ["owner", "importer"])
+def test_db1_cross_security_explanation_refused(engine, groups, role):  # noqa: F811
+    """Checker F1: B's explanation naming A's score would serve A's claims as B's."""
+    score_a, _, b, batch = _cross_security(engine)
+    assert _explain_as(engine, groups[role], score_a, b, batch) == "23503"
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("role", ["owner", "importer"])
+def test_db1_same_security_explanation_accepted(engine, groups, role):  # noqa: F811
+    score_a, a, _, batch = _cross_security(engine)
+    assert _explain_as(engine, groups[role], score_a, a, batch) is None
 
 
 # Inserting rows straight into the tables: the CHECKs are the database's own guard.
