@@ -14,7 +14,7 @@ from src.ingestion.importer import CollectionOutcome, import_collection
 from src.pipeline.lifecycle import begin_run
 from src.services.credibility import job
 from src.services.credibility.job import (
-    Item, derive_sentiment, run_sentiment, social_to_unit, weigh)
+    Item, about_company, decay, derive_sentiment, run_sentiment, social_to_unit, weigh)
 from src.services.credibility.publishers import (
     PublisherResolver, host_of, resolve_publishers)
 from src.services.credibility.social import collect_social, platform_file, run_social
@@ -26,21 +26,24 @@ from src.services.news.job import run_news
 
 T0 = datetime(2026, 10, 26, 12, tzinfo=timezone.utc)
 NOW = T0 + timedelta(days=1)
-TABLE = parse_weights({"version": "test-v1", "tiers": {
+TIERS = {
     "major": {"weight": 1.0, "sources": ["reuters.com"]},
     "media": {"weight": 0.7, "sources": ["yahoo.com"]},
     "social": {"weight": 0.2, "sources": ["reddit", "youtube"]},
-}})
+}
+TABLE = parse_weights({"version": "test-v1", "half_life_days": 3,
+                       "relevance": "headline-match-v1", "tiers": TIERS})
 
 
 # ── weight table (AC 1, AC 2) ────────────────────────────
 
 
-def test_the_committed_table_loads_with_a_version_and_four_tiers():
+def test_the_committed_table_loads_with_a_version_four_tiers_and_its_rules():
     table = load_weights()
-    assert table.version == "weights-v1"
+    assert table.version == "weights-v2"
     assert sorted(set(table.weights.values())) == [0.2, 0.4, 0.7, 1.0]
     assert table.weight_for("reuters.com") == 1.0 and table.weight_for("reddit") == 0.2
+    assert (table.half_life_days, table.relevance) == (3.0, "headline-match-v1")
 
 
 def test_subdomains_take_their_parent_weight_and_unknown_sources_the_lowest():
@@ -51,13 +54,24 @@ def test_subdomains_take_their_parent_weight_and_unknown_sources_the_lowest():
     assert TABLE.weight_for("notreuters.com") == 0.2  # whole labels only
 
 
+RULES = {"half_life_days": 3, "relevance": "headline-match-v1"}
+
+
 @pytest.mark.parametrize("data", [
-    {"tiers": {"a": {"weight": 1, "sources": ["x.com"]}}},  # no version
-    {"version": "v", "tiers": {"a": {"weight": 0, "sources": ["x.com"]}}},
-    {"version": "v", "tiers": {"a": {"weight": 1.5, "sources": ["x.com"]}}},
-    {"version": "v", "tiers": {"a": {"weight": 1, "sources": ["x.com"]},
-                               "b": {"weight": 0.5, "sources": ["X.com"]}}},
-    {"version": "v", "tiers": {"a": {"weight": 1, "sources": []}}},
+    {**RULES, "tiers": {"a": {"weight": 1, "sources": ["x.com"]}}},  # no version
+    {**RULES, "version": "v", "tiers": {"a": {"weight": 0, "sources": ["x.com"]}}},
+    {**RULES, "version": "v", "tiers": {"a": {"weight": 1.5, "sources": ["x.com"]}}},
+    {**RULES, "version": "v", "tiers": {"a": {"weight": 1, "sources": ["x.com"]},
+                                        "b": {"weight": 0.5, "sources": ["X.com"]}}},
+    {**RULES, "version": "v", "tiers": {"a": {"weight": 1, "sources": []}}},
+    {"version": "v", "relevance": "headline-match-v1", "tiers": TIERS},  # no half-life
+    {**RULES, "version": "v", "half_life_days": 0, "tiers": TIERS},
+    {**RULES, "version": "v", "half_life_days": -1, "tiers": TIERS},
+    {**RULES, "version": "v", "half_life_days": float("inf"), "tiers": TIERS},
+    {**RULES, "version": "v", "half_life_days": True, "tiers": TIERS},
+    {**RULES, "version": "v", "half_life_days": "3", "tiers": TIERS},
+    {"version": "v", "half_life_days": 3, "tiers": TIERS},  # no relevance rule
+    {**RULES, "version": "v", "relevance": "summary-match-v9", "tiers": TIERS},
 ])
 def test_a_malformed_table_is_refused(data):
     with pytest.raises(ValueError):
@@ -91,6 +105,33 @@ def test_a_ticker_with_nothing_scored_has_counts_of_zero_and_no_value():
 
 def test_social_scores_map_onto_minus_one_to_one():
     assert [social_to_unit(s) for s in (1, 5.5, 10)] == [-1.0, 0.0, 1.0]
+
+
+# ── time decay and relevance (weights-v2) ────────────────
+
+
+def test_an_item_keeps_half_its_weight_after_each_half_life():
+    assert decay(T0, T0, 3) == 1.0
+    assert decay(T0, T0 + timedelta(days=3), 3) == 0.5
+    assert decay(T0, T0 + timedelta(days=6), 3) == 0.25
+    assert decay(T0, T0 + timedelta(hours=36), 3) == pytest.approx(0.7071, abs=1e-4)
+
+
+def test_an_item_dated_after_the_run_keeps_all_its_weight():
+    assert decay(T0 + timedelta(hours=5), T0, 3) == 1.0
+
+
+@pytest.mark.parametrize("headline,symbol,variants,expected", [
+    ("Nvidia beats estimates", "NVDA", {"nvidia"}, True),  # the name
+    ("Why NVDA could double", "NVDA", {"nvidia"}, True),  # the ticker
+    ("Alphabet's October wipeout hits $766 billion", "NVDA", {"nvidia"}, False),
+    ("Ford recalls 1.2 million trucks", "F", {"ford motor"}, False),  # one-letter ticker
+    ("Ford Motor recalls 1.2 million trucks", "F", {"ford motor"}, True),
+    ("Why $F fell today", "F", {"ford motor"}, True),
+])
+def test_an_article_counts_only_when_its_headline_names_the_company(
+        headline, symbol, variants, expected):
+    assert about_company(headline, symbol, variants) is expected
 
 
 # ── publisher lookup ─────────────────────────────────────
@@ -257,14 +298,17 @@ def test_the_job_runs_every_step_and_stores_the_weighted_value_per_ticker(engine
 
     rows = stored(engine)
     rklb = rows["RKLB"]
-    # reuters 1.0 x 0.8, unknown blog 0.2 x -0.5, reddit 0.2 x 1.0, youtube 0.2 x -1.0
-    assert rklb["value"] == Decimal("0.4375")  # 0.7 / 1.6
+    # reuters 1.0 x 0.8 and an unknown blog 0.2 x -0.5, published a day before the
+    # run, keep 0.5^(1/3) = 0.7937 of their weight; reddit 0.2 x 1.0 and youtube
+    # 0.2 x -1.0, from a file whose day ended 12 hours before, keep 0.8909.
+    # (0.7 x 0.7937) / (1.2 x 0.7937 + 0.4 x 0.8909) = 0.5556 / 1.3088
+    assert rklb["value"] == Decimal("0.4245")
     assert rklb["plain_average"] == Decimal("0.0750")
     assert (rklb["article_count"], rklb["news_count"], rklb["social_count"]) == (4, 2, 2)
     # social posts span the 7 days before their file's date; news are dated
     assert rklb["first_at"] == datetime(2026, 10, 19, 23, 59, 59, tzinfo=timezone.utc)
     assert rklb["last_at"] == datetime(2026, 10, 26, 23, 59, 59, tzinfo=timezone.utc)
-    assert rklb["weights_version"] == "weights-v1"
+    assert rklb["weights_version"] == "weights-v2"
     assert rklb["model_version"] == "finbert"
     nvda = rows["NVDA"]
     assert (nvda["value"], nvda["article_count"]) == (Decimal("-0.2000"), 1)
@@ -278,6 +322,46 @@ def test_the_job_runs_every_step_and_stores_the_weighted_value_per_ticker(engine
             models.run_dependencies.c.run_id == run.results["ticker_sentiment"].run_id)
         ).scalars())
     assert deps == {"news_articles", "article_sentiment", "social_posts"}
+
+
+def envelope_of(engine, result):
+    with engine.connect() as conn:
+        return conn.execute(select(models.source_batches.c.payload).where(
+            models.source_batches.c.id == result.batch_id)).scalar_one()["envelope"]
+
+
+@pytest.mark.db
+def test_off_topic_articles_are_left_out_and_older_ones_count_less(engine, seeded):
+    news = {"NVDA": [
+        article(21, "NVDA rises"),
+        RawArticle(22, "Nvidia slips", "", "Yahoo", url(22), T0 - timedelta(days=3)),
+        # S1-03 keeps it, because the summary names Nvidia; the headline doesn't
+        RawArticle(23, "Alphabet's October wipeout", "Nvidia also fell", "Yahoo", url(23), T0),
+    ]}
+    run_news(engine, NewsClient(news), T0.date())
+    score_articles(engine, scores={21: 1.0, 22: -1.0, 23: 1.0})
+    result = derive_sentiment(engine, now=NOW)
+    assert result.succeeded
+    nvda = stored(engine)["NVDA"]
+    # 21 is a day old and 22 four days old, so 22 keeps half of 21's weight:
+    # (1 x 1.0 - 0.5 x 1.0) / 1.5; the off-topic 23 is not counted
+    assert (nvda["value"], nvda["plain_average"]) == (Decimal("0.3333"), Decimal("0.0000"))
+    assert (nvda["news_count"], nvda["first_at"], nvda["last_at"]) == (
+        2, T0 - timedelta(days=3), T0)
+    env = envelope_of(engine, result)
+    assert (env["news_off_topic"], env["half_life_days"], env["publishers_unknown"]) == (
+        1, 3.0, 2)
+
+
+@pytest.mark.db
+def test_a_ticker_whose_articles_are_all_off_topic_has_a_count_of_zero(engine, seeded):
+    news = {"NVDA": [RawArticle(31, "Chip stocks fall", "Nvidia led the drop", "Yahoo",
+                                url(31), T0)]}
+    run_news(engine, NewsClient(news), T0.date())
+    score_articles(engine, scores={31: 1.0})
+    assert derive_sentiment(engine, now=NOW).succeeded
+    nvda = stored(engine)["NVDA"]
+    assert (nvda["article_count"], nvda["value"], nvda["model_version"]) == (0, None, None)
 
 
 @pytest.mark.db

@@ -1012,6 +1012,8 @@ SENTIMENT_ENVELOPE = {
     "social_used": 5,
     "social_batch_fresh": True,
     "publishers_unknown": 0,
+    "news_off_topic": 0,
+    "half_life_days": 3.0,
 }
 
 
