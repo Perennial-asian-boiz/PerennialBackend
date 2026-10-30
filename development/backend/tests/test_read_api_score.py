@@ -501,3 +501,134 @@ def test_api_md_documents_the_score_route():
         NOTE,
     ):
         assert term in content, term
+
+
+# ── accepted contract choices (a)-(d), pinned for the frontend (#77) ─
+
+
+@pytest.mark.parametrize("pointer", ["none", "elsewhere"])
+@pytest.mark.db
+def test_a_no_row_score_is_exactly_not_scored(engine, api, pointer):  # noqa: F811
+    """(a) No row in the current scores batch: reason not_scored, nothing invented."""
+    seed_security(engine, "ZZCN")
+    if pointer == "elsewhere":
+        scored(engine, "ZZCO", recommended())
+    body = get(api, "ZZCN").json()
+    assert body["score"] == {
+        "status": "unavailable",
+        "reason": "not_scored",
+        "value": None,
+        "score_version": None,
+        "as_of": None,
+        "recommended": False,
+        "components": [],
+        "missing": [],
+    }
+    assert body["explanation"] == {
+        "status": "unavailable",
+        "reason": "not_scored",
+        "claims": [],
+    }
+
+
+@pytest.mark.db
+def test_an_explanation_not_written_yet_is_not_explained_yet(engine, api):  # noqa: F811
+    """(b) The score is promoted before derive_explanations writes its row."""
+    scored(engine, "ZZCW", recommended(), explanation=None)
+    assert get(api, "ZZCW").json()["explanation"] == {
+        "status": "unavailable",
+        "reason": "not_explained_yet",
+        "claims": [],
+    }
+
+
+REASONS = {
+    # case: (score row, stored explanation or None, score reason, explanation reason)
+    "ok_recommended": (lambda: recommended(), lambda: explanation_row(), None, None),
+    "ok_not_recommended": (
+        lambda: cited(),
+        lambda: explanation_row(status="not_recommended", claims=[]),
+        None,
+        None,
+    ),
+    "ok_insufficient": (
+        lambda: recommended(),
+        lambda: explanation_row(
+            status="unavailable", reason="insufficient_supporting_data", claims=[]
+        ),
+        None,
+        "insufficient_supporting_data",
+    ),
+    "ok_not_explained_yet": (
+        lambda: recommended(),
+        lambda: None,
+        None,
+        "not_explained_yet",
+    ),
+    "unavailable_only_fundamentals": (
+        lambda: unavailable_row(fundamentals_record_id=812),
+        lambda: explanation_row(
+            status="unavailable", reason="score_unavailable", claims=[]
+        ),
+        "only_fundamentals",
+        "score_unavailable",
+    ),
+    "unavailable_no_fundamentals": (
+        lambda: unavailable_row(
+            unavailable_reason="no_fundamentals",
+            missing=["fundamentals", "sentiment", "event_exposure"],
+            fundamentals_value=None,
+            fundamentals_input_as_of=None,
+            fundamentals_input_version=None,
+        ),
+        lambda: explanation_row(
+            status="unavailable", reason="score_unavailable", claims=[]
+        ),
+        "no_fundamentals",
+        "score_unavailable",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REASONS))
+@pytest.mark.db
+def test_reason_is_present_exactly_when_it_has_a_value(engine, api, case):  # noqa: F811
+    """(c) No `"reason": null` anywhere: the key is there with a value, or absent."""
+    row, stored, score_reason, explanation_reason = REASONS[case]
+    scored(engine, "ZZCR", row(), stored() if stored() is not None else None)
+    body = get(api, "ZZCR").json()
+    for part, expected in (
+        ("score", score_reason),
+        ("explanation", explanation_reason),
+    ):
+        if expected is None:
+            assert "reason" not in body[part], (case, part)
+        else:
+            assert body[part]["reason"] == expected, (case, part)
+
+
+@pytest.mark.db
+def test_a_row_that_breakdown_refuses_fails_closed(engine, groups):  # noqa: F811
+    """(d) A stored score whose contribution disagrees with score-v1 is never served:
+    not 200, the {detail, code} error shape, and nothing from the refused row or its
+    explanation in the body. The status code is not pinned."""
+    from fastapi.testclient import TestClient
+    from src.api.read import create_app
+    from test_read_api import login
+
+    marker = "refused row claim"
+    stored = explanation_row(
+        claims=[dict(c, text=marker) for c in explanation_row()["claims"]]
+    )
+    scored(engine, "ZZCF", recommended(fundamentals_contribution=D("60.12")), stored)
+    with login(engine, groups) as (api_engine, _, _password):
+        with TestClient(
+            create_app(api_engine, api_role=groups["api"]),
+            raise_server_exceptions=False,
+        ) as client:
+            response = get(client, "ZZCF")
+    assert response.status_code != 200
+    body = response.json()
+    assert set(body) == {"detail", "code"} and isinstance(body["code"], str)
+    for leaked in ("60.12", "74.3", "78.0", "65.5", marker, "ZZCF"):
+        assert leaked not in response.text, leaked
