@@ -155,7 +155,7 @@ Score unavailable:
 | `components` | list | fundamentals, sentiment, event_exposure, in that order; empty when unavailable |
 | `missing` | list of strings | the components that had no input |
 
-Each component has `name`, `status` (`ok` or `unavailable`), `value` (0-100 or `null`), `nominal_weight` (score-v1: 0.60, 0.25, 0.15), `weight` (the effective weight: a missing component's weight is redistributed over the present ones, so score-v1 gives 0.7059 and 0.2941), `contribution` (`value` x `weight`, to 0.01; the contributions add up to `value` to its rounding), `input_as_of`, `input_version` and `record` (`{table, id}` of the stored input, or `null`). An unavailable component also has `note`: "weight redistributed to the remaining components". The breakdown is recomputed by score-v1 from the stored values: a stored row that disagrees with it is never served.
+Each component has `name`, `status` (`ok` or `unavailable`), `value` (0-100 or `null`), `nominal_weight` (score-v1: 0.60, 0.25, 0.15), `weight` (the effective weight: a missing component's weight is redistributed over the present ones, so score-v1 gives 0.7059 and 0.2941), `contribution` (`value` x `weight`, to 0.01; the contributions add up to `value` to its rounding), `input_as_of`, `input_version` and `record` (`{table, id}` of the stored input, or `null`). An unavailable component also has `note`: "weight redistributed to the remaining components". The breakdown is recomputed by score-v1 from the stored values: a stored row that disagrees with it is never served. The request fails closed with `500` and `{"detail": "request failed", "code": "internal_error"}`, nothing from the row in the body, and the server log names the security and the field.
 
 ### The `explanation` object
 

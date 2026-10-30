@@ -21,6 +21,7 @@ Design: docs/work-items/m5-read-api-design-note.md. Schemas: docs/technical-spec
 """
 
 import json
+import logging
 import os
 import re
 from collections.abc import AsyncIterator, Iterator, Mapping
@@ -53,6 +54,8 @@ CHANNEL = "production"
 QUALITY_KINDS = ("quality_passed", "quality_override")
 BUCKETS = ("popular_stable", "affordable_growing", "unresolved")
 UNAVAILABLE_WARNING = "market_cap_unavailable"
+
+logger = logging.getLogger(__name__)
 
 
 # ── responses ────────────────────────────────────────────
@@ -498,11 +501,27 @@ NOT_SCORED: dict[str, Any] = {
 }
 
 
-def _components(row: Any) -> list[dict[str, Any]]:
-    """The breakdown, recomputed by score-v1 (it refuses a row that disagrees)."""
+def _components(row: Any, security_id: int) -> list[dict[str, Any]]:
+    """The breakdown, recomputed by score-v1.
+
+    A stored row that score-v1 refuses fails closed: nothing from it is served,
+    the client gets the JSON error shape, and the log names the security and
+    the field (never a value), so a corrupt row is visible.
+    """
     stored = row._mapping
+    try:
+        components = scoring.breakdown(stored)
+    except ValueError as refused:
+        # breakdown's messages name a field, never a stored value.
+        logger.error(
+            "score row refused by score-v1: security_id=%s company_score_id=%s: %s",
+            security_id,
+            row.id,
+            refused,
+        )
+        raise APIError(500, "internal_error", "request failed") from None
     served = []
-    for c in scoring.breakdown(stored):
+    for c in components:
         record_id = stored[f"{c.name}_record_id"]
         table = COMPONENT_TABLES.get(c.name)
         input_as_of = stored[f"{c.name}_input_as_of"]
@@ -566,7 +585,7 @@ def _score(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
         "score_version": row.score_version,
         "as_of": as_of,
         "recommended": bool(row.recommended),
-        "components": _components(row),
+        "components": _components(row, security_id),
         "missing": list(row.missing or []),
     }
     if row.status != "ok":
