@@ -180,6 +180,8 @@ ENVELOPE_KEYS.update(
         "social_used",
         "social_batch_fresh",
         "publishers_unknown",
+        "news_off_topic",  # S1-05 weights-v2
+        "half_life_days",
     ),
     company_scores=(
         "score_version",

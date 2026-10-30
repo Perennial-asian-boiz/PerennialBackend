@@ -9,12 +9,17 @@ and the weighting (C). One step failing never stops the next.
 The weighting is a derived run (ticker_sentiment). For every security in the
 current production watchlist publication it takes, over the last WINDOW_DAYS:
 
-* each scored news article: S1-04's latest score for it from the current model
-  (the model of the newest article score), weighted by its publisher's entry in
+* each scored news article whose headline names the company (the table's
+  relevance rule): S1-04's latest score for it from the current model (the model
+  of the newest article score), weighted by its publisher's entry in
   source_weights.json;
 * each social post of the latest social batch, if that batch is inside the
   window: its 1-10 score mapped to [-1, 1] by (score - 5.5) / 4.5, weighted by
   its platform's entry.
+
+Each weight then fades with the item's age at the time of the run, halving every
+half_life_days. A news article's age runs from its publication; a social post's
+from the end of its file's day, since posts carry no dates.
 
 value is the weighted average, plain_average the unweighted one (AC 1). Every
 security gets a row with the counts, the date range and the weights version
@@ -44,7 +49,8 @@ from src.services.credibility.social import run_social
 from src.services.credibility.weights import WeightTable, load_weights
 from src.services.fundamentals.job import current_universe
 from src.services.news.finnhub import FinnhubNewsClient
-from src.services.news.job import run_news
+from src.services.news.job import company_names, run_news
+from src.services.news.matching import match_rule, name_variants
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +61,17 @@ WINDOW_DAYS = 7
 def social_to_unit(score: float) -> float:
     """The social pipeline's 1-10 scale mapped onto S1-04's [-1, 1]."""
     return (score - 5.5) / 4.5
+
+
+def decay(at: datetime, now: datetime, half_life_days: float) -> float:
+    """The share of its weight an item dated `at` keeps; a future date keeps it all."""
+    age_days = max((now - at).total_seconds(), 0.0) / 86400
+    return float(0.5 ** (age_days / half_life_days))
+
+
+def about_company(headline: str, symbol: str, variants: set[str]) -> bool:
+    """headline-match-v1: S1-03's match-v1 on the headline alone."""
+    return match_rule(headline, "", symbol, variants) is not None
 
 
 @dataclass(frozen=True)
@@ -96,15 +113,22 @@ def weigh(
     return record
 
 
+@dataclass(frozen=True)
+class News:
+    items: dict[str, list[Item]]
+    off_topic: int  # scored articles left out because the headline names no company
+    publishers_unknown: int  # counted articles with no resolved publisher
+    model: str | None
+
+
 def news_items(
     conn: Connection,
     symbols: list[str],
     start: datetime,
     end: datetime,
     table: WeightTable,
-) -> tuple[dict[str, list[Item]], int, str | None]:
-    """Scored articles per symbol in the window, how many had no known publisher,
-    and the model whose scores they are."""
+) -> News:
+    """The window's scored articles about each symbol, weighted and decayed."""
     na, s, np_, a = (
         m.news_articles,
         m.securities,
@@ -115,7 +139,7 @@ def news_items(
         select(a.c.model).order_by(a.c.batch_id.desc(), a.c.id.desc()).limit(1)
     ).scalar()
     if model is None:
-        return {}, 0, None
+        return News({}, 0, 0, None)
     latest = (
         select(a.c.news_article_id, a.c.security_id, a.c.score)
         .where(a.c.model == model)
@@ -124,7 +148,9 @@ def news_items(
         .subquery()
     )
     rows = conn.execute(
-        select(s.c.symbol, na.c.published_at, latest.c.score, np_.c.domain)
+        select(
+            s.c.symbol, na.c.headline, na.c.published_at, latest.c.score, np_.c.domain
+        )
         .join(s, s.c.id == na.c.security_id)
         .join(
             latest,
@@ -138,34 +164,37 @@ def news_items(
             na.c.published_at <= end,
         )
     ).all()
+    names = company_names(conn, symbols)
+    variants = {symbol: name_variants(names.get(symbol, [])) for symbol in symbols}
     out: dict[str, list[Item]] = {}
-    unknown = 0
-    for symbol, published_at, score, domain in rows:
+    off_topic = unknown = 0
+    for symbol, headline, published_at, score, domain in rows:
+        if not about_company(headline, symbol, variants[symbol]):
+            off_topic += 1
+            continue
         unknown += domain is None
-        out.setdefault(symbol, []).append(
-            Item(
-                float(score),
-                table.weight_for(domain),
-                published_at,
-                published_at,
-                False,
-            )
+        weight = table.weight_for(domain) * decay(
+            published_at, end, table.half_life_days
         )
-    return out, unknown, model
+        out.setdefault(symbol, []).append(
+            Item(float(score), weight, published_at, published_at, False)
+        )
+    return News(out, off_topic, unknown, model)
 
 
 def social_items(
-    rows: list[dict[str, Any]], as_of: date, table: WeightTable
+    rows: list[dict[str, Any]], as_of: date, now: datetime, table: WeightTable
 ) -> dict[str, list[Item]]:
     """Posts carry no dates: each spans the collection window ending on as_of."""
     last = datetime.combine(as_of, dtime(23, 59, 59), tzinfo=timezone.utc)
     first = last - timedelta(days=WINDOW_DAYS)
+    fade = decay(last, now, table.half_life_days)
     out: dict[str, list[Item]] = {}
     for row in rows:
         out.setdefault(row["symbol"], []).append(
             Item(
                 social_to_unit(float(row["score"])),
-                table.weight_for(row["platform"]),
+                table.weight_for(row["platform"]) * fade,
                 first,
                 last,
                 True,
@@ -214,17 +243,17 @@ def derive_sentiment(
                 )
                 return import_collection(engine, outcome, run_id=run_id)
             with engine.connect() as conn:
-                news, unknown, model = news_items(conn, symbols, start, now, table)
+                news = news_items(conn, symbols, start, now, table)
                 posts: dict[str, list[Item]] = {}
                 if social_fresh and social is not None:
                     rows = batch_rows(conn, "social_posts", social.batch_id)
-                    posts = social_items(rows, social.source_as_of, table)
+                    posts = social_items(rows, social.source_as_of, now, table)
             records = [
                 weigh(
                     symbol,
-                    news.get(symbol, []) + posts.get(symbol, []),
+                    news.items.get(symbol, []) + posts.get(symbol, []),
                     table.version,
-                    model,
+                    news.model,
                 )
                 for symbol in symbols
             ]
@@ -243,7 +272,9 @@ def derive_sentiment(
                     "news_used": sum(r["news_count"] for r in records),
                     "social_used": sum(r["social_count"] for r in records),
                     "social_batch_fresh": social_fresh,
-                    "publishers_unknown": unknown,
+                    "publishers_unknown": news.publishers_unknown,
+                    "news_off_topic": news.off_topic,
+                    "half_life_days": table.half_life_days,
                 },
             )
             return import_collection(engine, outcome, run_id=run_id)
