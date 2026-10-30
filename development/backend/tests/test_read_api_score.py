@@ -22,6 +22,7 @@ so a client holding an old ETag is never told 304 over a newer body.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -632,3 +633,128 @@ def test_a_row_that_breakdown_refuses_fails_closed(engine, groups):  # noqa: F81
     assert set(body) == {"detail", "code"} and isinstance(body["code"], str)
     for leaked in ("60.12", "74.3", "78.0", "65.5", marker, "ZZCF"):
         assert leaked not in response.text, leaked
+
+
+# ── checker F1 on c3c1fee, and the explicit API column lists ─
+
+
+def _no_raise_client(engine, groups):  # noqa: F811
+    """A client served by the API login that returns server errors instead of raising."""
+    from contextlib import contextmanager
+
+    from fastapi.testclient import TestClient
+    from src.api.read import create_app
+    from test_read_api import login
+
+    @contextmanager
+    def opened():
+        with login(engine, groups) as (api_engine, _, _password):
+            with TestClient(
+                create_app(api_engine, api_role=groups["api"]),
+                raise_server_exceptions=False,
+            ) as client:
+                yield client
+
+    return opened()
+
+
+MALFORMED = {
+    "no_record": lambda c: {k: v for k, v in c.items() if k != "record"},
+    "record_not_an_object": lambda c: {**c, "record": "fundamental_scores:812"},
+    "record_without_id": lambda c: {
+        **c,
+        "record": {"table": "fundamental_scores", "batch_id": 5},
+    },
+    "no_text": lambda c: {k: v for k, v in c.items() if k != "text"},
+    "order_not_a_number": lambda c: {**c, "order": "first"},
+    "not_an_object": lambda c: "a bare string claim",
+}
+
+
+@pytest.mark.parametrize("case", sorted(MALFORMED))
+@pytest.mark.db
+def test_a_malformed_stored_claim_fails_closed(engine, groups, case):  # noqa: F811
+    """Checker F1: a stored claim that isn't Claim-shaped is never served and never a
+    plain-text 500: the same fail-closed JSON as (d), with no claim text or stored value."""
+    marker = "malformed claim text"
+    claims = [dict(c, text=marker) for c in explanation_row()["claims"]]
+    claims[0] = MALFORMED[case](claims[0])
+    scored(engine, "ZZCM", recommended(), explanation_row(claims=claims))
+    with _no_raise_client(engine, groups) as client:
+        response = get(client, "ZZCM")
+    assert response.status_code != 200
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert set(body) == {"detail", "code"} and isinstance(body["code"], str)
+    for leaked in (
+        marker,
+        "a bare string claim",
+        "fundamental_scores:812",
+        "74.3",
+        "55.06",
+        "ZZCM",
+    ):
+        assert leaked not in response.text, leaked
+
+
+def _selected(statement, table):
+    """The columns of `table` in a statement's select list (before its FROM)."""
+    head = re.split(r"\bFROM\b", statement, maxsplit=1)[0]
+    return set(re.findall(rf"\bperennial\.{table}\.(\w+)", head))
+
+
+@pytest.mark.db
+def test_the_route_selects_exactly_the_granted_api_columns(engine, groups):  # noqa: F811
+    """Checker remark: the route reads exactly provision_roles.API_COLUMNS for both score
+    tables, not "every model column but one", so a column added to the model later
+    without an API grant can't break it or be read."""
+    from fastapi.testclient import TestClient
+    from sqlalchemy import event
+    from src.api.read import create_app
+    from test_read_api import login
+    from test_scores_schema import _provision_roles
+
+    granted = _provision_roles().API_COLUMNS
+    scored(engine, "ZZCC", recommended())
+    statements = []
+    with login(engine, groups) as (api_engine, _, _password):
+
+        @event.listens_for(api_engine, "before_cursor_execute")
+        def capture(conn, cursor, statement, *rest):
+            statements.append(statement)
+
+        with TestClient(create_app(api_engine, api_role=groups["api"])) as client:
+            statements.clear()  # only the request's own reads
+            assert get(client, "ZZCC").status_code == 200
+        event.remove(api_engine, "before_cursor_execute", capture)
+    for table in ("company_scores", "score_explanations"):
+        reads = [
+            st for st in statements if re.search(rf"\bFROM perennial\.{table}\b", st)
+        ]
+        assert reads, table
+        for statement in reads:
+            # company_scores serves every granted column; explanations need fewer.
+            assert _selected(statement, table) <= set(granted[table]), (
+                table,
+                statement,
+            )
+
+
+@pytest.mark.parametrize("table", ["company_scores", "score_explanations"])
+@pytest.mark.db
+def test_an_ungranted_model_column_is_never_read(engine, api, monkeypatch, table):  # noqa: F811
+    """Checker remark, the stronger form: give the model one more column, as a later
+    migration would, with no API grant. A route that reads "every column but one"
+    selects it and fails; one that reads the API_COLUMNS list still answers 200."""
+    from sqlalchemy import Column, Integer, MetaData
+    from src.db import models
+
+    scored(engine, "ZZCC", recommended())
+    before = get(api, "ZZCC")
+    assert before.status_code == 200
+    widened = getattr(models, table).to_metadata(MetaData())
+    widened.append_column(Column("zz_ungranted_probe", Integer))
+    monkeypatch.setattr(models, table, widened)
+    after = get(api, "ZZCC")
+    assert after.status_code == 200, after.text
+    assert after.json() == before.json()
