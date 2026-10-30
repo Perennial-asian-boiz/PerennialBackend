@@ -1061,7 +1061,8 @@ EXPLANATION_STATUSES = ("ok", "not_recommended", "unavailable")
 EXPLANATION_REASONS = ("insufficient_supporting_data", "score_unavailable")
 EXPLANATION_MAX_CLAIMS = 3
 
-# The sentiment contract (issue #76): one row per (batch, security); no row, no coverage.
+# The credibility-weighted sentiment per security over the window (derived): PR #85's
+# table plus model_version (decision 108). One row per (batch, security).
 ticker_sentiment = Table(
     "ticker_sentiment",
     metadata,
@@ -1069,20 +1070,36 @@ ticker_sentiment = Table(
     _batch_fk(),
     _security_fk(),
     Column("row_number", Integer, nullable=False),
-    Column("value", Numeric(5, 4), nullable=False),  # -1..1
+    Column("value", Numeric(5, 4)),  # NULL: nothing scored in the window
+    Column("plain_average", Numeric(5, 4)),
     Column("article_count", Integer, nullable=False),
-    Column("window_start", Date, nullable=False),
-    Column("window_end", Date, nullable=False),  # the component's as-of
-    Column("model_version", String(64), nullable=False),
-    Column("source_weights_version", String(32), nullable=False),
-    Column("method", String(32), nullable=False),
-    Column("rollup_version", String(32), nullable=False),
+    Column("news_count", Integer, nullable=False),
+    Column("social_count", Integer, nullable=False),
+    Column("first_at", DateTime(timezone=True)),
+    Column("last_at", DateTime(timezone=True)),
+    Column("weights_version", String(32), nullable=False),
+    Column("model_version", String(64)),  # the news model; NULL when no news counted
     UniqueConstraint("batch_id", "row_number"),
     UniqueConstraint("batch_id", "security_id"),
     CheckConstraint("row_number >= 1", name="row_number"),
-    CheckConstraint("value BETWEEN -1 AND 1", name="value"),
-    CheckConstraint("article_count >= 1", name="article_count"),
-    CheckConstraint("window_start <= window_end", name="window"),
+    CheckConstraint(
+        "news_count >= 0 AND social_count >= 0 "
+        "AND article_count = news_count + social_count",
+        name="counts",
+    ),
+    CheckConstraint(
+        "(article_count = 0) = (value IS NULL) "
+        "AND (value IS NULL) = (plain_average IS NULL) "
+        "AND (value IS NULL) = (first_at IS NULL) "
+        "AND (first_at IS NULL) = (last_at IS NULL)",
+        name="scored_or_empty",
+    ),
+    CheckConstraint(
+        "value IS NULL OR (value BETWEEN -1 AND 1 AND plain_average BETWEEN -1 AND 1 "
+        "AND first_at <= last_at)",
+        name="value_range",
+    ),
+    CheckConstraint("(news_count = 0) = (model_version IS NULL)", name="model_version"),
 )
 Index("ix_ticker_sentiment_security_id", ticker_sentiment.c.security_id)
 

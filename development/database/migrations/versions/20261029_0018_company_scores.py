@@ -3,8 +3,8 @@
 Expand only (output/sprint-2/s2-stories-plan.md §3.1, §4). Adds 'ticker_sentiment',
 'company_scores' and 'score_explanations' to the source vocabulary, and four tables:
 
-* ticker_sentiment: the sentiment contract (issue #76), one row per (batch, security).
-  No row means no coverage.
+* ticker_sentiment: the credibility-weighted sentiment per (batch, security), PR #85's
+  table plus model_version (decision 108). Nothing counted means a NULL value.
 * company_scores: one row per (batch, security) under score-v1: the score or why it
   is unavailable, the missing components, and per component (fundamentals,
   sentiment, event_exposure) its value, nominal and effective weight, contribution,
@@ -92,18 +92,29 @@ def upgrade():
         'ticker_sentiment',
         *_batch_and_security('ticker_sentiment'),
         sa.Column('row_number', sa.Integer(), nullable=False),
-        sa.Column('value', sa.Numeric(5, 4), nullable=False),
+        sa.Column('value', sa.Numeric(5, 4), nullable=True),
+        sa.Column('plain_average', sa.Numeric(5, 4), nullable=True),
         sa.Column('article_count', sa.Integer(), nullable=False),
-        sa.Column('window_start', sa.Date(), nullable=False),
-        sa.Column('window_end', sa.Date(), nullable=False),
-        sa.Column('model_version', sa.String(length=64), nullable=False),
-        sa.Column('source_weights_version', sa.String(length=32), nullable=False),
-        sa.Column('method', sa.String(length=32), nullable=False),
-        sa.Column('rollup_version', sa.String(length=32), nullable=False),
+        sa.Column('news_count', sa.Integer(), nullable=False),
+        sa.Column('social_count', sa.Integer(), nullable=False),
+        sa.Column('first_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('last_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('weights_version', sa.String(length=32), nullable=False),
+        sa.Column('model_version', sa.String(length=64), nullable=True),
         sa.CheckConstraint('row_number >= 1', name=op.f('ck_ticker_sentiment_row_number')),
-        sa.CheckConstraint('value BETWEEN -1 AND 1', name=op.f('ck_ticker_sentiment_value')),
-        sa.CheckConstraint('article_count >= 1', name=op.f('ck_ticker_sentiment_article_count')),
-        sa.CheckConstraint('window_start <= window_end', name=op.f('ck_ticker_sentiment_window')),
+        sa.CheckConstraint('news_count >= 0 AND social_count >= 0 '
+                           'AND article_count = news_count + social_count',
+                           name=op.f('ck_ticker_sentiment_counts')),
+        sa.CheckConstraint('(article_count = 0) = (value IS NULL) '
+                           'AND (value IS NULL) = (plain_average IS NULL) '
+                           'AND (value IS NULL) = (first_at IS NULL) '
+                           'AND (first_at IS NULL) = (last_at IS NULL)',
+                           name=op.f('ck_ticker_sentiment_scored_or_empty')),
+        sa.CheckConstraint('value IS NULL OR (value BETWEEN -1 AND 1 AND plain_average BETWEEN -1 AND 1 '
+                           'AND first_at <= last_at)',
+                           name=op.f('ck_ticker_sentiment_value_range')),
+        sa.CheckConstraint('(news_count = 0) = (model_version IS NULL)',
+                           name=op.f('ck_ticker_sentiment_model_version')),
         sa.UniqueConstraint('batch_id', 'row_number', name=op.f('uq_ticker_sentiment_batch_id_row_number')),
         schema='perennial',
     )
