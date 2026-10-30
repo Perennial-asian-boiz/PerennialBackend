@@ -5,19 +5,19 @@ ticker_sentiment as plain mappings): no network, no database, no model.
 
 A claim is {order, text, component, measure, record: {table, id, batch_id},
 as_of, value}: every sentence cites the stored record and value it came from
-(S2-03 AC2). Only a supporting signal is a claim (decision 103 (c)): a
-fundamentals measure worth at least 50 points, and sentiment that leans
-positive. Supporting measures go by points descending (ties in MEASURES order),
-and positive sentiment always keeps the last of the three places (AC1). A
-component the score lists as missing produces no claim (AC3). Claims are
-generated only for a recommended score; one with no supporting signal is
-unavailable for insufficient supporting data (AC5).
+(S2-03 AC2). Candidates are the fundamentals measures the fundamentals score
+uses, by points descending (ties in MEASURES order), then sentiment; the first
+three are kept (AC1). A component the score lists as missing produces no claim
+(AC3). Claims are generated only for a recommended score.
 
-The sentiment claim reads the ticker_sentiment row of the PR #85 contract: its
-news and social counts, and the UTC dates of first_at and last_at (the as-of).
+Decision 108: ticker_sentiment is #85's table plus model_version. A sentiment
+claim names what was counted (news articles, social posts or both), its window
+is the ticker_sentiment batch envelope's window_days, which the caller passes,
+and its as_of is last_at's UTC date. A row with a NULL value had nothing to
+score: it is missing sentiment, so a score that cites one is refused.
 
-The input digest is SHA-256 over the canonical JSON of the score row and the
-records it cites. An equal digest under the same template returns the stored
+The input digest is SHA-256 over the canonical JSON of the score row, the
+records it cites and, when sentiment is cited, the window. An equal digest under the same template returns the stored
 explanation unchanged (AC4), so the wording a user saw doesn't drift.
 """
 
@@ -32,9 +32,6 @@ from src.services.fundamentals.scoring import MEASURES, breakdown, key_reasons
 
 TEMPLATE_VERSION = "explain-v1"
 MAX_CLAIMS = 3
-# Decision 103 (c): a measure at the midpoint of its range or above supports a
-# recommendation. Below it are losses, declines and slow growth.
-SUPPORTING_POINTS = 50
 
 
 @dataclass(frozen=True)
@@ -63,17 +60,9 @@ def _cited(
     return row
 
 
-def _supports(measure: str, value: float, points: float) -> bool:
-    if points < SUPPORTING_POINTS:
-        return False
-    # key_reasons() rounds the trend to whole points: "improved 0 points" says nothing.
-    return measure != "operating_margin_trend" or f"{abs(value) * 100:.0f}" != "0"
-
-
 def _fundamentals_claims(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     parts = breakdown(row)
-    supporting = [k for k, p in parts.items() if _supports(k, p["value"], p["points"])]
-    ordered = sorted(supporting, key=lambda k: (-parts[k]["points"], MEASURES.index(k)))
+    ordered = sorted(parts, key=lambda k: (-parts[k]["points"], MEASURES.index(k)))
     claims = []
     for measure in ordered:
         only = {
@@ -99,44 +88,41 @@ def _fundamentals_claims(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     return claims
 
 
-def _utc_date(moment: datetime) -> date:
-    return moment.astimezone(timezone.utc).date()
-
-
 def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}{'' if count == 1 else 's'}"
 
 
-def _span(first: date, last: date) -> str:
-    def day(d: date) -> str:
-        return f"{d:%b} {d.day}" + ("" if first.year == last.year else f", {d.year}")
-
-    return (
-        f"on {day(last)}" if first == last else f"between {day(first)} and {day(last)}"
-    )
-
-
-def _sentiment_claim(row: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The sentiment claim when the row leans positive; nothing otherwise."""
-    value: Decimal | None = row["value"]
-    if value is None or value <= 0:
-        return None
+def _sentiment_claim(row: Mapping[str, Any], window_days: int | None) -> dict[str, Any]:
+    value: Decimal | None = row.get("value")
+    last_at: datetime | None = row.get("last_at")
+    if value is None or last_at is None:
+        raise ValueError("the cited sentiment row has no value: nothing was scored")
+    if last_at.tzinfo is None or last_at.utcoffset() is None:
+        raise ValueError("the cited sentiment row's last_at has no time zone")
+    # Exactly an int of at least 1: not a bool, and nothing is coerced.
+    if type(window_days) is not int or window_days < 1:
+        raise ValueError(
+            "a sentiment claim needs the batch's window_days, a positive int"
+        )
     news, social = int(row["news_count"]), int(row["social_count"])
     if news and social:
         subject = "News and social posts"
+        counted = f"{_plural(news, 'article')}, {_plural(social, 'post')}"
+    elif social:
+        subject, counted = "Social posts", _plural(social, "post")
+    elif news:
+        subject, counted = "News coverage", _plural(news, "article")
     else:
-        subject = "News coverage" if news else "Social posts"
-    counts = " and ".join(
-        part
-        for part in (
-            news and _plural(news, "news article"),
-            social and _plural(social, "social post"),
-        )
-        if part
-    )
-    first, last = _utc_date(row["first_at"]), _utc_date(row["last_at"])
+        raise ValueError("the cited sentiment row counts no articles or posts")
+    days = _plural(window_days, "day")
+    if value > 0:
+        lean = "leaned positive"
+    elif value < 0:
+        lean = "leaned negative"
+    else:
+        lean = "was neutral"
     return {
-        "text": f"{subject} {_span(first, last)} leaned positive ({counts}).",
+        "text": f"{subject} over the last {days} {lean} ({counted}).",
         "component": "sentiment",
         "measure": "value",
         "record": {
@@ -144,7 +130,7 @@ def _sentiment_claim(row: Mapping[str, Any]) -> dict[str, Any] | None:
             "id": row["id"],
             "batch_id": row["batch_id"],
         },
-        "as_of": last.isoformat(),
+        "as_of": last_at.astimezone(timezone.utc).date().isoformat(),
         "value": str(value),
     }
 
@@ -153,14 +139,21 @@ def claims_for(
     score_row: Mapping[str, Any],
     fundamentals_row: Mapping[str, Any] | None,
     sentiment_row: Mapping[str, Any] | None,
+    *,
+    window_days: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Up to three supporting claims, in order, from the records the score cites."""
+    """Up to three claims, in order, from the records the score cites."""
+    candidates: list[dict[str, Any]] = []
     fundamentals = _cited(score_row, "fundamentals", fundamentals_row)
+    if fundamentals is not None:
+        candidates.extend(_fundamentals_claims(fundamentals))
     sentiment = _cited(score_row, "sentiment", sentiment_row)
-    lean = _sentiment_claim(sentiment) if sentiment is not None else None
-    measures = _fundamentals_claims(fundamentals) if fundamentals is not None else []
-    claims = measures[: MAX_CLAIMS - (lean is not None)] + ([lean] if lean else [])
-    return [{"order": order, **claim} for order, claim in enumerate(claims, start=1)]
+    if sentiment is not None:
+        candidates.append(_sentiment_claim(sentiment, window_days))
+    return [
+        {"order": order, **claim}
+        for order, claim in enumerate(candidates[:MAX_CLAIMS], start=1)
+    ]
 
 
 def _json_default(value: object) -> str:
@@ -173,18 +166,23 @@ def input_digest(
     score_row: Mapping[str, Any],
     fundamentals_row: Mapping[str, Any] | None,
     sentiment_row: Mapping[str, Any] | None,
+    *,
+    window_days: int | None = None,
 ) -> str:
-    """SHA-256 (hex) of the score row and the records it cites, as canonical JSON."""
+    """SHA-256 (hex) of the score row, the whole records it cites and, when it cites
+    sentiment, the window, as canonical JSON. A record the score lists as missing is
+    left out, so an empty sentiment row digests the same as none."""
     missing = _missing(score_row)
-    payload = {
+    sentiment = None if "sentiment" in missing else sentiment_row
+    payload: dict[str, Any] = {
         "score": dict(score_row),
         "fundamentals": None
         if "fundamentals" in missing or fundamentals_row is None
         else dict(fundamentals_row),
-        "sentiment": None
-        if "sentiment" in missing or sentiment_row is None
-        else dict(sentiment_row),
+        "sentiment": None if sentiment is None else dict(sentiment),
     }
+    if sentiment is not None:
+        payload["window_days"] = window_days
     canonical = json.dumps(
         payload,
         sort_keys=True,
@@ -200,13 +198,19 @@ def explain(
     fundamentals_row: Mapping[str, Any] | None,
     sentiment_row: Mapping[str, Any] | None,
     previous: Mapping[str, Any] | None = None,
+    *,
+    window_days: int | None = None,
 ) -> Explanation:
     """The explanation for one score; `previous` is its last stored explanation."""
     recommended = score_row.get("status") == "ok" and score_row.get("recommended")
     claims: Sequence[dict[str, Any]] = ()
     if recommended:
-        claims = claims_for(score_row, fundamentals_row, sentiment_row)
-    digest = input_digest(score_row, fundamentals_row, sentiment_row)
+        claims = claims_for(
+            score_row, fundamentals_row, sentiment_row, window_days=window_days
+        )
+    digest = input_digest(
+        score_row, fundamentals_row, sentiment_row, window_days=window_days
+    )
     if (
         previous is not None
         and previous.get("input_digest") == digest

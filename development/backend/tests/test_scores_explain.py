@@ -7,22 +7,29 @@ them (test_scores_schema.py) and as fundamental_scores stores a fundamentals sco
 Pinned interface, src/services/scores/explain.py:
 
 * TEMPLATE_VERSION = "explain-v1".
-* explain(score_row, fundamentals_row, sentiment_row, previous=None) -> Explanation
-  with status, reason, template_version, claims (a list of dicts) and input_digest.
-  `previous` is the last stored score_explanations row for the security: an equal
-  digest under the same template returns it unchanged (AC4).
-* claims_for(score_row, fundamentals_row, sentiment_row) -> the claims alone.
-* input_digest(score_row, fundamentals_row, sentiment_row) -> 64 lower-case hex.
+* explain(score_row, fundamentals_row, sentiment_row, previous=None, *,
+  window_days=None) -> Explanation with status, reason, template_version, claims
+  (a list of dicts) and input_digest. `previous` is the last stored
+  score_explanations row for the security: an equal digest under the same
+  template returns it unchanged (AC4).
+* claims_for(score_row, fundamentals_row, sentiment_row, *, window_days=None)
+  -> the claims alone.
+* input_digest(score_row, fundamentals_row, sentiment_row, *, window_days=None)
+  -> 64 lower-case hex, over the whole cited rows and the window.
+
+Decision 108: ticker_sentiment is #85's table plus model_version. A sentiment
+claim's as_of is last_at's UTC date; its window is the ticker_sentiment batch
+envelope's window_days, which the job passes (a sentiment claim without one is
+refused). Its text names what was counted: "News coverage ... (a articles)",
+"Social posts ... (b posts)" or "News and social posts ... (a articles, b
+posts)", a zero part dropped.
 
 A claim is {order, text, component, measure, record: {table, id, batch_id},
 as_of, value}. `measure` is the cited record's column and `value` its stored
-value as a string. Decision 103 (c): only supporting signals are claims. A
-fundamentals measure that fundamentals.scoring.breakdown() scores at 50 points
-or more is one, by points descending (ties in MEASURES order); sentiment is
-one when it leans positive, and then always keeps one of the three places. A
-fundamentals claim's text is key_reasons()' sentence for that measure. The
-sentiment row is the PR #85 contract (decision 108): news and social counts,
-first_at and last_at.
+value as a string. Candidates are the fundamentals measures that
+fundamentals.scoring.breakdown() scores, by points descending (ties in
+MEASURES order), then sentiment; the first three are kept. A fundamentals
+claim's text is key_reasons()' sentence for that measure.
 """
 
 import dataclasses
@@ -81,21 +88,31 @@ def bank_row(**over):
 
 
 def sentiment_row(**over):
-    """A ticker_sentiment row of the PR #85 contract (decision 108)."""
     return {
         "id": 77,
         "batch_id": 9,
         "value": D("0.3100"),
-        "plain_average": D("0.2500"),
+        "plain_average": D("0.2800"),
         "article_count": 12,
-        "news_count": 10,
-        "social_count": 2,
-        "first_at": datetime(2026, 10, 29, 14, 0, tzinfo=timezone.utc),
-        "last_at": datetime(2026, 11, 4, 17, 2, tzinfo=timezone.utc),
+        "news_count": 12,
+        "social_count": 0,
+        "first_at": datetime(2026, 10, 29, 14, 5, tzinfo=timezone.utc),
+        "last_at": datetime(2026, 11, 4, 16, 30, tzinfo=timezone.utc),
         "weights_version": "weights-v1",
         "model_version": "ProsusAI/finbert@synthetic0001",
         **over,
     }
+
+
+def counted(news, social, **over):
+    """A scored sentiment row with these news and social counts."""
+    return sentiment_row(
+        article_count=news + social,
+        news_count=news,
+        social_count=social,
+        model_version=None if news == 0 else "ProsusAI/finbert@synthetic0001",
+        **over,
+    )
 
 
 def score_row(**over):
@@ -139,6 +156,7 @@ def explain(score=None, fundamentals="default", sentiment="default", **kw):
     score = score_row() if score is None else score
     fundamentals = fundamentals_row() if fundamentals == "default" else fundamentals
     sentiment = sentiment_row() if sentiment == "default" else sentiment
+    kw.setdefault("window_days", 7)
     return explain_module().explain(score, fundamentals, sentiment, **kw)
 
 
@@ -172,13 +190,11 @@ def fundamentals_claim(order, measure, row=None):
     }
 
 
-LEAN = (
-    "News and social posts between Oct 29 and Nov 4 leaned positive"
-    " (10 news articles and 2 social posts)."
-)
-
-
-def sentiment_claim(order, text=LEAN, **over):
+def sentiment_claim(
+    order,
+    text="News coverage over the last 7 days leaned positive (12 articles).",
+    **over,
+):
     row = sentiment_row(**over)
     return {
         "order": order,
@@ -190,7 +206,7 @@ def sentiment_claim(order, text=LEAN, **over):
             "id": row["id"],
             "batch_id": row["batch_id"],
         },
-        "as_of": row["last_at"].date().isoformat(),
+        "as_of": row["last_at"].astimezone(timezone.utc).date().isoformat(),
         "value": str(row["value"]),
     }
 
@@ -202,99 +218,54 @@ def test_template_version():
     assert explain_module().TEMPLATE_VERSION == "explain-v1"
 
 
-NEGATIVE = sentiment_row(value=D("-0.2000"))
-
-
-def test_without_positive_sentiment_three_supporting_measures_fill_the_claims():
-    """Margin 100 points, growth 62.5, trend 55, and sentiment that leans negative."""
-    row = fundamentals_row(revenue_growth_3y=D("0.250000"))
-    result = explain(fundamentals=row, sentiment=NEGATIVE)
+def test_three_fundamentals_measures_fill_the_claims_by_points():
+    """Margin 100 points, trend 55, growth 45: sentiment is a fourth candidate and is cut."""
+    result = explain()
     assert (result.status, result.reason, result.template_version) == (
         "ok",
         None,
         "explain-v1",
     )
     assert list(result.claims) == [
-        fundamentals_claim(1, "operating_margin", row),
-        fundamentals_claim(2, "revenue_growth_3y", row),
-        fundamentals_claim(3, "operating_margin_trend", row),
+        fundamentals_claim(1, "operating_margin"),
+        fundamentals_claim(2, "operating_margin_trend"),
+        fundamentals_claim(3, "revenue_growth_3y"),
     ]
 
 
-def test_positive_sentiment_always_keeps_the_last_place():
-    """Three supporting measures: the two with the most points, then sentiment."""
-    row = fundamentals_row(revenue_growth_3y=D("0.250000"))
+def test_the_plans_example_two_measures_then_sentiment():
+    """§3.4: growth 18% and a 42-cent margin, then the 7-day news lean."""
+    row = fundamentals_row(operating_margin_trend=None)
     result = explain(fundamentals=row)
+    assert [c["text"] for c in result.claims] == [
+        "Keeps 42 cents of every sales dollar as operating profit.",
+        "Revenue grew 18% a year over the last 3 years.",
+        "News coverage over the last 7 days leaned positive (12 articles).",
+    ]
     assert list(result.claims) == [
         fundamentals_claim(1, "operating_margin", row),
         fundamentals_claim(2, "revenue_growth_3y", row),
         sentiment_claim(3),
     ]
-    assert [c["text"] for c in result.claims] == [
-        "Keeps 42 cents of every sales dollar as operating profit.",
-        "Revenue grew 25% a year over the last 3 years.",
-        LEAN,
-    ]
-
-
-def test_a_measure_below_50_points_is_not_a_reason():
-    """Growth of 18% a year is 45 points: not a reason to recommend."""
-    result = explain()
-    assert [c["measure"] for c in result.claims] == [
-        "operating_margin",
-        "operating_margin_trend",
-        "value",
-    ]
-
-
-@pytest.mark.parametrize(
-    "over,absent",
-    [
-        # GTLB on the live run: recommended at 71.9 with a -7% operating margin.
-        ({"operating_margin": D("-0.070000")}, "Spends more than it earns"),
-        # DKNG: a -0.3% margin read "operating loss of 0 cents per sales dollar".
-        ({"operating_margin": D("-0.003000")}, "0 cents"),
-        ({"operating_margin_trend": D("-0.050000")}, "worsened"),
-        ({"revenue_growth_3y": D("-0.020000")}, "shrank"),
-    ],
-)
-def test_losses_declines_and_shrinking_revenue_are_never_reasons(over, absent):
-    result = explain(fundamentals=fundamentals_row(**over))
-    assert result.claims and all(absent not in c["text"] for c in result.claims)
-    assert {c["measure"] for c in result.claims}.isdisjoint(over)
-
-
-def test_a_trend_that_rounds_to_0_points_is_not_a_reason():
-    """+0.4 points is 52 points, but would read "Profitability improved 0 points"."""
-    row = fundamentals_row(operating_margin_trend=D("0.004000"))
-    result = explain(fundamentals=row, sentiment=NEGATIVE)
-    assert [c["measure"] for c in result.claims] == ["operating_margin"]
-    assert all("improved 0 points" not in c["text"] for c in result.claims)
 
 
 def test_bank_measures_order_by_their_points():
-    """Return on equity 75 points, efficiency 66.7, growth 40 (not a reason)."""
     row = bank_row()
     result = explain(fundamentals=row)
     assert [c["measure"] for c in result.claims] == [
         "return_on_equity",
         "efficiency_ratio",
-        "value",
+        "revenue_growth_3y",
     ]
-    assert [c["text"] for c in result.claims[:2]] == [
-        "Earns 15% a year on shareholders' money.",
-        "Spends 60 cents to earn each dollar of revenue.",
-    ]
+    assert result.claims[1]["text"] == "Spends 60 cents to earn each dollar of revenue."
 
 
 def test_equal_points_keep_the_measures_order():
-    """Growth 0.30 and trend 0.05 are both 75 points; growth comes first in MEASURES."""
+    """Growth 0.20 and trend 0.00 are both 50 points; growth comes first in MEASURES."""
     row = fundamentals_row(
-        revenue_growth_3y=D("0.300000"), operating_margin_trend=D("0.050000")
+        revenue_growth_3y=D("0.200000"), operating_margin_trend=D("0.000000")
     )
-    assert [
-        c["measure"] for c in explain(fundamentals=row, sentiment=NEGATIVE).claims
-    ] == [
+    assert [c["measure"] for c in explain(fundamentals=row).claims] == [
         "operating_margin",
         "revenue_growth_3y",
         "operating_margin_trend",
@@ -309,72 +280,134 @@ def test_gross_margin_is_not_a_scored_measure_and_never_a_claim():
 
 
 @pytest.mark.parametrize(
-    "news,social,text",
+    "value,news,social,text",
     [
-        (10, 2, LEAN),
         (
+            "0.3100",
             12,
             0,
-            "News coverage between Oct 29 and Nov 4 leaned positive (12 news articles).",
+            "News coverage over the last 7 days leaned positive (12 articles).",
         ),
         (
-            0,
+            "-0.2500",
             3,
-            "Social posts between Oct 29 and Nov 4 leaned positive (3 social posts).",
+            0,
+            "News coverage over the last 7 days leaned negative (3 articles).",
         ),
         (
+            "0.0100",
+            1,
+            0,
+            "News coverage over the last 7 days leaned positive (1 article).",
+        ),
+        (
+            "0.4000",
+            9,
+            3,
+            "News and social posts over the last 7 days leaned positive"
+            " (9 articles, 3 posts).",
+        ),
+        (
+            "0.2000",
             1,
             1,
-            "News and social posts between Oct 29 and Nov 4 leaned positive"
-            " (1 news article and 1 social post).",
+            "News and social posts over the last 7 days leaned positive"
+            " (1 article, 1 post).",
+        ),
+        (
+            "-0.3000",
+            0,
+            2,
+            "Social posts over the last 7 days leaned negative (2 posts).",
+        ),
+        (
+            "0.5000",
+            0,
+            1,
+            "Social posts over the last 7 days leaned positive (1 post).",
         ),
     ],
 )
-def test_sentiment_claim_wording_names_its_sources(news, social, text):
-    """#85 rows can be news only, social only (until S1-04 scores articles) or both."""
-    counts = {
-        "article_count": news + social,
-        "news_count": news,
-        "social_count": social,
-    }
+def test_sentiment_claim_wording(value, news, social, text):
+    """Decision 108: the sentence names the news articles and social posts counted."""
     row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
-    result = explain(fundamentals=row, sentiment=sentiment_row(**counts))
-    assert result.claims[-1] == sentiment_claim(2, text, **counts)
+    sentiment = counted(news, social, value=D(value))
+    claim = explain(fundamentals=row, sentiment=sentiment).claims[-1]
+    assert claim["text"] == text
+    assert claim == {
+        **sentiment_claim(2, text, value=D(value)),
+        "record": {"table": "ticker_sentiment", "id": 77, "batch_id": 9},
+    }
+
+
+def test_a_zero_sentiment_claims_no_lean():
+    row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
+    text = explain(fundamentals=row, sentiment=sentiment_row(value=D("0.0000"))).claims[
+        -1
+    ]["text"]
+    assert "positive" not in text and "negative" not in text
+    assert "(12 articles)" in text
+
+
+def test_the_window_is_the_envelopes_window_days():
+    """The job passes the ticker_sentiment batch envelope's window_days."""
+    row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
+    claim = explain(fundamentals=row, window_days=3).claims[-1]
+    assert claim["text"] == (
+        "News coverage over the last 3 days leaned positive (12 articles)."
+    )
+
+
+def test_a_sentiment_claim_without_a_window_is_refused():
+    row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
+    with pytest.raises(ValueError):
+        explain(fundamentals=row, window_days=None)
+
+
+@pytest.mark.parametrize("window_days", [0, -3, 7.5, "7", True])
+def test_a_window_that_is_not_a_positive_int_is_refused(window_days):
+    """Checker F2: explain guards itself, as the job does; bool is not an int here."""
+    row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
+    with pytest.raises(ValueError):
+        explain(fundamentals=row, window_days=window_days)
+    with pytest.raises(ValueError):
+        explain_module().claims_for(
+            score_row(), row, sentiment_row(), window_days=window_days
+        )
+
+
+def test_a_naive_last_at_is_refused():
+    """Checker F1: a timezone-less last_at is neither host-local nor UTC; refuse it,
+    as the TickerSentiment record model does."""
+    row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
+    naive = sentiment_row(last_at=datetime(2026, 11, 4, 16, 30))
+    with pytest.raises(ValueError):
+        explain(fundamentals=row, sentiment=naive)
+    with pytest.raises(ValueError):
+        explain_module().claims_for(score_row(), row, naive, window_days=7)
 
 
 @pytest.mark.parametrize(
-    "first_at,last_at,span",
+    "last_at,as_of",
     [
+        # 23:30 in New York on Nov 4 is 04:30 UTC on Nov 5.
         (
-            datetime(2026, 11, 4, 9, 0, tzinfo=timezone.utc),
-            datetime(2026, 11, 4, 17, 0, tzinfo=timezone.utc),
-            "on Nov 4",
+            datetime(2026, 11, 4, 23, 30, tzinfo=timezone(timedelta(hours=-5))),
+            "2026-11-05",
         ),
+        # 00:30 in Athens on Nov 5 is 22:30 UTC on Nov 4.
         (
-            datetime(2026, 12, 29, 9, 0, tzinfo=timezone.utc),
-            datetime(2027, 1, 4, 17, 0, tzinfo=timezone.utc),
-            "between Dec 29, 2026 and Jan 4, 2027",
+            datetime(2026, 11, 5, 0, 30, tzinfo=timezone(timedelta(hours=2))),
+            "2026-11-04",
         ),
+        (datetime(2026, 11, 4, 16, 30, tzinfo=timezone.utc), "2026-11-04"),
     ],
 )
-def test_the_sentiment_span_reads_naturally(first_at, last_at, span):
+def test_a_sentiment_claims_as_of_is_last_ats_utc_date(last_at, as_of):
+    row = fundamentals_row(operating_margin_trend=None, revenue_growth_3y=None)
+    first_at = datetime(2026, 10, 29, 14, 5, tzinfo=timezone.utc)
     sentiment = sentiment_row(first_at=first_at, last_at=last_at)
-    text = explain(sentiment=sentiment).claims[-1]["text"]
-    assert text.startswith(f"News and social posts {span} leaned positive")
-
-
-def test_the_sentiment_as_of_is_the_utc_date_of_last_at():
-    pacific = timezone(timedelta(hours=-8))
-    late = sentiment_row(last_at=datetime(2026, 11, 4, 23, 30, tzinfo=pacific))
-    claim = explain(sentiment=late).claims[-1]
-    assert claim["as_of"] == "2026-11-05"
-    assert "and Nov 5 leaned" in claim["text"]
-
-
-@pytest.mark.parametrize("value", ["0.0000", "-0.2500"])
-def test_neutral_or_negative_sentiment_is_not_a_reason(value):
-    result = explain(sentiment=sentiment_row(value=D(value)))
-    assert [c["component"] for c in result.claims] == ["fundamentals", "fundamentals"]
+    assert explain(fundamentals=row, sentiment=sentiment).claims[-1]["as_of"] == as_of
 
 
 # ── AC2/AC3: traceable, and nothing about an unavailable component ─
@@ -422,14 +455,14 @@ def test_no_claim_about_sentiment_when_the_score_lists_it_missing():
         sentiment_record_id=None,
         event_exposure_value=D("40.0"),
     )
-    row = fundamentals_row(revenue_growth_3y=D("0.250000"), operating_margin_trend=None)
+    row = fundamentals_row(operating_margin_trend=None)
     result = explain(score, fundamentals=row, sentiment=sentiment_row())
     assert all(c["component"] != "sentiment" for c in result.claims)
     assert len(result.claims) == 2
 
 
 def test_no_claim_about_a_missing_component_even_without_its_row():
-    row = fundamentals_row(revenue_growth_3y=D("0.250000"), operating_margin_trend=None)
+    row = fundamentals_row(operating_margin_trend=None)
     score = score_row(
         missing=["sentiment"], sentiment_record_id=None, event_exposure_value=D("40.0")
     )
@@ -465,6 +498,54 @@ def test_a_row_that_is_not_the_scores_cited_record_is_refused(which, over):
         }
     with pytest.raises(ValueError):
         explain(**kwargs)
+
+
+def test_an_empty_sentiment_row_the_score_lists_missing_gets_no_claim():
+    """Decision 108: a NULL value (no news or posts) is missing sentiment."""
+    empty = sentiment_row(
+        value=None,
+        plain_average=None,
+        article_count=0,
+        news_count=0,
+        social_count=0,
+        first_at=None,
+        last_at=None,
+        model_version=None,
+    )
+    score = score_row(
+        missing=["sentiment"],
+        sentiment_value=None,
+        sentiment_weight=D("0"),
+        sentiment_contribution=D("0"),
+        sentiment_input_as_of=None,
+        sentiment_input_version=None,
+        sentiment_record_id=None,
+        event_exposure_value=D("40.0"),
+    )
+    row = fundamentals_row(operating_margin_trend=None)
+    result = explain(score, fundamentals=row, sentiment=empty)
+    assert [c["component"] for c in result.claims] == ["fundamentals", "fundamentals"]
+    assert (
+        result.input_digest
+        == explain(score, fundamentals=row, sentiment=None).input_digest
+    )
+
+
+def test_a_cited_sentiment_row_without_a_value_is_refused():
+    """A score that used sentiment can't cite an empty row."""
+    empty = sentiment_row(
+        value=None,
+        plain_average=None,
+        article_count=0,
+        news_count=0,
+        social_count=0,
+        first_at=None,
+        last_at=None,
+        model_version=None,
+    )
+    row = fundamentals_row(operating_margin_trend=None)
+    with pytest.raises(ValueError):
+        explain(fundamentals=row, sentiment=empty)
 
 
 # ── statuses (AC5, and only recommended companies) ───────
@@ -516,36 +597,23 @@ def test_zero_candidate_claims_is_unavailable_for_insufficient_data():
     )
 
 
-def test_a_recommended_score_with_no_supporting_signal_is_unavailable():
-    """AC5 under decision 103 (c): every measure below 50 points, sentiment negative."""
-    weak = fundamentals_row(
-        revenue_growth_3y=D("0.050000"),
-        operating_margin=D("-0.070000"),
-        operating_margin_trend=D("-0.020000"),
-    )
-    result = explain(fundamentals=weak, sentiment=NEGATIVE)
-    assert (result.status, result.reason, list(result.claims)) == (
-        "unavailable",
-        "insufficient_supporting_data",
-        [],
-    )
-
-
 def test_claims_for_matches_explain():
     m = explain_module()
-    assert list(m.claims_for(score_row(), fundamentals_row(), sentiment_row())) == list(
-        explain().claims
+    claims = m.claims_for(
+        score_row(), fundamentals_row(), sentiment_row(), window_days=7
     )
+    assert list(claims) == list(explain().claims)
 
 
 # ── AC4: the digest, and returning the stored explanation ─
 
 
-def digest(score=None, fundamentals=None, sentiment="default"):
+def digest(score=None, fundamentals=None, sentiment="default", window_days=7):
     return explain_module().input_digest(
         score or score_row(),
         fundamentals or fundamentals_row(),
         sentiment_row() if sentiment == "default" else sentiment,
+        window_days=window_days,
     )
 
 
@@ -570,14 +638,23 @@ def test_the_digest_ignores_key_order():
         {"fundamentals": {"operating_margin": D("0.410000")}},
         {"fundamentals": {"revenue_growth_3y": D("0.190000")}},
         {"fundamentals": {"fiscal_year_end": date(2026, 6, 30)}},
-        {"sentiment": {"article_count": 13}},
-        {"sentiment": {"news_count": 11}},
+        {"sentiment": {"article_count": 13, "news_count": 13}},
+        {"sentiment": {"article_count": 13, "social_count": 1}},
+        {"sentiment": {"news_count": 11, "social_count": 1}},
         {"sentiment": {"value": D("0.3200")}},
-        {"sentiment": {"last_at": datetime(2026, 11, 5, 9, 0, tzinfo=timezone.utc)}},
+        {"sentiment": {"plain_average": D("0.2900")}},
+        {"sentiment": {"last_at": datetime(2026, 11, 4, 16, 31, tzinfo=timezone.utc)}},
+        {"sentiment": {"first_at": datetime(2026, 10, 30, 9, 0, tzinfo=timezone.utc)}},
+        {"sentiment": {"weights_version": "weights-v2"}},
+        {"sentiment": {"model_version": "ProsusAI/finbert@synthetic0002"}},
+        {"window_days": 3},
     ],
 )
 def test_the_digest_changes_with_any_input_a_claim_or_the_score_uses(change):
     ((which, over),) = change.items()
+    if which == "window_days":
+        assert digest(window_days=over) != digest()
+        return
     kwargs = {
         "score": score_row(**over) if which == "score" else None,
         "fundamentals": fundamentals_row(**over) if which == "fundamentals" else None,
