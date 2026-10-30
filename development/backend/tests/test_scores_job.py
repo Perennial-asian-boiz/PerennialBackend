@@ -869,6 +869,99 @@ def test_a_changed_input_regenerates_the_explanation(engine, world):
     assert all(c["text"] != "stored wording" for c in stored["ZZJA"]["claims"])
 
 
+def _bad_window_world(engine, envelope, listed=True):
+    """ZZJA scores ok from a ticker_sentiment batch whose envelope has this window."""
+    seed_security(engine, "ZZJA")
+    _import(engine, "fundamental_scores", [fundamentals_record("ZZJA", "78.0")])
+    _import(
+        engine,
+        "ticker_sentiment",
+        [sentiment_record("ZZJA", "0.3100")],
+        envelope=envelope,
+    )
+    publish(engine, popular=("ZZJA",) if listed else ())
+    return scores_ok(engine)
+
+
+def _explanations_run(engine, run_id):
+    with engine.connect() as conn:
+        return (
+            conn.execute(
+                text(
+                    "SELECT status, error_code, error_summary, CAST(diagnostics AS text) AS diagnostics"
+                    " FROM perennial.ingestion_runs WHERE id = :r"
+                ),
+                {"r": run_id},
+            )
+            .mappings()
+            .one()
+        )
+
+
+def _without(key):
+    return {k: v for k, v in sentiment_envelope().items() if k != key}
+
+
+BAD_WINDOWS = {
+    "absent": _without("window_days"),
+    "null": {**sentiment_envelope(), "window_days": None},
+    "zero": {**sentiment_envelope(), "window_days": 0},
+    "negative": {**sentiment_envelope(), "window_days": -3},
+    "text": {**sentiment_envelope(), "window_days": "7"},
+    "fraction": {**sentiment_envelope(), "window_days": 7.5},
+    "boolean": {**sentiment_envelope(), "window_days": True},
+}
+
+
+@pytest.mark.parametrize("case", sorted(BAD_WINDOWS))
+def test_a_sentiment_envelope_without_a_usable_window_fails_closed(engine, case):
+    """No positive int window_days on the cited ticker_sentiment batch: the run fails
+    invalid_upstream, writes no explanations batch, and leaves the pointer alone."""
+    import logging
+
+    from src.ingestion.diagnostics import ERROR_SUMMARIES
+
+    current = _bad_window_world(engine, BAD_WINDOWS[case])
+    records = []
+
+    class Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    loggers = [logging.getLogger(n) for n in ("src", "src.services.scores.job")]
+    saved = [(lg.disabled, lg.level) for lg in loggers]
+    handler = Keep(level=logging.DEBUG)
+    for lg in loggers:
+        lg.disabled = False
+        lg.setLevel(logging.DEBUG)
+    loggers[0].addHandler(handler)
+    try:
+        result = job().derive_explanations(engine)
+    finally:
+        loggers[0].removeHandler(handler)
+        for lg, (disabled, level) in zip(loggers, saved):
+            lg.disabled, lg.level = disabled, level
+    assert (result.succeeded, result.error_code) == (False, "invalid_upstream")
+    assert "invalid_upstream" in ERROR_SUMMARIES
+    assert batches(engine, "score_explanations") == 0
+    assert pointer(engine) == current
+    run = _explanations_run(engine, result.run_id)
+    assert (run["status"], run["error_code"]) == ("failed", "invalid_upstream")
+    assert records, "the job logs its outcome"
+    seen = " ".join([*records, run["error_summary"] or "", run["diagnostics"] or ""])
+    for row_data in ("ZZJA", "0.3100", "0.31", "ProsusAI", "weights-v1"):
+        assert row_data not in seen, row_data
+
+
+def test_an_unlisted_score_citing_a_windowless_batch_also_fails_closed(engine):
+    """The rule is on the cited batch, not on whether a claim needs the window."""
+    current = _bad_window_world(engine, _without("window_days"), listed=False)
+    result = job().derive_explanations(engine)
+    assert (result.succeeded, result.error_code) == (False, "invalid_upstream")
+    assert batches(engine, "score_explanations") == 0
+    assert pointer(engine) == current
+
+
 def test_without_a_current_scores_batch_explanations_fail_missing_upstream(engine):
     result = job().derive_explanations(engine)
     assert (result.succeeded, result.error_code) == (False, "missing_upstream")
