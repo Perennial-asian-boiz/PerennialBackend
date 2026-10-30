@@ -31,7 +31,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.engine import Connection, Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -173,6 +173,32 @@ COMPONENT_TABLES = {
     "fundamentals": "fundamental_scores",
     "sentiment": "ticker_sentiment",
 }
+# Exactly provision_roles.API_COLUMNS["company_scores"] (src can't import ops), so
+# a column a later migration adds without an API grant is never read.
+SCORE_COLUMNS = (
+    "id",
+    "batch_id",
+    "security_id",
+    "status",
+    "unavailable_reason",
+    "score",
+    "score_version",
+    "missing",
+    "recommended",
+    *(
+        f"{c}_{p}"
+        for c in ("fundamentals", "sentiment", "event_exposure")
+        for p in (
+            "value",
+            "nominal_weight",
+            "weight",
+            "contribution",
+            "input_as_of",
+            "input_version",
+            "record_id",
+        )
+    ),
+)
 
 
 class ComponentRecord(BaseModel):
@@ -544,6 +570,21 @@ def _components(row: Any, security_id: int) -> list[dict[str, Any]]:
     return served
 
 
+def _claims(explained: Any, security_id: int) -> list[dict[str, Any]]:
+    """Stored claims through the typed Claim model: only its keys are served, and a
+    claim that isn't Claim-shaped fails closed like a refused score row."""
+    try:
+        return [Claim.model_validate(c).model_dump() for c in explained.claims or []]
+    except ValidationError:
+        # Ids only: never the claim's text or stored values.
+        logger.error(
+            "stored claims refused: security_id=%s score_explanation_id=%s",
+            security_id,
+            explained.id,
+        )
+        raise APIError(500, "internal_error", "request failed") from None
+
+
 def _score(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
     """(score and explanation, ETag) through current_scores, explicit columns only.
 
@@ -560,8 +601,8 @@ def _score(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
     if pointer is not None:
         cs = m.company_scores
         row = conn.execute(
-            # perennial_api may not read watchlist_publication_id.
-            select(*(c for c in cs.c if c.name != "watchlist_publication_id")).where(
+            # The granted columns only: never watchlist_publication_id.
+            select(*(cs.c[name] for name in SCORE_COLUMNS)).where(
                 cs.c.batch_id == pointer.batch_id, cs.c.security_id == security_id
             )
         ).one_or_none()
@@ -602,10 +643,7 @@ def _score(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
             "status": explained.status,
             "template_version": explained.template_version,
             "as_of": as_of,
-            # Typed: only Claim's keys are served, whatever the JSONB holds.
-            "claims": [
-                Claim.model_validate(c).model_dump() for c in explained.claims or []
-            ],
+            "claims": _claims(explained, security_id),
         }
         if explained.reason is not None:
             explanation["reason"] = explained.reason

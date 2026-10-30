@@ -167,7 +167,7 @@ Each component has `name`, `status` (`ok` or `unavailable`), `value` (0-100 or `
 | `as_of` | string | as the score's `as_of`; absent when no explanation is stored |
 | `claims` | list | up to three, in `order` |
 
-A claim is `{order, text, component, measure, record: {table, id, batch_id}, as_of, value}`: a sentence and the stored record, measure, value and date it came from. Fundamentals measures come first, highest points first, then the news sentiment lean. A missing component never has a claim. Claims are served through a typed model, so a stored key outside that shape is never served.
+A claim is `{order, text, component, measure, record: {table, id, batch_id}, as_of, value}`: a sentence and the stored record, measure, value and date it came from. Fundamentals measures come first, highest points first, then the news sentiment lean. A missing component never has a claim. Claims are served through a typed model, so a stored key outside that shape is never served, and a stored claim that isn't claim-shaped fails closed with the same `500 internal_error` as a refused score row (the log names only the ids).
 
 ## `GET /v1/market-status`
 
