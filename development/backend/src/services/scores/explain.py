@@ -10,15 +10,21 @@ uses, by points descending (ties in MEASURES order), then sentiment; the first
 three are kept (AC1). A component the score lists as missing produces no claim
 (AC3). Claims are generated only for a recommended score.
 
-The input digest is SHA-256 over the canonical JSON of the score row and the
-records it cites. An equal digest under the same template returns the stored
+Decision 108: ticker_sentiment is #85's table plus model_version. A sentiment
+claim names what was counted (news articles, social posts or both), its window
+is the ticker_sentiment batch envelope's window_days, which the caller passes,
+and its as_of is last_at's UTC date. A row with a NULL value had nothing to
+score: it is missing sentiment, so a score that cites one is refused.
+
+The input digest is SHA-256 over the canonical JSON of the score row, the
+records it cites and, when sentiment is cited, the window. An equal digest under the same template returns the stored
 explanation unchanged (AC4), so the wording a user saw doesn't drift.
 """
 
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence
 
@@ -82,13 +88,28 @@ def _fundamentals_claims(row: Mapping[str, Any]) -> list[dict[str, Any]]:
     return claims
 
 
-def _sentiment_claim(row: Mapping[str, Any]) -> dict[str, Any]:
-    value: Decimal = row["value"]
-    count = int(row["article_count"])
-    start: date = row["window_start"]
-    end: date = row["window_end"]
-    days = (end - start).days + 1
-    articles = f"{count} article{'' if count == 1 else 's'}"
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _sentiment_claim(row: Mapping[str, Any], window_days: int | None) -> dict[str, Any]:
+    value: Decimal | None = row.get("value")
+    last_at: datetime | None = row.get("last_at")
+    if value is None or last_at is None:
+        raise ValueError("the cited sentiment row has no value: nothing was scored")
+    if window_days is None:
+        raise ValueError("a sentiment claim needs the batch's window_days")
+    news, social = int(row["news_count"]), int(row["social_count"])
+    if news and social:
+        subject = "News and social posts"
+        counted = f"{_plural(news, 'article')}, {_plural(social, 'post')}"
+    elif social:
+        subject, counted = "Social posts", _plural(social, "post")
+    elif news:
+        subject, counted = "News coverage", _plural(news, "article")
+    else:
+        raise ValueError("the cited sentiment row counts no articles or posts")
+    days = _plural(int(window_days), "day")
     if value > 0:
         lean = "leaned positive"
     elif value < 0:
@@ -96,7 +117,7 @@ def _sentiment_claim(row: Mapping[str, Any]) -> dict[str, Any]:
     else:
         lean = "was neutral"
     return {
-        "text": f"News coverage over the last {days} days {lean} ({articles}).",
+        "text": f"{subject} over the last {days} {lean} ({counted}).",
         "component": "sentiment",
         "measure": "value",
         "record": {
@@ -104,7 +125,7 @@ def _sentiment_claim(row: Mapping[str, Any]) -> dict[str, Any]:
             "id": row["id"],
             "batch_id": row["batch_id"],
         },
-        "as_of": end.isoformat(),
+        "as_of": last_at.astimezone(timezone.utc).date().isoformat(),
         "value": str(value),
     }
 
@@ -113,6 +134,8 @@ def claims_for(
     score_row: Mapping[str, Any],
     fundamentals_row: Mapping[str, Any] | None,
     sentiment_row: Mapping[str, Any] | None,
+    *,
+    window_days: int | None = None,
 ) -> list[dict[str, Any]]:
     """Up to three claims, in order, from the records the score cites."""
     candidates: list[dict[str, Any]] = []
@@ -121,7 +144,7 @@ def claims_for(
         candidates.extend(_fundamentals_claims(fundamentals))
     sentiment = _cited(score_row, "sentiment", sentiment_row)
     if sentiment is not None:
-        candidates.append(_sentiment_claim(sentiment))
+        candidates.append(_sentiment_claim(sentiment, window_days))
     return [
         {"order": order, **claim}
         for order, claim in enumerate(candidates[:MAX_CLAIMS], start=1)
@@ -138,18 +161,23 @@ def input_digest(
     score_row: Mapping[str, Any],
     fundamentals_row: Mapping[str, Any] | None,
     sentiment_row: Mapping[str, Any] | None,
+    *,
+    window_days: int | None = None,
 ) -> str:
-    """SHA-256 (hex) of the score row and the records it cites, as canonical JSON."""
+    """SHA-256 (hex) of the score row, the whole records it cites and, when it cites
+    sentiment, the window, as canonical JSON. A record the score lists as missing is
+    left out, so an empty sentiment row digests the same as none."""
     missing = _missing(score_row)
-    payload = {
+    sentiment = None if "sentiment" in missing else sentiment_row
+    payload: dict[str, Any] = {
         "score": dict(score_row),
         "fundamentals": None
         if "fundamentals" in missing or fundamentals_row is None
         else dict(fundamentals_row),
-        "sentiment": None
-        if "sentiment" in missing or sentiment_row is None
-        else dict(sentiment_row),
+        "sentiment": None if sentiment is None else dict(sentiment),
     }
+    if sentiment is not None:
+        payload["window_days"] = window_days
     canonical = json.dumps(
         payload,
         sort_keys=True,
@@ -165,13 +193,19 @@ def explain(
     fundamentals_row: Mapping[str, Any] | None,
     sentiment_row: Mapping[str, Any] | None,
     previous: Mapping[str, Any] | None = None,
+    *,
+    window_days: int | None = None,
 ) -> Explanation:
     """The explanation for one score; `previous` is its last stored explanation."""
     recommended = score_row.get("status") == "ok" and score_row.get("recommended")
     claims: Sequence[dict[str, Any]] = ()
     if recommended:
-        claims = claims_for(score_row, fundamentals_row, sentiment_row)
-    digest = input_digest(score_row, fundamentals_row, sentiment_row)
+        claims = claims_for(
+            score_row, fundamentals_row, sentiment_row, window_days=window_days
+        )
+    digest = input_digest(
+        score_row, fundamentals_row, sentiment_row, window_days=window_days
+    )
     if (
         previous is not None
         and previous.get("input_digest") == digest
