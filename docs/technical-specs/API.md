@@ -112,7 +112,7 @@ Full score (score-v1 always lists `event_exposure` as missing):
       "contribution": 55.06, "input_as_of": "2025-06-30", "input_version": "fundamentals-v1",
       "record": {"table": "fundamental_scores", "id": 812}},
      {"name": "sentiment", "status": "ok", "value": 65.5, "nominal_weight": 0.25, "weight": 0.2941,
-      "contribution": 19.26, "input_as_of": "2026-11-04", "input_version": "sentiment-rollup-v1",
+      "contribution": 19.26, "input_as_of": "2026-11-04", "input_version": "weights-v1",
       "record": {"table": "ticker_sentiment", "id": 77}},
      {"name": "event_exposure", "status": "unavailable", "value": null, "nominal_weight": 0.15,
       "weight": 0.0, "contribution": 0.0, "input_as_of": null, "input_version": null, "record": null,
