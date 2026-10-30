@@ -156,16 +156,16 @@ ENVELOPE_KEYS.update(
 # Sprint 2 scores (derived runs). company_scores keeps score-v1's envelope
 # (score_version and weights as "component:weight" strings) and the input batches.
 ENVELOPE_KEYS.update(
-    ticker_sentiment=(
-        "rollup_version",
-        "model_version",
-        "source_weights_version",
-        "method",
+    ticker_sentiment=(  # PR #85's nine keys (decision 108)
+        "weights_version",
         "window_days",
-        "input_batch_ids",
         "universe",
-        "covered",
-        "no_coverage_count",
+        "scored",
+        "no_data_count",
+        "news_used",
+        "social_used",
+        "social_batch_fresh",
+        "publishers_unknown",
     ),
     company_scores=(
         "score_version",
