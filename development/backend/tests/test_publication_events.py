@@ -18,7 +18,7 @@ from src.ingestion.importer import CollectionOutcome, import_collection
 from src.pipeline import publication
 from src.pipeline.lifecycle import begin_run
 from src.pipeline.publication import PublicationError, current, publish, replay
-from test_pipeline import caps, inputs
+from test_pipeline import caps, fixture_records, inputs
 from test_publication_quality import events
 
 UPSTREAM = ("congress_trades", "ark_holdings")
@@ -197,7 +197,7 @@ def test_override_never_skips_the_observation_date_regression_guard(engine, fixt
         engine, "insider_trades", _records(fixture_path, "trades_insider.json", "transactions"), deps
     )
     short_run, _ = _import(
-        engine, "short_interest", _records(fixture_path, "short_interest.json", "records"), deps
+        engine, "short_interest", fixture_records(fixture_path, "short_interest.json", "records"), deps
     )
     candidate = {
         "congress_trades": runs["congress_trades"],
