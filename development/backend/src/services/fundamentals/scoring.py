@@ -306,8 +306,10 @@ def key_reasons(record: Mapping[str, Any]) -> list[str]:
                 f"Spends more than it earns: {loss} of {abs(m) * 100:.0f} cents per sales dollar."
             )
     if (t := value("operating_margin_trend")) is not None:
+        change = f"{abs(t) * 100:.0f}"
         reasons.append(
-            f"Profitability {'improved' if t >= 0 else 'worsened'} {abs(t) * 100:.0f} points from last year."
+            f"Profitability {'improved' if t >= 0 else 'worsened'} {change}"
+            f" point{'' if change == '1' else 's'} from last year."
         )
     if (r := value("return_on_equity")) is not None:
         reasons.append(f"Earns {r * 100:.0f}% a year on shareholders' money.")
