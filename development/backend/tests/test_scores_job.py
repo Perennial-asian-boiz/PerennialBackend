@@ -26,10 +26,14 @@ Pinned interface, src/services/scores/job.py:
   window_days, passed to explain() as window_days.
 * run_once(settings) for `--job scores`: derive_scores, then derive_explanations.
 
-recommended = status ok, score >= 60, and the security is listed in the current
-production publication (popular_stable or affordable_growing here; whether
-"unresolved" counts is open, §8). Every row names the publication it was judged
-against.
+recommended = status ok, score >= 60, and the security is on the current
+production publication's consensus list in any bucket: popular_stable,
+affordable_growing or unresolved (plan §8, decided 2026-10-31). Every row names
+the publication it was judged against.
+
+Explanations follow explain()'s claim rule, decision 103 (c) (#93): only
+supporting signals are claims, a fundamentals measure worth at least 50 points
+and a sentiment that leans positive, which keeps the last place.
 """
 
 from datetime import date, datetime, timezone
@@ -549,6 +553,27 @@ def test_a_new_publication_rejudges_recommended(engine, world):
     assert {r["watchlist_publication_id"] for r in stored.values()} == {newer}
 
 
+@pytest.mark.parametrize("bucket", ["popular", "affordable", "unresolved"])
+def test_every_bucket_of_the_consensus_list_counts_as_listed(engine, world, bucket):
+    """Plan §8: "on the current consensus list" is every bucket, unresolved
+    included. Listing alone isn't enough: ok and >= 60 still apply."""
+    newer = publish(engine, **{bucket: ("ZZJB", "ZZJC", "ZZJE")})
+    current = scores_ok(engine)
+    stored = rows(engine, "company_scores", current.batch_id)
+    assert {t: (r["score"], r["recommended"]) for t, r in stored.items()} == {
+        "ZZJA": (D("74.3"), False),  # no longer listed
+        "ZZJB": (D("42.6"), False),  # listed, below 60
+        "ZZJC": (None, False),  # listed, unavailable
+        "ZZJD": (None, False),
+        "ZZJE": (D("91.5"), True),  # listed, ok and >= 60
+    }
+    assert {r["watchlist_publication_id"] for r in stored.values()} == {newer}
+    explanations_ok(engine)
+    _, explained = latest_explanations(engine)
+    assert explained["ZZJE"]["status"] == "ok"  # recommended, so explained
+    assert explained["ZZJA"]["status"] == "not_recommended"
+
+
 def test_without_any_sentiment_batch_sentiment_is_missing_for_everyone(engine):
     for t in ("ZZJA", "ZZJD"):
         seed_security(engine, t)
@@ -702,12 +727,18 @@ def test_one_explanation_per_score_row_matching_explain(engine, world):
         t: (r["status"], r["reason"], len(r["claims"])) for t, r in stored.items()
     }
     assert summary == {
-        "ZZJA": ("ok", None, 3),
+        "ZZJA": ("ok", None, 2),
         "ZZJB": ("not_recommended", None, 0),
         "ZZJC": ("unavailable", "score_unavailable", 0),
         "ZZJD": ("unavailable", "score_unavailable", 0),
         "ZZJE": ("not_recommended", None, 0),
     }
+    # Decision 103 (c), #93: 18% growth (45 points) is under 50, so it isn't a
+    # claim; the 42-cent margin is, and the positive sentiment keeps the last place.
+    assert [(c["component"], c["measure"]) for c in stored["ZZJA"]["claims"]] == [
+        ("fundamentals", "operating_margin"),
+        ("sentiment", "value"),
+    ]
     assert stored["ZZJA"]["claims"][-1]["text"] == (
         "News coverage over the last 7 days leaned positive (12 articles)."
     )
@@ -726,7 +757,8 @@ def test_the_explanation_window_is_the_sentiment_envelopes_window_days(engine):
         "ticker_sentiment",
         [
             sentiment_record("ZZJA", "0.3100", 9, social=3),
-            sentiment_record("ZZJS", "-0.2000", 0, social=4),
+            # Positive: under decision 103 (c) only a positive lean is a claim.
+            sentiment_record("ZZJS", "0.2000", 0, social=4),
         ],
         envelope=sentiment_envelope(window_days=3),
     )
@@ -739,7 +771,7 @@ def test_the_explanation_window_is_the_sentiment_envelopes_window_days(engine):
         " (9 articles, 3 posts)."
     )
     assert stored["ZZJS"]["claims"][-1]["text"] == (
-        "Social posts over the last 3 days leaned negative (4 posts)."
+        "Social posts over the last 3 days leaned positive (4 posts)."
     )
     assert stored["ZZJS"]["claims"][-1]["as_of"] == "2026-11-04"
 
