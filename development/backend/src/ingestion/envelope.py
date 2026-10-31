@@ -150,6 +150,8 @@ ENVELOPE_KEYS.update(
         "articles_found",
         "articles_new",
         "match_rule_version",
+        "truncated",  # SYMBOL:YYYY-MM-DD days Finnhub cut off at its per-request cap
+        "truncated_count",
     ),
 )
 # S1-05 source credibility weighting (ticker_sentiment's keys are below).

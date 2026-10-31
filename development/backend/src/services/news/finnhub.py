@@ -16,6 +16,10 @@ from src.ingestion.collectors import _get_json
 
 COMPANY_NEWS_URL = "https://finnhub.io/api/v1/company-news"
 MIN_REQUEST_INTERVAL_SECONDS = 1.1
+# Finnhub answers at most this many articles per request, newest first, and drops
+# the rest without saying so (measured 2026-10-31: NVDA's 7 days came back as 250
+# articles from the last 2 days; any single day was under 200).
+MAX_ARTICLES_PER_REQUEST = 250
 
 
 class FinnhubError(RuntimeError):
