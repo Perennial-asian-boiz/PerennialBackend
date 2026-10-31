@@ -52,8 +52,8 @@ FUNDAMENTALS, SENTIMENT = "fundamental_scores", "ticker_sentiment"
 SCORES, EXPLANATIONS = "company_scores", "score_explanations"
 CHANNEL = "production"
 RECOMMENDED_AT = Decimal("60")
-# Whether "unresolved" candidates count is open (plan §8); they don't in v1.
-MEMBER_BUCKETS = ("popular_stable", "affordable_growing")
+# Listed means on the consensus list in any bucket, unresolved included (plan §8).
+BUCKETS = ("popular_stable", "affordable_growing", "unresolved")
 # Per component: the cited record's as-of and version.
 CITED: dict[str, tuple[Callable[[Mapping[str, Any]], date], str]] = {
     "fundamentals": (lambda r: r["fiscal_year_end"], "score_version"),
@@ -114,7 +114,7 @@ def _production_publication(conn: Connection) -> tuple[int, set[str]] | None:
     output = pub.output if isinstance(pub.output, dict) else {}
     listed = {
         item["ticker"]
-        for bucket in MEMBER_BUCKETS
+        for bucket in BUCKETS
         for item in output.get(bucket) or []
         if isinstance(item, dict) and isinstance(item.get("ticker"), str)
     }
@@ -126,7 +126,7 @@ def score_record(
     fundamentals: Mapping[str, Any],
     sentiment: Mapping[str, Any] | None,
     publication_id: int | None,
-    member: bool,
+    listed: bool,
     weights: scoring.ScoreWeights = scoring.ScoreWeights(),
 ) -> dict[str, Any]:
     """One company_scores record from a stored fundamentals row and sentiment row."""
@@ -140,7 +140,7 @@ def score_record(
         result.status == "ok"
         and result.score is not None
         and result.score >= RECOMMENDED_AT
-        and member
+        and listed
         and publication_id is not None
     )
     record: dict[str, Any] = {
