@@ -97,7 +97,7 @@ def run_once(job: str = "pipeline", settings: Settings | None = None) -> int:
         from src.services.news.job import run_once as run_news_once
 
         return run_news_once(settings)
-    if job == "scores":  # Sprint 2: score-v1, then explain-v1 (JOB-6)
+    if job == "scores":  # Sprint 2: score-v1, then explain-v2 (JOB-6)
         from src.services.scores.job import run_once as run_scores_once
 
         return run_scores_once(settings)

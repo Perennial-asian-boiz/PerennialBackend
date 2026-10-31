@@ -712,7 +712,7 @@ def test_one_explanation_per_score_row_matching_explain(engine, world):
     assert set(stored) == set(scores)
     for t, row in stored.items():
         assert row["company_score_id"] == scores[t]["id"], t
-        assert row["template_version"] == "explain-v1"
+        assert row["template_version"] == "explain-v2"
         assert len(row["input_digest"]) == 64
         if scores[t]["recommended"]:
             claims = explain_module().claims_for(
@@ -856,6 +856,48 @@ def test_re_explaining_the_same_score_row_returns_the_stored_explanation(
     assert after["ZZJA"]["claims"] == before["ZZJA"]["claims"]
     assert all(c["text"] != "new wording" for c in after["ZZJA"]["claims"])
     assert served_explanation_id(engine, "ZZJA") == served
+
+
+def test_an_explanation_stored_under_explain_v1_is_regenerated(
+    engine, world, monkeypatch
+):
+    """F1 on #93: decision 103 (c) changed which claims are chosen, so the template is
+    explain-v2. A row stored under explain-v1 with an equal digest is regenerated, not
+    carried forward, and the new batch carries nothing forward."""
+    scores_ok(engine)
+    real = explain_module().claims_for
+
+    def old_wording(*args, **kwargs):
+        return [dict(c, text="stored wording") for c in real(*args, **kwargs)]
+
+    with monkeypatch.context() as m:  # what explain-v1 stored
+        m.setattr(explain_module(), "TEMPLATE_VERSION", "explain-v1")
+        m.setattr(explain_module(), "claims_for", old_wording)
+        explanations_ok(engine)
+    batch, old = latest_explanations(engine)
+    assert {r["template_version"] for r in old.values()} == {"explain-v1"}
+    served = served_explanation_id(engine, "ZZJA")
+    explanations_ok(engine)
+    new_batch, stored = latest_explanations(engine)
+    assert new_batch != batch
+    assert {r["template_version"] for r in stored.values()} == {"explain-v2"}
+    assert {t: r["input_digest"] for t, r in stored.items()} == {
+        t: r["input_digest"] for t, r in old.items()
+    }  # equal digests: only the template changed
+    assert stored["ZZJA"]["status"] == "ok"
+    assert all(c["text"] != "stored wording" for c in stored["ZZJA"]["claims"])
+    assert served_explanation_id(engine, "ZZJA") != served
+    with engine.connect() as conn:
+        envelope = conn.execute(
+            text(
+                "SELECT payload -> 'envelope' FROM perennial.source_batches WHERE id = :b"
+            ),
+            {"b": new_batch},
+        ).scalar_one()
+    assert (envelope["template_version"], envelope["carried_forward_count"]) == (
+        "explain-v2",
+        0,
+    )
 
 
 def test_a_new_scores_batch_regenerates_even_with_identical_values(engine, world):

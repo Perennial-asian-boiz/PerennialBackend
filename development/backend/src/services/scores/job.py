@@ -14,7 +14,7 @@ Two derived ingestion runs, each writing an immutable batch
   production watchlist publication, whose id every row stores. Then
   current_scores['production'] points at the batch; the API reads scores only
   through it.
-* score_explanations: explain-v1 over the pointer's scores batch (named in
+* score_explanations: explain-v2 over the pointer's scores batch (named in
   run_dependencies), one row per score row. A stored explanation for the same
   score row with an equal input digest is carried forward (S2-03 AC4); the
   digest covers the rows' ids, so a new scores batch regenerates (decision D1).

@@ -1,4 +1,4 @@
-"""Sprint 2 TEST-3: explain-v1, the "why Perennial recommends this company" claims.
+"""Sprint 2 TEST-3: explain-v2, the "why Perennial recommends this company" claims.
 
 Spec: output/sprint-2/s2-stories-plan.md §3.3 and §5 (JOB-4, TEST-3); S2-03
 AC1-AC5. Pure: rows go in as plain mappings, shaped as migration 0018 stores
@@ -6,7 +6,8 @@ them (test_scores_schema.py) and as fundamental_scores stores a fundamentals sco
 
 Pinned interface, src/services/scores/explain.py:
 
-* TEMPLATE_VERSION = "explain-v1".
+* TEMPLATE_VERSION = "explain-v2" (decision 103 (c) changed which claims are
+  chosen; checker and auditor F1 on #93).
 * explain(score_row, fundamentals_row, sentiment_row, previous=None, *,
   window_days=None) -> Explanation with status, reason, template_version, claims
   (a list of dicts) and input_digest. `previous` is the last stored
@@ -216,7 +217,7 @@ def sentiment_claim(
 
 
 def test_template_version():
-    assert explain_module().TEMPLATE_VERSION == "explain-v1"
+    assert explain_module().TEMPLATE_VERSION == "explain-v2"
 
 
 NEGATIVE = sentiment_row(value=D("-0.2000"))
@@ -229,7 +230,7 @@ def test_without_positive_sentiment_three_supporting_measures_fill_the_claims():
     assert (result.status, result.reason, result.template_version) == (
         "ok",
         None,
-        "explain-v1",
+        "explain-v2",
     )
     assert list(result.claims) == [
         fundamentals_claim(1, "operating_margin", row),
@@ -607,7 +608,7 @@ def test_a_score_that_is_not_recommended_gets_no_claims():
         None,
         [],
     )
-    assert result.template_version == "explain-v1"
+    assert result.template_version == "explain-v2"
 
 
 def test_an_unavailable_score_gets_no_claims():
@@ -741,10 +742,14 @@ def test_a_changed_input_regenerates():
     assert again.input_digest != previous["input_digest"]
 
 
-def test_a_new_template_version_regenerates_even_with_an_equal_digest():
-    previous = stored(explain(), template_version="explain-v0")
+@pytest.mark.parametrize("old", ["explain-v1", "explain-v0"])
+def test_a_new_template_version_regenerates_even_with_an_equal_digest(old):
+    """explain-v1 chose claims before decision 103 (c): its rows aren't carried forward."""
+    previous = stored(explain(), template_version=old)
     again = explain(previous=previous)
-    assert again.template_version == "explain-v1"
+    assert again.input_digest == previous["input_digest"]
+    assert again.template_version == "explain-v2"
+    assert list(again.claims) == list(explain().claims)
     assert all(not c["text"].startswith("stored wording") for c in again.claims)
 
 
