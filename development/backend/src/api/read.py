@@ -21,6 +21,7 @@ Design: docs/work-items/m5-read-api-design-note.md. Schemas: docs/technical-spec
 """
 
 import json
+import logging
 import os
 import re
 from collections.abc import AsyncIterator, Iterator, Mapping
@@ -30,7 +31,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.engine import Connection, Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -46,12 +47,15 @@ from src.api.rate_limit import (
 )
 from src.db import models as m
 from src.ingestion.schemas import _TICKER
+from src.services.scores import scoring
 
 API_VERSION = "v1"
 CHANNEL = "production"
 QUALITY_KINDS = ("quality_passed", "quality_override")
 BUCKETS = ("popular_stable", "affordable_growing", "unresolved")
 UNAVAILABLE_WARNING = "market_cap_unavailable"
+
+logger = logging.getLogger(__name__)
 
 
 # ── responses ────────────────────────────────────────────
@@ -161,6 +165,114 @@ class SecurityResponse(BaseModel):
     api_version: str = Field(examples=[API_VERSION])
     security: Security
     current: SecurityCurrent
+
+
+# Sprint 2 (S2-01..03): GET /v1/securities/{symbol}/score.
+REDISTRIBUTED = "weight redistributed to the remaining components"
+COMPONENT_TABLES = {
+    "fundamentals": "fundamental_scores",
+    "sentiment": "ticker_sentiment",
+}
+# Exactly provision_roles.API_COLUMNS["company_scores"] (src can't import ops), so
+# a column a later migration adds without an API grant is never read.
+SCORE_COLUMNS = (
+    "id",
+    "batch_id",
+    "security_id",
+    "status",
+    "unavailable_reason",
+    "score",
+    "score_version",
+    "missing",
+    "recommended",
+    *(
+        f"{c}_{p}"
+        for c in ("fundamentals", "sentiment", "event_exposure")
+        for p in (
+            "value",
+            "nominal_weight",
+            "weight",
+            "contribution",
+            "input_as_of",
+            "input_version",
+            "record_id",
+        )
+    ),
+)
+
+
+class ComponentRecord(BaseModel):
+    table: str
+    id: int
+
+
+class ScoreComponent(BaseModel):
+    name: str = Field(description="fundamentals, sentiment or event_exposure")
+    status: str = Field(description="ok or unavailable")
+    value: float | None = Field(description="0-100, or null when unavailable")
+    nominal_weight: float
+    weight: float = Field(description="Effective weight after redistribution")
+    contribution: float = Field(description="value x weight, to 0.01")
+    input_as_of: str | None
+    input_version: str | None
+    record: ComponentRecord | None = Field(description="The stored input it used")
+    note: str | None = Field(
+        default=None, description=f"Only on an unavailable component: {REDISTRIBUTED}"
+    )
+
+
+class Score(BaseModel):
+    status: str = Field(description="ok or unavailable")
+    reason: str | None = Field(
+        default=None,
+        description="Only when unavailable: no_fundamentals, only_fundamentals,"
+        " or not_scored (no row in the current scores batch)",
+    )
+    value: float | None = Field(description="0-100, to 0.1; null when unavailable")
+    score_version: str | None = Field(examples=["score-v1"])
+    as_of: str | None = Field(description="When the scores batch was promoted, UTC")
+    recommended: bool
+    components: list[ScoreComponent] = Field(
+        description="Empty when the score is unavailable; contributions add up to value"
+    )
+    missing: list[str]
+
+
+class ClaimRecord(BaseModel):
+    table: str
+    id: int
+    batch_id: int
+
+
+class Claim(BaseModel):
+    """One sentence and the stored record it came from. Unknown keys are dropped."""
+
+    order: int
+    text: str
+    component: str
+    measure: str
+    record: ClaimRecord
+    as_of: str
+    value: str
+
+
+class Explanation(BaseModel):
+    status: str = Field(description="ok, not_recommended or unavailable")
+    reason: str | None = Field(
+        default=None,
+        description="Only when unavailable: score_unavailable,"
+        " insufficient_supporting_data, not_scored or not_explained_yet",
+    )
+    template_version: str | None = Field(default=None, examples=["explain-v1"])
+    as_of: str | None = Field(default=None, description="As the score's as_of")
+    claims: list[Claim] = Field(description="Up to three, in order")
+
+
+class ScoreResponse(BaseModel):
+    api_version: str = Field(examples=[API_VERSION])
+    symbol: str = Field(description="The canonical ticker")
+    score: Score
+    explanation: Explanation
 
 
 class MarketStatusResponse(BaseModel):
@@ -399,6 +511,150 @@ def _security(conn: Connection, symbol: str) -> Any:
     ).one_or_none()
 
 
+def _number(value: Any) -> float | None:
+    return float(value) if value is not None else None
+
+
+NOT_SCORED: dict[str, Any] = {
+    "status": "unavailable",
+    "reason": "not_scored",
+    "value": None,
+    "score_version": None,
+    "as_of": None,
+    "recommended": False,
+    "components": [],
+    "missing": [],
+}
+
+
+def _components(row: Any, security_id: int) -> list[dict[str, Any]]:
+    """The breakdown, recomputed by score-v1.
+
+    A stored row that score-v1 refuses fails closed: nothing from it is served,
+    the client gets the JSON error shape, and the log names the security and
+    the field (never a value), so a corrupt row is visible.
+    """
+    stored = row._mapping
+    try:
+        components = scoring.breakdown(stored)
+    except ValueError as refused:
+        # breakdown's messages name a field, never a stored value.
+        logger.error(
+            "score row refused by score-v1: security_id=%s company_score_id=%s: %s",
+            security_id,
+            row.id,
+            refused,
+        )
+        raise APIError(500, "internal_error", "request failed") from None
+    served = []
+    for c in components:
+        record_id = stored[f"{c.name}_record_id"]
+        table = COMPONENT_TABLES.get(c.name)
+        input_as_of = stored[f"{c.name}_input_as_of"]
+        component = {
+            "name": c.name,
+            "status": c.status,
+            "value": _number(c.value),
+            "nominal_weight": float(c.nominal_weight),
+            "weight": float(c.weight or 0),
+            "contribution": float(c.contribution or 0),
+            "input_as_of": input_as_of.isoformat() if input_as_of else None,
+            "input_version": stored[f"{c.name}_input_version"],
+            "record": {"table": table, "id": int(record_id)}
+            if record_id is not None and table is not None
+            else None,
+        }
+        if c.status != "ok":
+            component["note"] = REDISTRIBUTED
+        served.append(component)
+    return served
+
+
+def _claims(explained: Any, security_id: int) -> list[dict[str, Any]]:
+    """Stored claims through the typed Claim model: only its keys are served, and a
+    claim that isn't Claim-shaped fails closed like a refused score row."""
+    try:
+        return [Claim.model_validate(c).model_dump() for c in explained.claims or []]
+    except ValidationError:
+        # Ids only: never the claim's text or stored values.
+        logger.error(
+            "stored claims refused: security_id=%s score_explanation_id=%s",
+            security_id,
+            explained.id,
+        )
+        raise APIError(500, "internal_error", "request failed") from None
+
+
+def _score(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
+    """(score and explanation, ETag) through current_scores, explicit columns only.
+
+    The ETag names the pointer (batch and promoted_at), the score row and its
+    explanation row, so it changes when the pointer moves and when the
+    explanation is written after the score.
+    """
+    pointer = conn.execute(
+        select(m.current_scores.c.batch_id, m.current_scores.c.promoted_at).where(
+            m.current_scores.c.channel == CHANNEL
+        )
+    ).one_or_none()
+    row = None
+    if pointer is not None:
+        cs = m.company_scores
+        row = conn.execute(
+            # The granted columns only: never watchlist_publication_id.
+            select(*(cs.c[name] for name in SCORE_COLUMNS)).where(
+                cs.c.batch_id == pointer.batch_id, cs.c.security_id == security_id
+            )
+        ).one_or_none()
+    if pointer is None or row is None:
+        etag = f'"v1-score-{pointer.batch_id if pointer else 0}"'
+        unscored = {"status": "unavailable", "reason": "not_scored", "claims": []}
+        return {"score": dict(NOT_SCORED), "explanation": unscored}, etag
+
+    se = m.score_explanations
+    explained = conn.execute(
+        # perennial_api may not read input_digest.
+        select(se.c.id, se.c.status, se.c.reason, se.c.template_version, se.c.claims)
+        .where(se.c.company_score_id == row.id, se.c.security_id == security_id)
+        .order_by(se.c.batch_id.desc(), se.c.id.desc())
+        .limit(1)
+    ).one_or_none()
+    as_of = pointer.promoted_at.astimezone(timezone.utc).isoformat()
+    score: dict[str, Any] = {
+        "status": row.status,
+        "value": _number(row.score),
+        "score_version": row.score_version,
+        "as_of": as_of,
+        "recommended": bool(row.recommended),
+        "components": _components(row, security_id),
+        "missing": list(row.missing or []),
+    }
+    if row.status != "ok":
+        score["reason"] = row.unavailable_reason
+    explanation: dict[str, Any]
+    if explained is None:
+        explanation = {
+            "status": "unavailable",
+            "reason": "not_explained_yet",
+            "claims": [],
+        }
+    else:
+        explanation = {
+            "status": explained.status,
+            "template_version": explained.template_version,
+            "as_of": as_of,
+            "claims": _claims(explained, security_id),
+        }
+        if explained.reason is not None:
+            explanation["reason"] = explained.reason
+    stamp = int(pointer.promoted_at.timestamp() * 1_000_000)
+    etag = (
+        f'"v1-score-{pointer.batch_id}-{stamp}-{row.id}'
+        f'-{explained.id if explained is not None else 0}"'
+    )
+    return {"score": score, "explanation": explanation}, etag
+
+
 # ── rate limiting (addendum: RL-*) ───────────────────────
 
 
@@ -521,6 +777,11 @@ ERRORS: dict[int | str, dict[str, Any]] = {
     422: {"model": ErrorBody, "description": "invalid_request"},
 }
 WATCHLIST_404 = {"model": ErrorBody, "description": "No current publication"}
+SCORE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    304: {"description": "Not modified (If-None-Match matched)"},
+    404: {"model": ErrorBody, "description": "unknown_security"},
+    422: {"model": ErrorBody, "description": "invalid_request"},
+}
 
 # The limit runs before every other dependency, validation and database use.
 router = APIRouter(
@@ -586,6 +847,32 @@ def get_security(symbol: str, request: Request) -> Response:
     }
     body = {"api_version": API_VERSION, "security": security, "current": current}
     return CanonicalJSONResponse(body, headers={"Cache-Control": "no-cache"})
+
+
+@router.get(
+    "/securities/{symbol}/score",
+    response_model=ScoreResponse,
+    responses=SCORE_RESPONSES,
+)
+def get_score(symbol: str, request: Request) -> Response:
+    """A security's current Confidence Score, its breakdown and why it is recommended.
+
+    200 with score.status "unavailable" when the current scores batch has no row
+    for it; 404 only for an unknown ticker.
+    """
+    wanted = symbol.strip().upper()
+    if not _TICKER.fullmatch(wanted):
+        raise APIError(422, "invalid_request", "symbol is not a valid ticker")
+    with read_transaction(_engine(request)) as conn:
+        found = _security(conn, wanted)
+        if found is None:
+            raise APIError(404, "unknown_security", "no security has that ticker")
+        served, etag = _score(conn, int(found.id))
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    body = {"api_version": API_VERSION, "symbol": found.symbol, **served}
+    return CanonicalJSONResponse(body, headers=headers)
 
 
 @router.get(

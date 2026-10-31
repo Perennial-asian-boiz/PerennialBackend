@@ -135,6 +135,77 @@
         "summary": "Get Security"
       }
     },
+    "/v1/securities/{symbol}/score": {
+      "get": {
+        "description": "A security's current Confidence Score, its breakdown and why it is recommended.\n\n200 with score.status \"unavailable\" when the current scores batch has no row\nfor it; 404 only for an unknown ticker.",
+        "operationId": "get_score_v1_securities__symbol__score_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown_security"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "invalid_request"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Score"
+      }
+    },
     "/v1/watchlist": {
       "get": {
         "description": "The current production publication's watchlist and its envelope.",
@@ -187,6 +258,90 @@
     }
   },
   "schemas": {
+    "Claim": {
+      "description": "One sentence and the stored record it came from. Unknown keys are dropped.",
+      "properties": {
+        "as_of": {
+          "title": "As Of",
+          "type": "string"
+        },
+        "component": {
+          "title": "Component",
+          "type": "string"
+        },
+        "measure": {
+          "title": "Measure",
+          "type": "string"
+        },
+        "order": {
+          "title": "Order",
+          "type": "integer"
+        },
+        "record": {
+          "$ref": "#/components/schemas/ClaimRecord"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "order",
+        "text",
+        "component",
+        "measure",
+        "record",
+        "as_of",
+        "value"
+      ],
+      "title": "Claim",
+      "type": "object"
+    },
+    "ClaimRecord": {
+      "properties": {
+        "batch_id": {
+          "title": "Batch Id",
+          "type": "integer"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        }
+      },
+      "required": [
+        "table",
+        "id",
+        "batch_id"
+      ],
+      "title": "ClaimRecord",
+      "type": "object"
+    },
+    "ComponentRecord": {
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "table": {
+          "title": "Table",
+          "type": "string"
+        }
+      },
+      "required": [
+        "table",
+        "id"
+      ],
+      "title": "ComponentRecord",
+      "type": "object"
+    },
     "ErrorBody": {
       "properties": {
         "code": {
@@ -204,6 +359,67 @@
         "code"
       ],
       "title": "ErrorBody",
+      "type": "object"
+    },
+    "Explanation": {
+      "properties": {
+        "as_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "As the score's as_of",
+          "title": "As Of"
+        },
+        "claims": {
+          "description": "Up to three, in order",
+          "items": {
+            "$ref": "#/components/schemas/Claim"
+          },
+          "title": "Claims",
+          "type": "array"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only when unavailable: score_unavailable, insufficient_supporting_data, not_scored or not_explained_yet",
+          "title": "Reason"
+        },
+        "status": {
+          "description": "ok, not_recommended or unavailable",
+          "title": "Status",
+          "type": "string"
+        },
+        "template_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "examples": [
+            "explain-v1"
+          ],
+          "title": "Template Version"
+        }
+      },
+      "required": [
+        "status",
+        "claims"
+      ],
+      "title": "Explanation",
       "type": "object"
     },
     "MarketStatusResponse": {
@@ -338,6 +554,223 @@
         "source_as_of"
       ],
       "title": "Publication",
+      "type": "object"
+    },
+    "Score": {
+      "properties": {
+        "as_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the scores batch was promoted, UTC",
+          "title": "As Of"
+        },
+        "components": {
+          "description": "Empty when the score is unavailable; contributions add up to value",
+          "items": {
+            "$ref": "#/components/schemas/ScoreComponent"
+          },
+          "title": "Components",
+          "type": "array"
+        },
+        "missing": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Missing",
+          "type": "array"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only when unavailable: no_fundamentals, only_fundamentals, or not_scored (no row in the current scores batch)",
+          "title": "Reason"
+        },
+        "recommended": {
+          "title": "Recommended",
+          "type": "boolean"
+        },
+        "score_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "examples": [
+            "score-v1"
+          ],
+          "title": "Score Version"
+        },
+        "status": {
+          "description": "ok or unavailable",
+          "title": "Status",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "0-100, to 0.1; null when unavailable",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "status",
+        "value",
+        "score_version",
+        "as_of",
+        "recommended",
+        "components",
+        "missing"
+      ],
+      "title": "Score",
+      "type": "object"
+    },
+    "ScoreComponent": {
+      "properties": {
+        "contribution": {
+          "description": "value x weight, to 0.01",
+          "title": "Contribution",
+          "type": "number"
+        },
+        "input_as_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Input As Of"
+        },
+        "input_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Input Version"
+        },
+        "name": {
+          "description": "fundamentals, sentiment or event_exposure",
+          "title": "Name",
+          "type": "string"
+        },
+        "nominal_weight": {
+          "title": "Nominal Weight",
+          "type": "number"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only on an unavailable component: weight redistributed to the remaining components",
+          "title": "Note"
+        },
+        "record": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/ComponentRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The stored input it used"
+        },
+        "status": {
+          "description": "ok or unavailable",
+          "title": "Status",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "0-100, or null when unavailable",
+          "title": "Value"
+        },
+        "weight": {
+          "description": "Effective weight after redistribution",
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "value",
+        "nominal_weight",
+        "weight",
+        "contribution",
+        "input_as_of",
+        "input_version",
+        "record"
+      ],
+      "title": "ScoreComponent",
+      "type": "object"
+    },
+    "ScoreResponse": {
+      "properties": {
+        "api_version": {
+          "examples": [
+            "v1"
+          ],
+          "title": "Api Version",
+          "type": "string"
+        },
+        "explanation": {
+          "$ref": "#/components/schemas/Explanation"
+        },
+        "score": {
+          "$ref": "#/components/schemas/Score"
+        },
+        "symbol": {
+          "description": "The canonical ticker",
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "symbol",
+        "score",
+        "explanation"
+      ],
+      "title": "ScoreResponse",
       "type": "object"
     },
     "Security": {
