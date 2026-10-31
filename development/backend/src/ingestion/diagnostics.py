@@ -65,6 +65,7 @@ ERROR_SUMMARIES = {
     "security_conflict": "a ticker conflicts with an existing or in-batch security mapping",
     "unresolved_security": "a ticker does not resolve to exactly one active security",
     "missing_upstream": "upstream rows or fetcher files are missing or malformed",
+    "invalid_upstream": "an upstream batch's envelope is not usable; nothing was written",
     "plan_too_large": "too many tickers planned; collection refused rather than truncated",
     "fixture_adapter_not_allowed": "a fixture adapter cannot record a non-fixture run",
     "adapter_mode_mismatch": "a live adapter cannot record a non-live run",

@@ -97,6 +97,10 @@ def run_once(job: str = "pipeline", settings: Settings | None = None) -> int:
         from src.services.news.job import run_once as run_news_once
 
         return run_news_once(settings)
+    if job == "scores":  # Sprint 2: score-v1, then explain-v1 (JOB-6)
+        from src.services.scores.job import run_once as run_scores_once
+
+        return run_scores_once(settings)
     raise ValueError("unknown scheduled job")
 
 
@@ -178,7 +182,7 @@ if __name__ == "__main__":
         parser.add_argument("--once", action="store_true", required=True)
         parser.add_argument(
             "--job",
-            choices=("pipeline", "gdelt", "fundamentals", "news"),
+            choices=("pipeline", "gdelt", "fundamentals", "news", "scores"),
             default="pipeline",
         )
         args = parser.parse_args()  # exits 2 on a missing or unknown --job

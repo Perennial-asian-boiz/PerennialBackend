@@ -175,6 +175,29 @@ it is not an offline verification option. Use pytest with synthetic collectors
 for offline checks. `src/services/consensus_watchlist/scheduler/cron.py` remains
 the legacy JSON workflow and is not the database production scheduler.
 
+The Sprint 2 Confidence Score isn't in the daily cron (`main()`). For the demo,
+run the one-shot jobs by hand from `development/backend`, in this order, after
+the daily pipeline has published:
+
+```bash
+python -m src.pipeline.scheduler --once --job fundamentals  # needs SEC_USER_AGENT
+python -m src.pipeline.scheduler --once --job news          # needs FINNHUB_API_KEY
+# ticker_sentiment: whichever producer is live (plan §4)
+python -m src.pipeline.scheduler --once --job scores
+```
+
+`--job scores` derives `company_scores` from the latest successful
+`fundamental_scores` and `ticker_sentiment` batches, points `current_scores` at
+it, then derives `score_explanations` for that batch. It exits 0 only when both
+succeed. Unchanged inputs reuse the stored batches, and the pointer (and the
+API's `as_of`) doesn't move. With no `ticker_sentiment` batch at all, every
+score is unavailable (`only_fundamentals`); so is a security whose sentiment row
+counted nothing (a NULL value). If a cited `ticker_sentiment` batch's envelope
+has no positive whole-number `window_days`, the explanations run fails
+`invalid_upstream` and writes nothing, and `--job scores` exits 1. The scores
+batch it ran on is already current, with no explanations of its own; fix the
+sentiment producer's batch and rerun.
+
 Supervise the process and send logs to the deployment's log sink. Monitor worker
 availability, publication age, source freshness, repeated failed/abandoned runs,
 coverage/lineage failures, database availability/storage, backup snapshot age, and backup completion failures. Configure paging destinations, severity and thresholds in the deployment;
@@ -644,7 +667,7 @@ Archives are encrypted to a recipient **certificate**: the public half, which
 the backup host holds. Only the matching **private key** decrypts them. Losing
 the key makes every archive unreadable; leaking it, together with storage access,
 exposes every archive. Agents never create, hold or see the real key. The
-commands below are for Bryan, on his own machine.
+commands below are for Bryan to run on Bryan's own machine.
 
 **Key and certificate.** Generate an RSA-3072 key that is encrypted at rest from
 the start, plus a self-signed certificate for it:
