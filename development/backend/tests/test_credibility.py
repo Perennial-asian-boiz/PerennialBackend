@@ -32,7 +32,10 @@ TIERS = {
     "social": {"weight": 0.2, "sources": ["reddit", "youtube"]},
 }
 TABLE = parse_weights({"version": "test-v1", "half_life_days": 3,
-                       "relevance": "headline-match-v1", "tiers": TIERS})
+                       "relevance": "headline-match-v1", "prior_weight": 1, "tiers": TIERS})
+# The same rules without the neutral prior, where a test checks the decay alone.
+NO_PRIOR = parse_weights({"version": "test-v1", "half_life_days": 3,
+                          "relevance": "headline-match-v1", "prior_weight": 0, "tiers": TIERS})
 
 
 # ── weight table (AC 1, AC 2) ────────────────────────────
@@ -40,10 +43,11 @@ TABLE = parse_weights({"version": "test-v1", "half_life_days": 3,
 
 def test_the_committed_table_loads_with_a_version_four_tiers_and_its_rules():
     table = load_weights()
-    assert table.version == "weights-v2"
+    assert table.version == "weights-v3"
     assert sorted(set(table.weights.values())) == [0.2, 0.4, 0.7, 1.0]
     assert table.weight_for("reuters.com") == 1.0 and table.weight_for("reddit") == 0.2
-    assert (table.half_life_days, table.relevance) == (3.0, "headline-match-v1")
+    assert (table.half_life_days, table.relevance, table.prior_weight) == (
+        3.0, "headline-match-v1", 1.0)
 
 
 def test_subdomains_take_their_parent_weight_and_unknown_sources_the_lowest():
@@ -54,7 +58,7 @@ def test_subdomains_take_their_parent_weight_and_unknown_sources_the_lowest():
     assert TABLE.weight_for("notreuters.com") == 0.2  # whole labels only
 
 
-RULES = {"half_life_days": 3, "relevance": "headline-match-v1"}
+RULES = {"half_life_days": 3, "relevance": "headline-match-v1", "prior_weight": 1}
 
 
 @pytest.mark.parametrize("data", [
@@ -64,13 +68,19 @@ RULES = {"half_life_days": 3, "relevance": "headline-match-v1"}
     {**RULES, "version": "v", "tiers": {"a": {"weight": 1, "sources": ["x.com"]},
                                         "b": {"weight": 0.5, "sources": ["X.com"]}}},
     {**RULES, "version": "v", "tiers": {"a": {"weight": 1, "sources": []}}},
-    {"version": "v", "relevance": "headline-match-v1", "tiers": TIERS},  # no half-life
+    {"version": "v", "relevance": "headline-match-v1", "prior_weight": 1,
+     "tiers": TIERS},  # no half-life
     {**RULES, "version": "v", "half_life_days": 0, "tiers": TIERS},
     {**RULES, "version": "v", "half_life_days": -1, "tiers": TIERS},
     {**RULES, "version": "v", "half_life_days": float("inf"), "tiers": TIERS},
     {**RULES, "version": "v", "half_life_days": True, "tiers": TIERS},
     {**RULES, "version": "v", "half_life_days": "3", "tiers": TIERS},
-    {"version": "v", "half_life_days": 3, "tiers": TIERS},  # no relevance rule
+    {"version": "v", "half_life_days": 3, "prior_weight": 1, "tiers": TIERS},  # no rule
+    {"version": "v", "half_life_days": 3, "relevance": "headline-match-v1",
+     "tiers": TIERS},  # no prior
+    {**RULES, "version": "v", "prior_weight": -0.5, "tiers": TIERS},
+    {**RULES, "version": "v", "prior_weight": False, "tiers": TIERS},
+    {**RULES, "version": "v", "prior_weight": float("nan"), "tiers": TIERS},
     {**RULES, "version": "v", "relevance": "summary-match-v9", "tiers": TIERS},
 ])
 def test_a_malformed_table_is_refused(data):
@@ -87,7 +97,7 @@ def item(score, weight, social=False, at=T0):
 
 def test_the_value_is_the_weighted_average_and_the_plain_average_is_kept():
     record = weigh("RKLB", [item(0.8, 1.0), item(-0.5, 0.2), item(1.0, 0.2, social=True)], "v",
-                   "finbert")
+                   "finbert", 0)
     assert record["value"] == Decimal("0.6429")  # (0.8 - 0.1 + 0.2) / 1.4
     assert record["plain_average"] == Decimal("0.4333")
     assert (record["article_count"], record["news_count"], record["social_count"]) == (3, 2, 1)
@@ -95,11 +105,18 @@ def test_the_value_is_the_weighted_average_and_the_plain_average_is_kept():
 
 
 def test_the_model_is_named_only_when_news_is_counted():
-    assert weigh("RKLB", [item(1.0, 0.2, social=True)], "v", "finbert")["model_version"] is None
+    assert weigh("RKLB", [item(1.0, 0.2, social=True)], "v", "finbert", 0)["model_version"] is None
+
+
+def test_the_prior_keeps_a_value_built_on_little_data_near_neutral():
+    one = weigh("RKLB", [item(0.8, 1.0)], "v", "finbert", 1)
+    ten = weigh("RKLB", [item(0.8, 1.0)] * 10, "v", "finbert", 1)
+    assert (one["value"], ten["value"]) == (Decimal("0.4000"), Decimal("0.7273"))
+    assert one["plain_average"] == ten["plain_average"] == Decimal("0.8000")
 
 
 def test_a_ticker_with_nothing_scored_has_counts_of_zero_and_no_value():
-    record = weigh("ABSI", [], "v", None)
+    record = weigh("ABSI", [], "v", None, 1)
     assert record["article_count"] == 0 and record["value"] is None and record["first_at"] is None
 
 
@@ -301,17 +318,19 @@ def test_the_job_runs_every_step_and_stores_the_weighted_value_per_ticker(engine
     # reuters 1.0 x 0.8 and an unknown blog 0.2 x -0.5, published a day before the
     # run, keep 0.5^(1/3) = 0.7937 of their weight; reddit 0.2 x 1.0 and youtube
     # 0.2 x -1.0, from a file whose day ended 12 hours before, keep 0.8909.
-    # (0.7 x 0.7937) / (1.2 x 0.7937 + 0.4 x 0.8909) = 0.5556 / 1.3088
-    assert rklb["value"] == Decimal("0.4245")
+    # with the neutral prior of 1:
+    # (0.7 x 0.7937) / (1.2 x 0.7937 + 0.4 x 0.8909 + 1) = 0.5556 / 2.3088
+    assert rklb["value"] == Decimal("0.2406")
     assert rklb["plain_average"] == Decimal("0.0750")
     assert (rklb["article_count"], rklb["news_count"], rklb["social_count"]) == (4, 2, 2)
     # social posts span the 7 days before their file's date; news are dated
     assert rklb["first_at"] == datetime(2026, 10, 19, 23, 59, 59, tzinfo=timezone.utc)
     assert rklb["last_at"] == datetime(2026, 10, 26, 23, 59, 59, tzinfo=timezone.utc)
-    assert rklb["weights_version"] == "weights-v2"
+    assert rklb["weights_version"] == "weights-v3"
     assert rklb["model_version"] == "finbert"
     nvda = rows["NVDA"]
-    assert (nvda["value"], nvda["article_count"]) == (Decimal("-0.2000"), 1)
+    # yahoo 0.7 x 0.7937 = 0.5556 of weight at -0.2, plus the prior: -0.1111 / 1.5556
+    assert (nvda["value"], nvda["article_count"]) == (Decimal("-0.0714"), 1)
     assert nvda["first_at"] == nvda["last_at"] == T0
     absi = rows["ABSI"]
     assert (absi["article_count"], absi["value"], absi["first_at"]) == (0, None, None)
@@ -340,7 +359,7 @@ def test_off_topic_articles_are_left_out_and_older_ones_count_less(engine, seede
     ]}
     run_news(engine, NewsClient(news), T0.date())
     score_articles(engine, scores={21: 1.0, 22: -1.0, 23: 1.0})
-    result = derive_sentiment(engine, now=NOW)
+    result = derive_sentiment(engine, table=NO_PRIOR, now=NOW)
     assert result.succeeded
     nvda = stored(engine)["NVDA"]
     # 21 is a day old and 22 four days old, so 22 keeps half of 21's weight:
@@ -390,7 +409,7 @@ def test_only_the_newest_models_scores_are_used(engine, seeded):
     run_news(engine, NewsClient(NEWS), T0.date())
     score_articles(engine, "finbert")
     score_articles(engine, "finbert-v2", {1: 0.1, 9: 0.1, 2: 0.1})
-    assert derive_sentiment(engine, now=NOW).succeeded
+    assert derive_sentiment(engine, table=NO_PRIOR, now=NOW).succeeded
     nvda = stored(engine)["NVDA"]
     assert (nvda["value"], nvda["model_version"]) == (Decimal("0.1000"), "finbert-v2")
 

@@ -21,7 +21,9 @@ Each weight then fades with the item's age at the time of the run, halving every
 half_life_days. A news article's age runs from its publication; a social post's
 from the end of its file's day, since posts carry no dates.
 
-value is the weighted average, plain_average the unweighted one (AC 1). Every
+value is the weighted average, plain_average the unweighted one (AC 1). The
+weighted average starts with prior_weight of a neutral 0, so a ticker with one
+fresh Reuters article at +0.8 gets +0.4, and with ten of them +0.73. Every
 security gets a row with the counts, the date range and the weights version
 (AC 3); one with nothing to score has a count of 0 and no value. model_version
 names the news model, and is NULL when no news was counted.
@@ -84,7 +86,7 @@ class Item:
 
 
 def weigh(
-    symbol: str, items: list[Item], version: str, model: str | None
+    symbol: str, items: list[Item], version: str, model: str | None, prior: float
 ) -> dict[str, Any]:
     """One ticker_sentiment record: the weighted and plain averages of its items."""
     news_count = sum(not i.social for i in items)
@@ -102,7 +104,7 @@ def weigh(
     }
     if items:
         total = sum(i.weight for i in items)
-        weighted = sum(i.weight * i.score for i in items) / total
+        weighted = sum(i.weight * i.score for i in items) / (total + prior)
         plain = sum(i.score for i in items) / len(items)
         record.update(
             value=Decimal(f"{weighted:.4f}"),
@@ -254,6 +256,7 @@ def derive_sentiment(
                     news.items.get(symbol, []) + posts.get(symbol, []),
                     table.version,
                     news.model,
+                    table.prior_weight,
                 )
                 for symbol in symbols
             ]

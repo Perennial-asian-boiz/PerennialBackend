@@ -6,8 +6,10 @@ finance.yahoo.com takes yahoo.com's weight. A source that matches nothing gets
 the lowest weight listed (S1-05 AC 2).
 
 The file also names the rest of the calculation: half_life_days, how fast an
-item's weight fades with age, and relevance, the rule that decides whether an
-article is about its ticker. Changing anything in the file changes the version,
+item's weight fades with age; relevance, the rule that decides whether an
+article is about its ticker; and prior_weight, the weight of a neutral 0 that
+every ticker's average starts with, so a value built on little data stays near
+neutral. Changing anything in the file changes the version,
 which every ticker_sentiment row stores.
 """
 
@@ -30,6 +32,7 @@ class WeightTable:
     weights: Mapping[str, float]
     half_life_days: float
     relevance: str
+    prior_weight: float
 
     @property
     def lowest(self) -> float:
@@ -61,6 +64,14 @@ def parse_weights(data: Any) -> WeightTable:
         raise ValueError("half_life_days must be a positive number")
     if relevance not in RELEVANCE_RULES:
         raise ValueError(f"relevance must be one of {RELEVANCE_RULES}")
+    prior = data.get("prior_weight")
+    if (
+        not isinstance(prior, (int, float))
+        or isinstance(prior, bool)
+        or not math.isfinite(prior)
+        or prior < 0
+    ):
+        raise ValueError("prior_weight must be a number of at least 0")
     weights: dict[str, float] = {}
     for tier in tiers.values():
         weight, sources = tier.get("weight"), tier.get("sources")
@@ -73,7 +84,7 @@ def parse_weights(data: Any) -> WeightTable:
             if not key or key in weights:
                 raise ValueError("a source is empty or listed twice")
             weights[key] = float(weight)
-    return WeightTable(version, weights, float(half_life), relevance)
+    return WeightTable(version, weights, float(half_life), relevance, float(prior))
 
 
 def load_weights(path: Path = WEIGHTS_FILE) -> WeightTable:
