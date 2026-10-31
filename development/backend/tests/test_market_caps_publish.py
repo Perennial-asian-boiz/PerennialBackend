@@ -450,6 +450,19 @@ def test_rows_observed_outside_three_days_are_not_eligible(engine, fixture_path,
     assert pinned["ZZAA"]["run_id"] is None
 
 
+@pytest.mark.parametrize(("days", "eligible"), [(400, True), (729, True), (731, False)])
+def test_sec_public_float_rows_have_their_own_observed_age_limit(
+    engine, fixture_path, days, eligible
+):
+    """#90: public float is measured yearly, so its rows may be up to 730 days old."""
+    runs = import_all(engine, Feed(fixture_path))
+    cap_run(engine, {s: "20000000000.00" for s in CANDIDATES if s != "ZZAA"})
+    yearly = cap_run(engine, {"ZZAA": "30000000000.00"}, name="sec_public_float",
+                     observed_at=datetime.now(timezone.utc) - timedelta(days=days))
+    pinned = cap_pins(engine, publish_pinned(engine, runs))
+    assert (pinned["ZZAA"]["run_id"] == yearly.run_id) is eligible
+
+
 def test_unavailability_is_keyed_on_a_null_value_only(engine, fixture_path):
     """Checker MC-A: a NULL row's placeholder currency and issuer_level are never read."""
     runs = import_all(engine, Feed(fixture_path))

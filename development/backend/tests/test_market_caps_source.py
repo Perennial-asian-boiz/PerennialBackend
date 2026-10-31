@@ -1017,8 +1017,26 @@ def _fixture_case(settings):
 # Every registered adapter needs a case here: name -> (build(settings) returning
 # (adapter, the same adapter set up to fail, session), symbols with and without a
 # value). A live adapter's session is a fake transport serving synthetic responses.
+def _sec_public_float_case(settings):
+    from src.ingestion.market_caps import ADAPTERS, SecPublicFloatAdapter
+    from test_sec_public_float import FakeSec, concept, fact
+
+    agent = "Perennial tests synthetic@perennial.test"
+    built = ADAPTERS["sec_public_float"](
+        settings.model_copy(update={"sec_user_agent": agent})
+    )
+    built.seeded_ciks = lambda: {}  # the conformance test has no database
+    session = FakeSec(
+        {"ZZAA": 1, "ZZB-B": 2},
+        {1: concept(fact(12e9, "2025-06-30", "2026-02-19")),
+         2: concept(fact(8e8, "2025-03-31", "2025-11-20"))},
+    )
+    return built, SecPublicFloatAdapter("Perennial limited@perennial.test"), session
+
+
 CONFORMANCE_CASES = {
     "fixture": (_fixture_case, ["ZZAA", "ZZB.B", "ZZZZ"]),
+    "sec_public_float": (_sec_public_float_case, ["ZZAA", "ZZB.B", "ZZZZ"]),
 }
 
 

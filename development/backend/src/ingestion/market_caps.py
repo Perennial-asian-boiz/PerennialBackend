@@ -180,12 +180,134 @@ def _fixture_quote(item: Any) -> MarketCapQuote:
     )
 
 
+def sec_symbol(symbol: str) -> str | None:
+    """SEC's ticker-map spelling: BRK.B -> BRK-B, "DKNG UW" -> DKNG; None for a unit."""
+    base = symbol.strip().upper().split(" ")[0]
+    if not base or "/" in base:
+        return None
+    return base.replace(".", "-")
+
+
+class SecPublicFloatAdapter:
+    """Company size from SEC EDGAR: the public float on the 10-K cover.
+
+    Public data, so unlike FMP or Finnhub values it may be displayed (decision
+    on #87/#90). It is not a market cap: it leaves out shares held by insiders
+    and affiliates, and it is measured once a year, at the end of the company's
+    second fiscal quarter. observed_at is that measurement date, so a value
+    is months old by design; publication.MARKET_CAP_OBSERVED_AGE_BY_PROVIDER
+    gives this provider its own limit. Values are company-wide and USD.
+
+    The CIK is the seeded company_profiles.cik when there is one (SEC moved
+    XOM's ticker to a new entity), else SEC's ticker map. No value: no CIK (a
+    fund, a unit, most foreign listings), a 404, no USD public float (20-F
+    filers and companies without a 10-K yet), or a latest value of 0 (listed
+    after the measurement date). Any request failure fails the fetch.
+    """
+
+    name = "sec_public_float"
+    collection_mode: Literal["live", "fixture"] = "live"
+
+    def __init__(
+        self,
+        user_agent: str | None,
+        seeded_ciks: Callable[[], Mapping[str, int]] | None = None,
+    ) -> None:
+        self.user_agent = user_agent
+        self.seeded_ciks = seeded_ciks
+
+    def fetch(
+        self,
+        symbols: Sequence[str],
+        *,
+        session: requests.Session | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> dict[str, MarketCapQuote | None]:
+        from src.services.fundamentals.edgar import (
+            EdgarClient,
+            EdgarError,
+            user_agent_ok,
+        )
+
+        if not user_agent_ok(self.user_agent):
+            raise MarketCapAdapterError("missing_credential")
+        owned = session is None
+        client = EdgarClient(
+            session or requests.Session(), self.user_agent, sleep=sleep
+        )
+        quotes: dict[str, MarketCapQuote | None] = {}
+        try:
+            seeded = dict(self.seeded_ciks()) if self.seeded_ciks else {}
+            ticker_map = client.ticker_map()
+            for symbol in symbols:
+                spelled = sec_symbol(symbol)
+                cik = seeded.get(symbol) or (
+                    ticker_map.get(spelled) if spelled is not None else None
+                )
+                found = None if cik is None else client.public_float(cik)
+                quotes[symbol] = (
+                    None
+                    if found is None
+                    else MarketCapQuote(
+                        value=found.value,
+                        currency=CURRENCY,
+                        issuer_level=True,
+                        observed_at=datetime(
+                            found.as_of.year,
+                            found.as_of.month,
+                            found.as_of.day,
+                            tzinfo=timezone.utc,
+                        ),
+                        sector=None,
+                        industry=None,
+                    )
+                )
+        except EdgarError as exc:
+            raise MarketCapAdapterError(
+                str(exc.args[0]) if exc.args else "failed"
+            ) from None
+        finally:
+            if owned:
+                client.session.close()
+        return quotes
+
+
+def _seeded_ciks(settings: Settings) -> dict[str, int]:
+    """company_profiles.cik by security symbol, as the fundamentals job uses it."""
+    from sqlalchemy import select
+
+    from src.db import models as m
+    from src.db.session import make_engine
+
+    engine = make_engine(settings.database_url.get_secret_value())
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(m.securities.c.symbol, m.company_profiles.c.cik)
+                .join(
+                    m.company_profiles,
+                    m.securities.c.company_profile_id == m.company_profiles.c.id,
+                )
+                .where(m.company_profiles.c.cik.is_not(None))
+            ).tuples()
+            return {s: int(c) for s, c in rows if str(c).isdigit()}
+    finally:
+        engine.dispose()
+
+
 def _fixture_adapter(settings: Settings) -> MarketCapAdapter:
     return FixtureMarketCapAdapter()
 
 
+def _sec_public_float_adapter(settings: Settings) -> MarketCapAdapter:
+    return SecPublicFloatAdapter(
+        settings.sec_user_agent, seeded_ciks=lambda: _seeded_ciks(settings)
+    )
+
+
 ADAPTERS: dict[str, Callable[[Settings], MarketCapAdapter]] = {
     "fixture": _fixture_adapter,
+    "sec_public_float": _sec_public_float_adapter,
 }
 
 
