@@ -1,4 +1,4 @@
-"""explain-v1: why Perennial recommends a company, output/sprint-2/s2-stories-plan.md §3.3.
+"""explain-v2: why Perennial recommends a company, output/sprint-2/s2-stories-plan.md §3.3.
 
 Pure functions over stored rows (company_scores, fundamental_scores,
 ticker_sentiment as plain mappings): no network, no database, no model.
@@ -12,6 +12,9 @@ and positive sentiment always keeps the last of the three places (AC1). A
 component the score lists as missing produces no claim (AC3). Claims are
 generated only for a recommended score; one with no supporting signal is
 unavailable for insufficient supporting data (AC5).
+
+explain-v2 replaces explain-v1 because decision 103 (c) changed which claims are
+made, so explanations stored under v1 are regenerated, never carried forward.
 
 Decision 108: ticker_sentiment is #85's table plus model_version. A sentiment
 claim names what was counted (news articles, social posts or both), its window
@@ -33,7 +36,7 @@ from typing import Any, Mapping, Sequence
 
 from src.services.fundamentals.scoring import MEASURES, breakdown, key_reasons
 
-TEMPLATE_VERSION = "explain-v1"
+TEMPLATE_VERSION = "explain-v2"
 MAX_CLAIMS = 3
 # Decision 103 (c): a measure at the midpoint of its range or above supports a
 # recommendation. Below it are losses, declines and slow growth.
