@@ -133,8 +133,8 @@ class Settings(ProviderSettings):
         default=MARKET_CAP_MAX_REUSE_AGE, gt=timedelta(0)
     )
     trading_holidays: tuple[date, ...] = TRADING_HOLIDAYS
-    # A name in src.ingestion.market_caps.ADAPTERS. None keeps the legacy
-    # market-cap path (M4 MC-A); no production adapter exists yet.
+    # A name in src.ingestion.market_caps.ADAPTERS ("sec_public_float" is the
+    # live one, #90). None keeps the legacy FMP market-cap path (M4 MC-A).
     market_cap_adapter: str | None = None
 
     @field_validator("market_cap_adapter")

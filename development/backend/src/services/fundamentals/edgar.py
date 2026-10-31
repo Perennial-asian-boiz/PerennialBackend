@@ -5,12 +5,14 @@ a contact (Settings.sec_user_agent). Retries, size caps and JSON validation come
 from the shared collectors._get_json.
 
 S1-12 (ED-2, ED-6) adds a company's submissions list and raw archive documents
-(10-K HTML) through the same paced _get.
+(10-K HTML) through the same paced _get. Market caps add the public float on
+the 10-K cover (dei:EntityPublicFloat), one small companyconcept request.
 """
 
 import time
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable, Mapping, TypeGuard
 from urllib.parse import urlsplit
 
@@ -20,6 +22,7 @@ from src.ingestion.collectors import _get_json
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+PUBLIC_FLOAT_URL = "https://data.sec.gov/api/xbrl/companyconcept/CIK{cik:010d}/dei/EntityPublicFloat.json"
 ARCHIVE_HOST = "www.sec.gov"
 ARCHIVE_PATH = "/Archives/edgar/data/"
 # Bounds the HTML parsing work per 10-K (F1). The download itself is still
@@ -117,6 +120,61 @@ def user_agent_ok(agent: str | None) -> TypeGuard[str]:
 
 class EdgarError(RuntimeError):
     """A request failed; carries a short code, never response text."""
+
+
+@dataclass(frozen=True)
+class PublicFloat:
+    """The USD market value of shares held by non-affiliates, from the 10-K cover.
+
+    as_of is the date it was measured: the last business day of the company's
+    second fiscal quarter, so a value is up to about 20 months old before the
+    next 10-K replaces it.
+    """
+
+    value: Decimal
+    as_of: date
+    filed: date
+    form: str
+
+
+def latest_public_float(data: Any) -> PublicFloat | None:
+    """The latest-measured USD public float in a companyconcept response, or None.
+
+    Latest by measurement date, then filing date (an amendment wins). None
+    when there is no USD value, or the latest is zero or less: a company that
+    listed after its measurement date reports 0, and an older value would
+    describe a different company size. A malformed response raises.
+    """
+    units = data.get("units") if isinstance(data, dict) else None
+    if not isinstance(units, dict):
+        raise EdgarError("public_float_malformed")
+    entries = units.get("USD", [])
+    if not isinstance(entries, list):
+        raise EdgarError("public_float_malformed")
+    best: PublicFloat | None = None
+    for entry in entries:
+        try:
+            raw = entry["val"]
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise ValueError
+            candidate = PublicFloat(
+                value=Decimal(str(raw)),
+                as_of=date.fromisoformat(entry["end"]),
+                filed=date.fromisoformat(entry["filed"]),
+                form=str(entry.get("form", "")),
+            )
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            raise EdgarError("public_float_malformed") from None
+        if not candidate.value.is_finite():
+            raise EdgarError("public_float_malformed")
+        if best is None or (candidate.as_of, candidate.filed) > (
+            best.as_of,
+            best.filed,
+        ):
+            best = candidate
+    if best is None or best.value <= 0:
+        return None
+    return best
 
 
 @dataclass(frozen=True)
@@ -257,6 +315,13 @@ class EdgarClient:
         if not isinstance(facts, dict):
             raise EdgarError("facts_malformed")
         return facts
+
+    def public_float(self, cik: int) -> PublicFloat | None:
+        """The company's latest public float, or None when SEC has none (404)."""
+        response = self._get(PUBLIC_FLOAT_URL.format(cik=cik), allowed=(404,))
+        if response.status == 404:
+            return None
+        return latest_public_float(response.data)
 
     def submissions(self, cik: int) -> dict[str, Any] | None:
         """The company's submissions list, or None when SEC has none for this CIK (404)."""

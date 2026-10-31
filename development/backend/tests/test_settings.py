@@ -119,16 +119,29 @@ def test_consensus_import_does_not_load_env_file():
     assert result.returncode == 0, result.stderr
 
 
-def test_consensus_market_cap_receives_provider_key_explicitly():
+def test_consensus_company_size_receives_the_sec_contact_explicitly(monkeypatch, tmp_path):
     from src.services.consensus_watchlist import consensus
+    from src.settings import ProviderSettings
 
-    class Session:
-        def get(self, url, *, params, timeout):
-            assert params == {"symbol": "ZZAA", "apikey": "synthetic"}
-            assert timeout == 10
-            return type("Response", (), {"status_code": 200, "json": lambda self: [{"marketCap": 42}]})()
+    seen = []
 
-    assert consensus.fetch_market_cap("ZZAA", {}, session=Session(), api_key="synthetic") == 42
+    class Lookup:
+        def __init__(self, user_agent, client=None):
+            seen.append(user_agent)
+
+        def __call__(self, ticker):
+            return None
+
+    monkeypatch.setattr(consensus, "PublicFloatLookup", Lookup)
+    monkeypatch.setattr(consensus, "resolve_data_dirs", lambda: [tmp_path])
+    consensus.run(
+        congress_file=tmp_path / "none.json",
+        ark_file=tmp_path / "none.json",
+        insider_file=tmp_path / "none.json",
+        short_interest_file=tmp_path / "none.json",
+        provider_settings=ProviderSettings(sec_user_agent="Perennial synthetic@perennial.test"),
+    )
+    assert seen == ["Perennial synthetic@perennial.test"]
 
 
 def test_source_policy_defaults_follow_d7():
