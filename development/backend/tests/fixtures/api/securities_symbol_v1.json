@@ -1,0 +1,422 @@
+{
+  "path": {
+    "get": {
+      "description": "A security by ticker or alias, with its entry in the current publication.",
+      "operationId": "get_security_v1_securities__symbol__get",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "symbol",
+          "required": true,
+          "schema": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecurityResponse"
+              }
+            }
+          },
+          "description": "Successful Response"
+        },
+        "404": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ErrorBody"
+              }
+            }
+          },
+          "description": "No current publication, or unknown security"
+        },
+        "422": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ErrorBody"
+              }
+            }
+          },
+          "description": "invalid_request"
+        },
+        "429": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ErrorBody"
+              }
+            }
+          },
+          "description": "rate_limited: too many requests from this client",
+          "headers": {
+            "Retry-After": {
+              "description": "Whole seconds until the next request is allowed",
+              "schema": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      },
+      "summary": "Get Security"
+    }
+  },
+  "schemas": {
+    "ErrorBody": {
+      "properties": {
+        "code": {
+          "description": "no_current_publication, unknown_security, invalid_request or rate_limited",
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "detail",
+        "code"
+      ],
+      "title": "ErrorBody",
+      "type": "object"
+    },
+    "Publication": {
+      "properties": {
+        "congress_history_gaps": {
+          "title": "Congress History Gaps",
+          "type": "integer"
+        },
+        "created_at": {
+          "description": "ISO 8601, UTC",
+          "title": "Created At",
+          "type": "string"
+        },
+        "degraded": {
+          "description": "True when the publication has a degraded event: a reused source, Congress history gaps or a market-cap fallback; stale_sources may be empty",
+          "title": "Degraded",
+          "type": "boolean"
+        },
+        "demo": {
+          "description": "True only for a demo publication",
+          "title": "Demo",
+          "type": "boolean"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "market_caps_unavailable": {
+          "description": "Records warning market_cap_unavailable, across all buckets",
+          "title": "Market Caps Unavailable",
+          "type": "integer"
+        },
+        "ranking_version": {
+          "title": "Ranking Version",
+          "type": "string"
+        },
+        "source_as_of": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": "Observation date per watchlist source",
+          "title": "Source As Of",
+          "type": "object"
+        },
+        "stale_sources": {
+          "description": "Reused sources, by source",
+          "items": {
+            "$ref": "#/components/schemas/StaleSource"
+          },
+          "title": "Stale Sources",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "created_at",
+        "ranking_version",
+        "demo",
+        "degraded",
+        "stale_sources",
+        "market_caps_unavailable",
+        "congress_history_gaps",
+        "source_as_of"
+      ],
+      "title": "Publication",
+      "type": "object"
+    },
+    "Security": {
+      "properties": {
+        "country": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Country"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Currency"
+        },
+        "exchange": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Exchange"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "industry": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Industry"
+        },
+        "is_active": {
+          "title": "Is Active",
+          "type": "boolean"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
+        },
+        "sector": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Sector"
+        },
+        "security_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Security Type"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Summary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A brief company summary (S1-12), or null when there is none"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "symbol",
+        "name",
+        "security_type",
+        "exchange",
+        "currency",
+        "country",
+        "is_active",
+        "sector",
+        "industry",
+        "summary"
+      ],
+      "title": "Security",
+      "type": "object"
+    },
+    "SecurityCurrent": {
+      "properties": {
+        "entry": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The security's record in the current publication, or null",
+          "title": "Entry"
+        },
+        "publication": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Publication"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "publication",
+        "entry"
+      ],
+      "title": "SecurityCurrent",
+      "type": "object"
+    },
+    "SecurityResponse": {
+      "properties": {
+        "api_version": {
+          "examples": [
+            "v1"
+          ],
+          "title": "Api Version",
+          "type": "string"
+        },
+        "current": {
+          "$ref": "#/components/schemas/SecurityCurrent"
+        },
+        "security": {
+          "$ref": "#/components/schemas/Security"
+        }
+      },
+      "required": [
+        "api_version",
+        "security",
+        "current"
+      ],
+      "title": "SecurityResponse",
+      "type": "object"
+    },
+    "StaleSource": {
+      "properties": {
+        "age_seconds": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Its age when this publication was made",
+          "title": "Age Seconds"
+        },
+        "collected_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "When the reused batch was collected",
+          "title": "Collected At"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "collected_at",
+        "age_seconds"
+      ],
+      "title": "StaleSource",
+      "type": "object"
+    },
+    "Summary": {
+      "properties": {
+        "as_of": {
+          "description": "When it was stored: ISO 8601, UTC",
+          "title": "As Of",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/components/schemas/SummarySource"
+        },
+        "text": {
+          "description": "2 to 4 sentences, verbatim from the source's description",
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text",
+        "source",
+        "as_of"
+      ],
+      "title": "Summary",
+      "type": "object"
+    },
+    "SummarySource": {
+      "properties": {
+        "name": {
+          "description": "Who published the description",
+          "title": "Name",
+          "type": "string"
+        },
+        "url": {
+          "description": "An https link to that description",
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "title": "SummarySource",
+      "type": "object"
+    }
+  }
+}

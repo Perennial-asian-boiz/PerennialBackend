@@ -47,8 +47,12 @@ class Feed:
     """Fixture-backed collectors; `fail` makes a source's collection fail."""
 
     def __init__(self, fixture_path):
+        from test_pipeline import fixture_records
+
+        # Short interest settles relative to today: publishing refuses a
+        # settlement older than 45 days, so the fixture's own dates would expire.
         self.records = {
-            source: json.loads(fixture_path(name).read_text())[key]
+            source: fixture_records(fixture_path, name, key)
             for source, (name, key, _) in FILES.items()
         }
         self.fail: set[str] = set()
