@@ -181,10 +181,44 @@ the daily pipeline has published:
 
 ```bash
 python -m src.pipeline.scheduler --once --job fundamentals  # needs SEC_USER_AGENT
-python -m src.pipeline.scheduler --once --job news          # needs FINNHUB_API_KEY
-# ticker_sentiment: whichever producer is live (plan §4)
+python -m src.pipeline.scheduler --once --job sentiment     # needs FINNHUB_API_KEY
 python -m src.pipeline.scheduler --once --job scores
 ```
+
+`--job sentiment` scores new articles with FinBERT (`ProsusAI/finbert`, pinned
+to one commit in `article_scorer.py`) before the weighting. The worker needs
+`torch` and `transformers`; without them, the scoring step fails
+`scoring_failed` and writes nothing, and the weighting still runs on the article
+scores already stored.
+
+**Installing the scorer (the worker only).** `requirements-scorer.lock` is the
+`scorer` extra: CPU-only torch from PyTorch's index (the lock names it with
+`--extra-index-url`) plus transformers, and every pin in `requirements.lock`
+unchanged. CI and the API never install it. Install it with hashes, alongside
+the runtime lock or on its own (it includes it):
+
+```bash
+python -m pip install --require-hashes -r requirements.lock -r requirements-scorer.lock
+```
+
+The lock is for Linux x86_64 (and other platforms with a `2.14.1+cpu` wheel:
+Linux aarch64, Windows); on macOS, install torch and transformers from PyPI by
+hand for local work. It downloads about 231 MB (the torch wheel is 196 MB) and
+adds about 1.03 GB to site-packages (torch alone 766 MB). To regenerate it, run
+the header's command on Linux x86_64 with Python 3.12, so the environment
+markers match `requirements.lock`.
+
+**The model.** The first scoring run downloads the pinned revision from the
+Hugging Face hub into `HF_HOME` (default `~/.cache/huggingface`): about 438 MB,
+almost all of it `model.safetensors`. To keep the job off the network, pre-seed
+the cache once and run the job with `HF_HUB_OFFLINE=1`:
+
+```bash
+HF_HOME=/srv/perennial/hf python -c "from huggingface_hub import snapshot_download; snapshot_download('ProsusAI/finbert', revision='0bc2ac10dda6929bcb1f77ccc43c7ec5c424f031', allow_patterns=['config.json', 'model.safetensors', 'vocab.txt', 'tokenizer_config.json', 'special_tokens_map.json'])"
+HF_HOME=/srv/perennial/hf HF_HUB_OFFLINE=1 python -m src.pipeline.scheduler --once --job sentiment
+```
+
+Keep the revision in step with `MODEL_REVISION` in `article_scorer.py`.
 
 `--job scores` derives `company_scores` from the latest successful
 `fundamental_scores` and `ticker_sentiment` batches, points `current_scores` at
