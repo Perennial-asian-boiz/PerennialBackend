@@ -7,6 +7,7 @@ lookups are stored; a failed one is retried while the article is in the window.
 """
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -24,15 +25,32 @@ logger = logging.getLogger(__name__)
 REDIRECTS = {301, 302, 303, 307, 308}
 MAX_LOOKUPS_PER_RUN = 1500  # about 28 minutes; a first backfill finishes next run
 TIMEOUT_SECONDS = 15
+# Only Finnhub's own article links are requested (#85 review F1): a stored URL is
+# whatever Finnhub returned, so anything else could point the lookup anywhere.
+LOOKUP_SCHEME, LOOKUP_NETLOC = "https", "finnhub.io"
+# news_publishers' domain CHECK: a host it would refuse is no host.
+DOMAIN = re.compile(r"[a-z0-9.-]{1,253}")
 
 
 def host_of(location: str | None) -> str | None:
     """The redirect target's host, lowercased and without www.; None if unusable."""
-    parts = urlsplit(location or "")
-    host = (parts.hostname or "").lower().removeprefix("www.")
+    try:
+        parts = urlsplit(location or "")
+        host = (parts.hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return None
     if parts.scheme not in ("http", "https") or not host or host.endswith("finnhub.io"):
         return None
-    return host
+    return host if DOMAIN.fullmatch(host) else None
+
+
+def is_lookup_url(url: str) -> bool:
+    """https://finnhub.io/... exactly: no other host, subdomain, port or userinfo."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme == LOOKUP_SCHEME and parts.netloc == LOOKUP_NETLOC
 
 
 class PublisherResolver:
@@ -49,6 +67,8 @@ class PublisherResolver:
         self._last: float | None = None
 
     def resolve(self, url: str) -> str | None:
+        if not is_lookup_url(url):
+            return None
         if self._last is not None:
             wait = self.interval - (self.monotonic() - self._last)
             if wait > 0:
