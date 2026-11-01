@@ -71,6 +71,7 @@ ERROR_SUMMARIES = {
     "adapter_mode_mismatch": "a live adapter cannot record a non-live run",
     "database_error": "database write failed",
     "internal_error": "unexpected error; nothing was written",
+    "scoring_failed": "the article scorer failed to load or answered badly; nothing was written",
 }
 
 UNIT_KINDS = frozenset(

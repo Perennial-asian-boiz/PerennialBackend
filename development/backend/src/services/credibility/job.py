@@ -300,7 +300,7 @@ def run_sentiment(
     news_client: FinnhubNewsClient,
     resolver: PublisherResolver,
     *,
-    score_articles: Callable[[Engine], ImportResult] | None = None,
+    score_articles: Callable[[Engine], ImportResult | None] | None = None,
     now: datetime | None = None,
 ) -> SentimentRun:
     """A, B, the publisher lookup, the social import and C, timed (AC 4)."""
@@ -342,6 +342,7 @@ def run_once(settings: Any = None) -> int:
     """Scheduler entry point: exit code 0 when the weighting stored its batch."""
     from src.db.session import make_engine
     from src.ingestion.redaction import describe_exception
+    from src.services.credibility.article_scorer import score_articles
     from src.settings import load_settings
 
     engine = None
@@ -357,7 +358,7 @@ def run_once(settings: Any = None) -> int:
                     news_session, settings.finnhub_api_key.get_secret_value()
                 ),
                 PublisherResolver(lookup_session),
-                # S1-04 (B) plugs in here: score_articles=<its run function>.
+                score_articles=score_articles,  # S1-04 (B), JOB-7's FinBERT
             )
         finally:
             news_session.close()

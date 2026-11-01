@@ -181,10 +181,16 @@ the daily pipeline has published:
 
 ```bash
 python -m src.pipeline.scheduler --once --job fundamentals  # needs SEC_USER_AGENT
-python -m src.pipeline.scheduler --once --job news          # needs FINNHUB_API_KEY
-# ticker_sentiment: whichever producer is live (plan §4)
+python -m src.pipeline.scheduler --once --job sentiment     # needs FINNHUB_API_KEY
 python -m src.pipeline.scheduler --once --job scores
 ```
+
+`--job sentiment` scores new articles with FinBERT (`ProsusAI/finbert`, pinned
+to one commit in `article_scorer.py`) before the weighting. The worker needs
+`torch` and `transformers`, which no lock installs yet, and the first run
+downloads the model weights (about 440 MB) from the Hugging Face hub. Without
+them, the scoring step fails `scoring_failed` and writes nothing; the weighting
+still runs, on the article scores already stored.
 
 `--job scores` derives `company_scores` from the latest successful
 `fundamental_scores` and `ticker_sentiment` batches, points `current_scores` at
