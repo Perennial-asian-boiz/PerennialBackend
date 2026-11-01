@@ -43,6 +43,7 @@ IMMUTABLE += ("news_articles", "news_coverage")  # S1-03 news ingestion
 # Sprint 2 scores: batch tables, and the pointer the scores job moves.
 IMMUTABLE += ("ticker_sentiment", "company_scores", "score_explanations")
 MUTABLE += ("current_scores",)
+IMMUTABLE += ("social_posts", "article_sentiment", "news_publishers")  # S1-05
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # M5 read API (perennial_api): published data only, never raw source tables,
 # runs or operator text. Two grants are column-level, so code selects columns.

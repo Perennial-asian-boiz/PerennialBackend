@@ -196,6 +196,8 @@ SOURCE_LOCK_KEYS = {
     "ticker_sentiment": 170021,
     "company_scores": 170022,
     "score_explanations": 170023,
+    "social_posts": 170024,
+    "article_sentiment": 170025,
     "pipeline": 170098,
 }
 

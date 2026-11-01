@@ -65,6 +65,12 @@ SCORE_SOURCES: tuple[str, ...] = (
     "company_scores",
     "score_explanations",
 )
+# S1-05 sentiment (src/services/credibility): social post scores and article
+# scores (written by S1-04). The weighted result is ticker_sentiment above.
+SENTIMENT_SOURCES: tuple[str, ...] = (
+    "social_posts",
+    "article_sentiment",
+)
 # The closed source vocabulary (CHECKs, CLI, locks). Append only; lifecycle lock
 # keys are explicit per source (SOURCE_LOCK_KEYS).
 SOURCES = (
@@ -74,6 +80,7 @@ SOURCES = (
     + FUNDAMENTALS_SOURCES
     + NEWS_SOURCES
     + SCORE_SOURCES
+    + SENTIMENT_SOURCES
 )
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live", "derived")
@@ -1060,6 +1067,68 @@ SCORE_UNAVAILABLE_REASONS = ("no_fundamentals", "only_fundamentals")
 EXPLANATION_STATUSES = ("ok", "not_recommended", "unavailable")
 EXPLANATION_REASONS = ("insufficient_supporting_data", "score_unavailable")
 EXPLANATION_MAX_CLAIMS = 3
+
+# S1-05 source credibility weighting (docs/work-items/source-credibility-design-note.md).
+SOCIAL_PLATFORMS = ("reddit", "bluesky", "mastodon", "youtube")
+
+# One row per (platform post, security) from the social pipeline's JSON files.
+# Scores are the pipeline's own 1-10 scale (FinTwitBERT).
+social_posts = Table(
+    "social_posts",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("platform", String(16), nullable=False),
+    Column("post_id", String(500), nullable=False),
+    Column("score", Numeric(4, 2), nullable=False),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "security_id", "platform", "post_id"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(_in("platform", SOCIAL_PLATFORMS), name="platform"),
+    CheckConstraint("score >= 1 AND score <= 10", name="score"),
+)
+Index("ix_social_posts_security_id", social_posts.c.security_id)
+
+# S1-04's output, the agreed handoff: one score in [-1, 1] per news article and
+# model. A batch holds only newly scored articles; readers take each article's
+# score from its latest batch.
+article_sentiment = Table(
+    "article_sentiment",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column(
+        "news_article_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.news_articles.id"),
+        nullable=False,
+    ),
+    Column("score", Numeric(5, 4), nullable=False),
+    Column("model", String(64), nullable=False),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("news_article_id", "model"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint("score >= -1 AND score <= 1", name="score"),
+)
+Index("ix_article_sentiment_security_id", article_sentiment.c.security_id)
+
+# The publisher behind each Finnhub link (its redirect target's host). Written
+# only on a successful lookup, so a failed one is retried by the next run.
+news_publishers = Table(
+    "news_publishers",
+    metadata,
+    Column("finnhub_id", BigInteger, primary_key=True),
+    Column("domain", String(253), nullable=False),
+    Column("resolved_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("finnhub_id > 0", name="finnhub_id"),
+    CheckConstraint("domain ~ '^[a-z0-9.-]+$'", name="domain"),
+)
+
+SOURCE_TABLES.update(social_posts=social_posts, article_sentiment=article_sentiment)
 
 # The credibility-weighted sentiment per security over the window (derived): PR #85's
 # table plus model_version (decision 108). One row per (batch, security).

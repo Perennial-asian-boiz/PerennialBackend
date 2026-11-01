@@ -12,6 +12,11 @@ Each ticker also gets a news_coverage row for the run: 'covered' with counts,
 'no_coverage' when nothing matched, or 'error' with a fixed code when Finnhub
 failed for it, for example rate limiting (http_429). A failing ticker never
 stops the run (AC 5); the batch is then marked incomplete.
+
+Finnhub answers at most MAX_ARTICLES_PER_REQUEST articles per request. When a
+ticker's window comes back full, its days are fetched one at a time. A day that
+still comes back full is cut off; the run lists it as SYMBOL:YYYY-MM-DD under
+"truncated" and logs a warning.
 """
 
 import hashlib
@@ -29,7 +34,12 @@ from src.ingestion.diagnostics import exception_diagnostics, failure_code
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
 from src.services.fundamentals.job import current_universe
-from src.services.news.finnhub import FinnhubError, FinnhubNewsClient, RawArticle
+from src.services.news.finnhub import (
+    MAX_ARTICLES_PER_REQUEST,
+    FinnhubError,
+    FinnhubNewsClient,
+    RawArticle,
+)
 from src.services.news.matching import MATCH_RULE_VERSION, match_rule, name_variants
 from src.utils.logger import log_exception
 
@@ -102,6 +112,26 @@ def _record(symbol: str, article: RawArticle, rule: str) -> dict[str, Any]:
     }
 
 
+def fetch_window(
+    client: FinnhubNewsClient, symbol: str, start: date, end: date
+) -> tuple[list[RawArticle], list[str]]:
+    """The window's articles for symbol, and the days Finnhub cut off."""
+    articles, skipped = client.company_news(symbol, start, end)
+    if len(articles) + skipped < MAX_ARTICLES_PER_REQUEST:
+        return articles, []
+    found: list[RawArticle] = []
+    truncated: list[str] = []
+    day = start
+    while day <= end:
+        articles, skipped = client.company_news(symbol, day, day)
+        found += articles
+        if len(articles) + skipped >= MAX_ARTICLES_PER_REQUEST:
+            truncated.append(f"{symbol}:{day.isoformat()}")
+            logger.warning("news_truncated symbol=%s day=%s", symbol, day)
+        day += timedelta(days=1)
+    return found, truncated
+
+
 def collect_news(
     client: FinnhubNewsClient,
     symbols: list[str],
@@ -112,15 +142,17 @@ def collect_news(
     start = today - timedelta(days=WINDOW_DAYS)
     records: list[dict[str, Any]] = []
     coverage: list[Coverage] = []
+    truncated: list[str] = []
     for symbol in symbols:
         try:
-            articles, _skipped = client.company_news(symbol, start, today)
+            articles, cut = fetch_window(client, symbol, start, today)
         except FinnhubError as exc:
             coverage.append(
                 Coverage(symbol, "error", error_code=failure_code(str(exc)))
             )
             log_exception(logger, "news_ticker_failed", exc)  # class name only
             continue
+        truncated += cut
         variants = name_variants(names.get(symbol, []))
         seen: set[int] = set()
         found = new = 0
@@ -179,6 +211,8 @@ def collect_news(
             "articles_found": sum(c.articles_found for c in coverage),
             "articles_new": len(records),
             "match_rule_version": MATCH_RULE_VERSION,
+            "truncated": truncated,
+            "truncated_count": len(truncated),
         },
     )
     return Collected(outcome, coverage)

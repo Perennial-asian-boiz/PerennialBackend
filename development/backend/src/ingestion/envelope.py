@@ -150,7 +150,23 @@ ENVELOPE_KEYS.update(
         "articles_found",
         "articles_new",
         "match_rule_version",
+        "truncated",  # SYMBOL:YYYY-MM-DD days Finnhub cut off at its per-request cap
+        "truncated_count",
     ),
+)
+# S1-05 source credibility weighting (ticker_sentiment's keys are below).
+ENVELOPE_KEYS.update(
+    social_posts=(
+        "source",
+        "window_days",
+        "fresh",
+        "stale",
+        "missing",
+        "posts",
+        "skipped_tickers",
+        "skipped_tickers_count",
+    ),
+    article_sentiment=("model", "input_batch_id", "articles_scored"),
 )
 
 # Sprint 2 scores (derived runs). company_scores keeps score-v1's envelope
@@ -166,6 +182,8 @@ ENVELOPE_KEYS.update(
         "social_used",
         "social_batch_fresh",
         "publishers_unknown",
+        "news_off_topic",  # S1-05 weights-v2
+        "half_life_days",
     ),
     company_scores=(
         "score_version",
