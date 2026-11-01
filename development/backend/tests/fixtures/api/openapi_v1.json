@@ -410,7 +410,7 @@
             }
           ],
           "examples": [
-            "explain-v1"
+            "explain-v2"
           ],
           "title": "Template Version"
         }

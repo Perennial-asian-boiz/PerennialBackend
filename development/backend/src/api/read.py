@@ -267,7 +267,7 @@ class Explanation(BaseModel):
         description="Only when unavailable: score_unavailable,"
         " insufficient_supporting_data, not_scored or not_explained_yet",
     )
-    template_version: str | None = Field(default=None, examples=["explain-v1"])
+    template_version: str | None = Field(default=None, examples=["explain-v2"])
     as_of: str | None = Field(default=None, description="As the score's as_of")
     claims: list[Claim] = Field(description="Up to three, in order")
 
