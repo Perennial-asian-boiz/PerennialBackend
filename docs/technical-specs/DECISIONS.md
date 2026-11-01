@@ -186,8 +186,9 @@ Code: `src/services/scores/scoring.py` (the blend) and
 - **Rounding:** half-even at each step: the effective weight
   (nominal / sum of present nominals) to 0.0001, each contribution
   (value × effective weight) to 0.01, and the score, the sum of the rounded
-  contributions, to 0.1. So the contributions shown always add up to the score
-  (S2-02 AC2).
+  contributions, to 0.1. So the contributions shown add up to the score
+  within its 0.1 rounding: 55.06 + 19.26 = 74.32, shown as 74.3 (S2-02 AC2
+  allows ±0.5).
 - **The ±15 sentiment cap (rule 2) holds by construction.** Fundamentals are
   mandatory, so sentiment's largest effective weight is 0.25 / 0.85 = 0.2941,
   a swing of at most 14.7 points from neutral. There is no cap code. Revisit
