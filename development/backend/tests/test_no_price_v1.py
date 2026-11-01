@@ -68,6 +68,19 @@ def without_share_price(output):
     return copy
 
 
+def without_market_cap(output):
+    """A publication output (or one record) with every record's market_cap removed:
+    /v1 doesn't serve it either (decision 112 A1, test_no_market_cap_v1.py)."""
+    copy = json.loads(json.dumps(output))
+    if "ticker" in copy:
+        copy.pop("market_cap", None)
+    for bucket in ("popular_stable", "affordable_growing", "unresolved"):
+        for rec in copy.get(bucket) or ():
+            if isinstance(rec, dict):
+                rec.pop("market_cap", None)
+    return copy
+
+
 # ── (i) the ranking ──────────────────────────────────────────
 
 
@@ -358,4 +371,6 @@ def test_after_a_rollback_to_an_old_publication_v1_serves_no_share_price(
         body = client.get("/v1/watchlist").json()
     assert body["publication"]["id"] == old
     assert "share_price" not in set(keys(body))
-    assert body["watchlist"] == without_share_price(stored_output(engine, old))
+    assert body["watchlist"] == without_market_cap(
+        without_share_price(stored_output(engine, old))
+    )

@@ -26,7 +26,12 @@ The current production publication.
 - **Conditional request:** `If-None-Match` with the current tag returns `304` with no body.
 - **`404 no_current_publication`:** when nothing is current.
 
-`watchlist` is `publications.output`, verbatim: `{schema_version, ranking_version, generated_at, popular_stable, affordable_growing, unresolved, errors}`. Each record has `ticker`, `bucket`, `rank`, `market_cap`, `signals`, `source_dates` and `warnings`. The API never recomputes or reshapes it; it equals `replay()` of the publication, with one exception: ARK's share price is never served (decision 95, L5 a). Ranking `watchlist-v5` doesn't publish it, and for an older publication that stores it, the API drops `signals.ark.share_price` from every record, in `/v1/watchlist` and in `/v1/securities/{symbol}`'s `entry`. The stored publication is unchanged.
+`watchlist` is `publications.output`, verbatim: `{schema_version, ranking_version, generated_at, popular_stable, affordable_growing, unresolved, errors}`. Each served record has `ticker`, `bucket`, `rank`, `signals`, `source_dates` and `warnings`. The API never recomputes or reshapes it; it equals `replay()` of the publication, with two exceptions, both because no source has a licence to display the value (decision 95):
+
+- **The market cap is never served** (decision 112 A1). Every stored record has a `market_cap`, and the API drops it from every record in every bucket, whatever its value, in `/v1/watchlist` and in `/v1/securities/{symbol}`'s `entry`. The bucket a record is in, its `market_cap_unavailable` warning and the envelope's `market_caps_unavailable` count are still served as stored.
+- **ARK's share price is never served** (L5 a). Ranking `watchlist-v5` doesn't publish it, and for an older publication that stores it, the API drops `signals.ark.share_price` from every record, on the same two routes.
+
+The stored publication is unchanged, and the `ETag` still names the publication.
 
 ### The `publication` object
 
@@ -112,20 +117,20 @@ Full score (score-v1 always lists `event_exposure` as missing):
       "contribution": 55.06, "input_as_of": "2025-06-30", "input_version": "fundamentals-v1",
       "record": {"table": "fundamental_scores", "id": 812}},
      {"name": "sentiment", "status": "ok", "value": 65.5, "nominal_weight": 0.25, "weight": 0.2941,
-      "contribution": 19.26, "input_as_of": "2026-11-04", "input_version": "weights-v1",
+      "contribution": 19.26, "input_as_of": "2026-11-04", "input_version": "weights-v3",
       "record": {"table": "ticker_sentiment", "id": 77}},
      {"name": "event_exposure", "status": "unavailable", "value": null, "nominal_weight": 0.15,
       "weight": 0.0, "contribution": 0.0, "input_as_of": null, "input_version": null, "record": null,
       "note": "weight redistributed to the remaining components"}],
    "missing": ["event_exposure"]},
- "explanation": {"status": "ok", "template_version": "explain-v1", "as_of": "2026-11-05T17:02:11+00:00",
+ "explanation": {"status": "ok", "template_version": "explain-v2", "as_of": "2026-11-05T17:02:11+00:00",
    "claims": [
      {"order": 1, "text": "Keeps 42 cents of every sales dollar as operating profit.", "component": "fundamentals",
       "measure": "operating_margin", "record": {"table": "fundamental_scores", "id": 812, "batch_id": 5},
       "as_of": "2025-06-30", "value": "0.420000"},
-     {"order": 2, "text": "Revenue grew 18% a year over the last 3 years.", "component": "fundamentals",
-      "measure": "revenue_growth_3y", "record": {"table": "fundamental_scores", "id": 812, "batch_id": 5},
-      "as_of": "2025-06-30", "value": "0.180000"},
+     {"order": 2, "text": "Profitability improved 3 points from last year.", "component": "fundamentals",
+      "measure": "operating_margin_trend", "record": {"table": "fundamental_scores", "id": 812, "batch_id": 5},
+      "as_of": "2025-06-30", "value": "0.030000"},
      {"order": 3, "text": "News coverage over the last 7 days leaned positive (12 articles).", "component": "sentiment",
       "measure": "value", "record": {"table": "ticker_sentiment", "id": 77, "batch_id": 9},
       "as_of": "2026-11-04", "value": "0.3100"}]}}
@@ -138,7 +143,7 @@ Score unavailable:
  "score": {"status": "unavailable", "reason": "only_fundamentals", "value": null, "score_version": "score-v1",
    "as_of": "2026-11-05T17:02:11+00:00", "recommended": false, "components": [],
    "missing": ["sentiment", "event_exposure"]},
- "explanation": {"status": "unavailable", "reason": "score_unavailable", "template_version": "explain-v1",
+ "explanation": {"status": "unavailable", "reason": "score_unavailable", "template_version": "explain-v2",
    "as_of": "2026-11-05T17:02:11+00:00", "claims": []}}
 ```
 
@@ -163,11 +168,11 @@ Each component has `name`, `status` (`ok` or `unavailable`), `value` (0-100 or `
 |---|---|---|
 | `status` | string | `ok`, `not_recommended` (claims are written only for a recommended score) or `unavailable` |
 | `reason` | string | only when unavailable: `score_unavailable`, `insufficient_supporting_data` (recommended, but no component had a claim to cite), `not_scored`, or `not_explained_yet` (the score is promoted but its explanation isn't written yet) |
-| `template_version` | string | e.g. `explain-v1`; absent when no explanation is stored |
+| `template_version` | string | e.g. `explain-v2`; absent when no explanation is stored |
 | `as_of` | string | as the score's `as_of`; absent when no explanation is stored |
 | `claims` | list | up to three, in `order` |
 
-A claim is `{order, text, component, measure, record: {table, id, batch_id}, as_of, value}`: a sentence and the stored record, measure, value and date it came from. Fundamentals measures come first, highest points first, then the news sentiment lean. A missing component never has a claim. Claims are served through a typed model, so a stored key outside that shape is never served, and a stored claim that isn't claim-shaped fails closed with the same `500 internal_error` as a refused score row (the log names only the ids).
+A claim is `{order, text, component, measure, record: {table, id, batch_id}, as_of, value}`: a sentence and the stored record, measure, value and date it came from. Only a supporting signal is a claim (decision 103 (c)): fundamentals measures worth at least 50 points, highest first, then sentiment that leans positive, always last. The sentiment sentence names what was counted: news articles, social posts or both. A missing component never has a claim. Claims are served through a typed model, so a stored key outside that shape is never served, and a stored claim that isn't claim-shaped fails closed with the same `500 internal_error` as a refused score row (the log names only the ids).
 
 ## `GET /v1/market-status`
 

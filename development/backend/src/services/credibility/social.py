@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from sqlalchemy.engine import Engine
+from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.identity import resolve_tickers
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
@@ -125,7 +126,15 @@ def run_social(
     with source_lock(engine, SOURCE):
         run_id = begin_run(engine, SOURCE, "file")
         with heartbeat_worker(engine, run_id):
-            outcome = collect_social(directory, known, now, window_days)
+            try:
+                outcome = collect_social(directory, known, now, window_days)
+            except Exception as exc:  # a bug here: record it, write nothing (F2)
+                outcome = CollectionOutcome.failure(
+                    SOURCE,
+                    "file",
+                    "internal_error",
+                    diagnostics=exception_diagnostics(exc),
+                )
             result = import_collection(engine, outcome, run_id=run_id)
     logger.info(
         "social run_id=%s status=%s code=%s posts=%s",

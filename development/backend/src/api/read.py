@@ -6,10 +6,13 @@ Design: docs/work-items/m5-read-api-design-note.md. Schemas: docs/technical-spec
   group role; ``create_app`` refuses to start as any other kind of login (RA-15).
 - Every request runs in exactly one read-only transaction (``read_transaction``),
   marked read-only per transaction, never with a session ``SET`` (RA-16).
-- ``watchlist`` is ``publications.output`` verbatim, except that ARK's share
-  price is dropped from every record (decision 95, L5 a; ``_without_price``).
-  Ranking v5 no longer publishes it, and older publications are stripped at
-  serve time without changing the stored row. The envelope copies named
+- ``watchlist`` is ``publications.output`` verbatim, except that each record's
+  market cap and ARK's share price are dropped (``_without_unlicensed``): no
+  source has a licence to display them (decision 95; L5 a for the price,
+  decision 112 A1 for the market cap). Ranking v5 no longer publishes the
+  price; both are stripped at serve time without changing the stored row, and
+  the warnings and market_caps_unavailable count still say when a cap was
+  missing. The envelope copies named
   fields from immutable data only, and bodies are canonical JSON (sorted keys,
   no insignificant whitespace), so a publication's body never changes (RA-6).
 
@@ -121,7 +124,8 @@ class WatchlistResponse(BaseModel):
     api_version: str = Field(examples=[API_VERSION])
     publication: Publication
     watchlist: dict[str, Any] = Field(
-        description="publications.output, verbatim except ARK's share price"
+        description="publications.output, verbatim except each record's market cap"
+        " and ARK's share price"
     )
 
 
@@ -263,7 +267,7 @@ class Explanation(BaseModel):
         description="Only when unavailable: score_unavailable,"
         " insufficient_supporting_data, not_scored or not_explained_yet",
     )
-    template_version: str | None = Field(default=None, examples=["explain-v1"])
+    template_version: str | None = Field(default=None, examples=["explain-v2"])
     as_of: str | None = Field(default=None, description="As the score's as_of")
     claims: list[Claim] = Field(description="Up to three, in order")
 
@@ -369,11 +373,12 @@ def _records(output: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
             yield from (r for r in records if isinstance(r, Mapping))
 
 
-def _without_price(output: Any) -> Any:
-    """``output`` with signals.ark.share_price dropped from every record.
+def _without_unlicensed(output: Any) -> Any:
+    """``output`` with each record's market_cap and signals.ark.share_price dropped.
 
-    No source has a licence to display a price (decision 95, L5 a). Publications
-    from before ranking v5 still store it; the stored row is left as it is.
+    No source has a licence to display either (decision 95: L5 a for the price,
+    decision 112 A1 for the market cap). Every publication stores the cap, and
+    those from before ranking v5 the price; the stored row is left as it is.
     """
     if not isinstance(output, Mapping):
         return output
@@ -381,12 +386,16 @@ def _without_price(output: Any) -> Any:
     for bucket in BUCKETS:
         records = copy.get(bucket)
         if isinstance(records, list):
-            copy[bucket] = [_record_without_price(r) for r in records]
+            copy[bucket] = [_record_without_unlicensed(r) for r in records]
     return copy
 
 
-def _record_without_price(record: Any) -> Any:
-    signals = record.get("signals") if isinstance(record, Mapping) else None
+def _record_without_unlicensed(record: Any) -> Any:
+    if not isinstance(record, Mapping):
+        return record
+    if "market_cap" in record:
+        record = {k: v for k, v in record.items() if k != "market_cap"}
+    signals = record.get("signals")
     if not isinstance(signals, Mapping):
         return record
     ark = signals.get("ark")
@@ -434,7 +443,7 @@ def _envelope(conn: Connection, publication_id: int) -> tuple[dict[str, Any], An
     degraded = next((e.checks for e in events if e.kind == "degraded"), None)
     gaps = (degraded or {}).get("congress_gaps")
     gap_count = gaps.get("count") if isinstance(gaps, Mapping) else 0
-    output = _without_price(pub.output)
+    output = _without_unlicensed(pub.output)
     as_of = (pub.ranking_config or {}).get("source_as_of") or {}
     meta = {
         "id": int(pub.id),
