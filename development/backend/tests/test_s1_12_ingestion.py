@@ -24,6 +24,7 @@ window used below is above 19 (above MAX_GRADE 16). A test reads textstat only
 to check the stored grade and the pin.
 """
 
+import ast
 import hashlib
 import re
 import socket
@@ -237,9 +238,52 @@ def test_cs3_every_excerpt_is_a_substring_of_the_description(case):
 MODEL_PACKAGES = ("anthropic", "openai", "transformers", "torch", "llama")
 
 
+# CS-3 keeps S1-12's summaries model-free: the summary modules and the summaries
+# CLI, and every src module they import (at any depth, function-level imports
+# included). Elsewhere a model may be imported lazily, as JOB-7's scorer does
+# (test_article_scorer.py pins that, and the locks below stay model-free).
+SUMMARY_MODULES = (
+    "src.ingestion.company_summaries",
+    "src.ingestion.sec_descriptions",
+    "src.ingestion.fmp_descriptions",
+    "src.ingestion.cli",
+)
+
+
+def summary_paths():
+    backend = REPO / "development" / "backend"
+
+    def path_of(name):
+        base = backend.joinpath(*name.split("."))
+        for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+            if candidate.exists():
+                return candidate
+        return None
+
+    seen, todo = {}, list(SUMMARY_MODULES)
+    while todo:
+        name = todo.pop()
+        path = path_of(name)
+        if name in seen or path is None:
+            continue
+        seen[name] = path
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module, *(f"{node.module}.{a.name}" for a in node.names)]
+            else:
+                continue
+            for imported in names:
+                parts = imported.split(".")
+                if parts[0] == "src":
+                    todo += [".".join(parts[:i]) for i in range(2, len(parts) + 1)]
+    assert set(SUMMARY_MODULES) <= set(seen)
+    return sorted(seen.values())
+
+
 def test_cs3_no_model_package_in_src_or_either_lock():
-    src = REPO / "development" / "backend" / "src"
-    for path in sorted(src.rglob("*.py")):
+    for path in summary_paths():
         source = path.read_text()
         for name in MODEL_PACKAGES:
             assert not re.search(rf"(?m)^\s*(import|from)\s+{name}", source), (
