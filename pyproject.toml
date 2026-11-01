@@ -37,6 +37,13 @@ dev = [
     # starlette 1.9's TestClient imports httpx2 (httpx is deprecated there).
     "httpx2==2.13.1",
 ]
+# JOB-7's FinBERT article scorer, for the worker that runs --job sentiment only.
+# Locked separately in requirements-scorer.lock (CPU torch from PyTorch's index);
+# CI and requirements*.lock never install it (test_article_scorer pins that).
+scorer = [
+    "torch==2.14.1+cpu",
+    "transformers==5.20.1",
+]
 
 [tool.ruff]
 target-version = "py312"
