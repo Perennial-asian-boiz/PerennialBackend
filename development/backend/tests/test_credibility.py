@@ -186,12 +186,13 @@ class Session:
 
 
 def test_the_resolver_reads_one_redirect_and_never_follows_it():
-    session = Session({"a": Response(302, "https://www.reuters.com/x"), "b": Response(200),
-                       "c": requests.ConnectionError()})
+    # F1: only https://finnhub.io links are requested (test_credibility_f1_f2.py).
+    session = Session({url(1): Response(302, "https://www.reuters.com/x"), url(2): Response(200),
+                       url(3): requests.ConnectionError()})
     slept, clock = [], [0.0]
     resolver = PublisherResolver(session, interval=1.1, monotonic=lambda: clock[0],
                                  sleep=slept.append)
-    assert [resolver.resolve(u) for u in "abc"] == ["reuters.com", None, None]
+    assert [resolver.resolve(url(n)) for n in (1, 2, 3)] == ["reuters.com", None, None]
     assert all(kw["allow_redirects"] is False for _, kw in session.calls)
     assert slept == [1.1, 1.1]
 
