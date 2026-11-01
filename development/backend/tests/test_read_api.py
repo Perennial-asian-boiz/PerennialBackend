@@ -256,6 +256,7 @@ def test_no_current_publication_is_404(api):
 @pytest.mark.db
 def test_watchlist_envelope_is_the_current_publication_verbatim(engine, fixture_path, api):
     from src.pipeline.publication import replay
+    from test_no_price_v1 import without_market_cap
 
     pub = publish_run(engine, feed(fixture_path))
     response = api.get("/v1/watchlist")
@@ -271,8 +272,9 @@ def test_watchlist_envelope_is_the_current_publication_verbatim(engine, fixture_
     assert meta["id"] == pub
     assert meta["ranking_version"] == stored.ranking_version
     assert datetime.fromisoformat(meta["created_at"]) == stored.created_at
-    assert body["watchlist"] == json.loads(json.dumps(stored.output))
-    assert body["watchlist"] == json.loads(json.dumps(replay(engine, pub)))
+    # Verbatim except each record's market_cap (decision 112 A1, test_no_market_cap_v1).
+    assert body["watchlist"] == without_market_cap(stored.output)
+    assert body["watchlist"] == without_market_cap(replay(engine, pub))
     # RA-4b: not degraded, every cap present.
     assert meta["degraded"] is False and meta["stale_sources"] == []
     assert meta["market_caps_unavailable"] == 0 and meta["congress_history_gaps"] == 0
@@ -503,6 +505,7 @@ def test_security_entry_is_its_record_in_the_current_publication(engine, fixture
     from decimal import Decimal
 
     from test_degraded_publishing import market_caps
+    from test_no_price_v1 import without_market_cap
 
     def spread(symbols):
         """One missing cap (unresolved), one under the threshold, the rest above."""
@@ -519,7 +522,8 @@ def test_security_entry_is_its_record_in_the_current_publication(engine, fixture
     assert len(buckets) > 1  # entries are found in every bucket, not just the first
     for record in records(output):
         body = api.get(f"/v1/securities/{record['ticker']}").json()
-        assert body["current"] == {"publication": envelope, "entry": record}, record["ticker"]
+        entry = without_market_cap(record)  # decision 112 A1
+        assert body["current"] == {"publication": envelope, "entry": entry}, record["ticker"]
     seed_security(engine, "ZZOUT")
     outside = api.get("/v1/securities/ZZOUT").json()["current"]
     assert outside == {"publication": envelope, "entry": None}
