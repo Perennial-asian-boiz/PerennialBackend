@@ -43,6 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 from src.db import models as m
 from src.db.queries import batch_rows, latest_successful_run
+from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.identity import resolve_tickers
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
@@ -244,43 +245,65 @@ def derive_sentiment(
                     SOURCE, "derived", "missing_upstream"
                 )
                 return import_collection(engine, outcome, run_id=run_id)
-            with engine.connect() as conn:
-                news = news_items(conn, symbols, start, now, table)
-                posts: dict[str, list[Item]] = {}
-                if social_fresh and social is not None:
-                    rows = batch_rows(conn, "social_posts", social.batch_id)
-                    posts = social_items(rows, social.source_as_of, now, table)
-            records = [
-                weigh(
-                    symbol,
-                    news.items.get(symbol, []) + posts.get(symbol, []),
-                    table.version,
-                    news.model,
-                    table.prior_weight,
+            try:
+                outcome = _sentiment_outcome(
+                    engine, symbols, start, now, table, social, social_fresh
                 )
-                for symbol in symbols
-            ]
-            scored = sum(r["article_count"] > 0 for r in records)
-            outcome = CollectionOutcome.success(
-                SOURCE,
-                "derived",
-                records,
-                coverage={"complete": True, "scope": "derivation"},
-                envelope={
-                    "weights_version": table.version,
-                    "window_days": WINDOW_DAYS,
-                    "universe": len(symbols),
-                    "scored": scored,
-                    "no_data_count": len(symbols) - scored,
-                    "news_used": sum(r["news_count"] for r in records),
-                    "social_used": sum(r["social_count"] for r in records),
-                    "social_batch_fresh": social_fresh,
-                    "publishers_unknown": news.publishers_unknown,
-                    "news_off_topic": news.off_topic,
-                    "half_life_days": table.half_life_days,
-                },
-            )
+            except Exception as exc:  # a bug here: record it, write nothing (F2)
+                outcome = CollectionOutcome.failure(
+                    SOURCE,
+                    "derived",
+                    "internal_error",
+                    diagnostics=exception_diagnostics(exc),
+                )
             return import_collection(engine, outcome, run_id=run_id)
+
+
+def _sentiment_outcome(
+    engine: Engine,
+    symbols: list[str],
+    start: datetime,
+    now: datetime,
+    table: WeightTable,
+    social: Any,
+    social_fresh: bool,
+) -> CollectionOutcome:
+    with engine.connect() as conn:
+        news = news_items(conn, symbols, start, now, table)
+        posts: dict[str, list[Item]] = {}
+        if social_fresh and social is not None:
+            rows = batch_rows(conn, "social_posts", social.batch_id)
+            posts = social_items(rows, social.source_as_of, now, table)
+    records = [
+        weigh(
+            symbol,
+            news.items.get(symbol, []) + posts.get(symbol, []),
+            table.version,
+            news.model,
+            table.prior_weight,
+        )
+        for symbol in symbols
+    ]
+    scored = sum(r["article_count"] > 0 for r in records)
+    return CollectionOutcome.success(
+        SOURCE,
+        "derived",
+        records,
+        coverage={"complete": True, "scope": "derivation"},
+        envelope={
+            "weights_version": table.version,
+            "window_days": WINDOW_DAYS,
+            "universe": len(symbols),
+            "scored": scored,
+            "no_data_count": len(symbols) - scored,
+            "news_used": sum(r["news_count"] for r in records),
+            "social_used": sum(r["social_count"] for r in records),
+            "social_batch_fresh": social_fresh,
+            "publishers_unknown": news.publishers_unknown,
+            "news_off_topic": news.off_topic,
+            "half_life_days": table.half_life_days,
+        },
+    )
 
 
 @dataclass
