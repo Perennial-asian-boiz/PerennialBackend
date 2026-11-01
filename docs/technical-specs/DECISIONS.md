@@ -10,10 +10,113 @@ reader can see *why*, not that the decision is final.
 
 ---
 
+## Explanation template explain-v2
+
+**Status:** Accepted
+**Date:** 2026-10-31
+**Code:** `src/services/scores/explain.py` (`TEMPLATE_VERSION = "explain-v2"`)
+
+### Decision
+
+An explanation ("why Perennial recommends this company") lists only
+**supporting** signals, at most three, each citing the stored record and value
+it came from (decision 103 (c)):
+
+- A fundamentals measure is a claim only if it is worth **at least 50 points**
+  (the midpoint of its 0–100 range). Supporting measures go by points,
+  highest first.
+- Sentiment is a claim only if it **leans positive** (value above 0). When it
+  does, it always keeps the **last** of the three places, so a company with
+  three strong fundamentals measures still shows its news.
+- A component the score lists as missing produces no claim.
+- Claims are generated only for a recommended score. A recommended score with
+  no supporting signal is `unavailable` with reason
+  `insufficient_supporting_data` (S2-03 AC5).
+
+The sentiment sentence names what was counted: "News coverage…",
+"Social posts…" or "News and social posts… (a articles, b posts)", over the
+batch's `window_days` (see the ticker_sentiment entry below).
+
+### Why the version moved
+
+Explain-v1 allowed any measure, including weak ones, so "Revenue shrank…" could
+appear as a reason to recommend a company. Decision 103 (c) changed which
+claims are made, but the template version first stayed `explain-v1` (#93).
+A stored explanation is carried forward when its input digest **and** template
+version are unchanged (S2-03 AC4), and the digest covers inputs only, so
+explanations stored under the old rule would have been served unchanged.
+Bumping to `explain-v2` (#97) makes every v1 explanation regenerate, while
+v2 explanations still carry forward. A change to which claims are made, or to
+their wording, needs a new template version.
+
+---
+
+## The ticker_sentiment contract
+
+**Status:** Accepted
+**Date:** 2026-10-30 (weights-v2 and weights-v3: 2026-11-01, with #85)
+**Code:** migration 0018 (`perennial.ticker_sentiment`), written by
+`src/services/credibility/job.py` (S1-05, #85) and read by
+`src/services/scores/job.py`
+
+### Decision
+
+`ticker_sentiment` is the one table between the sentiment pipeline and the
+Confidence Score. It is #85's table plus `model_version` (decision 108 (b)):
+one row per security in the current production watchlist publication, per
+derived run.
+
+| Column | Meaning |
+|---|---|
+| `value` | The credibility-weighted sentiment, −1 to +1. **NULL when nothing was counted** in the window |
+| `plain_average` | The unweighted mean of the same items, for comparison (S1-05 AC 1) |
+| `article_count` | `news_count + social_count` |
+| `news_count`, `social_count` | News articles and social posts counted |
+| `first_at`, `last_at` | The oldest and newest counted item. NULL together with `value` |
+| `weights_version` | The `source_weights.json` version the value was computed with |
+| `model_version` | The news model. NULL exactly when `news_count` is 0 |
+
+Rules for every reader:
+
+- **No coverage** is a row with a NULL `value`, or no row at all. Both mean
+  sentiment is missing; neither is treated as neutral (Confidence Score rule 4).
+  Social posts alone do count as coverage.
+- **As-of** is `last_at`'s UTC date, whatever the database session's time zone.
+- **Version** is `weights_version`.
+- **Window:** the batch envelope carries `window_days` (7 today). It must be an
+  int of at least 1. A reader that needs the window and finds anything else
+  fails `invalid_upstream` and writes nothing.
+
+### Weight versions
+
+Changing anything in `source_weights.json` changes its version, which every
+row stores.
+
+- **weights-v1:** each item weighted by its source's tier: wire and major
+  outlets 1.0, financial media 0.7, aggregators, press releases and blogs 0.4,
+  social platforms 0.2. An unlisted source gets the lowest weight.
+- **weights-v2:** only on-topic articles count (`headline-match-v1`: the
+  headline must name the company), and each item's weight halves every 3 days
+  of age (`half_life_days`).
+- **weights-v3** (current): the weighted average starts with a neutral 0 of
+  weight 1 (`prior_weight`), so a value built on little data stays near zero.
+  One fresh Reuters article at +0.8 gives +0.4; ten give +0.73.
+
+### Why
+
+Two branches defined the same table independently (our 0018 contract and #85).
+Decision 108 (b) kept #85's shape, which stores a row for every security, so
+coverage is visible, and added `model_version` so a score's breakdown can name
+the model behind it. The as-of, version and window rules exist so the score and
+its explanation say exactly which data they used.
+
+---
+
 ## Confidence Score composition
 
-**Status:** Proposed — logic to be reviewed by the team before implementation
-**Date:** 2026-09-02
+**Status:** Accepted, as built in score-v1 (proposed 2026-09-02; the original
+proposal is kept below, followed by what was built)
+**Date:** 2026-11-01
 **Owners:** `@haohnguyen94-droid` `@Zura16` (evaluation), `@CohenK` (sentiment)
 
 ### Decision
@@ -65,6 +168,49 @@ trusting a number that changes without a reason they can see.
    breakdown screen and is the only way to debug a score after the fact.
 6. **Version the weights.** A `score_version` column keeps today's 78
    interpretable after the weights are retuned.
+
+### As built: score-v1
+
+Code: `src/services/scores/scoring.py` (the blend) and
+`src/services/scores/job.py` (the run).
+
+- **Weights:** fundamentals 0.60, sentiment 0.25, event exposure 0.15,
+  stored with every scores batch as `score_version` `score-v1`.
+- **Event exposure is always missing in v1.** Its weight is redistributed
+  over the present components (rule 4), never filled with a neutral 50.
+- **Sufficiency:** a score needs fundamentals plus at least one other
+  component. Without fundamentals it is `unavailable` (`no_fundamentals`);
+  with fundamentals alone, `unavailable` (`only_fundamentals`).
+- **Normalization (rule 1):** sentiment becomes `(value + 1) × 50`, rounded
+  to 0.1.
+- **Rounding:** half-even at each step: the effective weight
+  (nominal / sum of present nominals) to 0.0001, each contribution
+  (value × effective weight) to 0.01, and the score, the sum of the rounded
+  contributions, to 0.1. So the contributions shown always add up to the score
+  (S2-02 AC2).
+- **The ±15 sentiment cap (rule 2) holds by construction.** Fundamentals are
+  mandatory, so sentiment's largest effective weight is 0.25 / 0.85 = 0.2941,
+  a swing of at most 14.7 points from neutral. There is no cap code. Revisit
+  when event exposure arrives.
+- **Smoothing (rule 3)** happens in the sentiment input, not in the blend:
+  a 7-day window with each item's weight halving every 3 days (see the
+  ticker_sentiment entry).
+- **Stored components (rule 5):** every `company_scores` row stores each
+  component's value, nominal weight, effective weight and contribution, plus
+  the as-of and version of the record it used. The API recomputes the
+  breakdown from the values and refuses a row that doesn't match.
+- **Recommended:** status `ok`, score of at least 60, and the company is listed
+  in the current production watchlist publication in **any** bucket,
+  `unresolved` included (plan §8). Every row stores the publication it was
+  judged against. With no production publication, nothing is recommended.
+- **Serving:** the API reads scores only through the `current_scores` pointer
+  table (one row per channel, like `current_publication`). This is an interim
+  choice instead of the roadmap's `publications.kind`; it can be folded in
+  later. Unchanged inputs reuse the stored batch, so the pointer and its
+  `promoted_at` don't move (S2-01 AC2).
+- **Related decisions:** D1 (a new scores batch regenerates its
+  explanations), 103 (c) (see explain-v2 above), 108 (the ticker_sentiment
+  contract above), plan §8 (recommended in any bucket).
 
 ### Open questions for the team
 
