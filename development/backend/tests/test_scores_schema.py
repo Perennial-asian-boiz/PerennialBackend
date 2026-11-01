@@ -301,7 +301,7 @@ def _assigned(tree, name):
     return None
 
 
-def test_db1_migration_0018_follows_0017_and_is_the_single_head():
+def test_db1_migration_0018_follows_0017():
     path = _migration()
     assert re.fullmatch(r"\d{8}_0018_[a-z0-9_]+\.py", path.name), path.name
     tree = ast.parse(path.read_text())
@@ -309,7 +309,6 @@ def test_db1_migration_0018_follows_0017_and_is_the_single_head():
         "0018",
         "0017",
     )
-    assert head() == "0018"
 
 
 @pytest.mark.parametrize("function", ["upgrade", "downgrade"])
@@ -1013,6 +1012,8 @@ SENTIMENT_ENVELOPE = {
     "social_used": 5,
     "social_batch_fresh": True,
     "publishers_unknown": 0,
+    "news_off_topic": 0,
+    "half_life_days": 3.0,
 }
 
 
@@ -1406,7 +1407,7 @@ def _tables(target):
 def test_test5_owner_upgrades_downgrades_and_upgrades_again_on_a_fresh_database(engine):
     with scratch(engine) as (target, names):
         provisioned(target, names)
-        assert version(target) == "0018"
+        assert version(target) == head()
         assert set(NEW_TABLES) <= _tables(target)
         migrate(target, "0017", owner=names["owner"], down=True)
         assert version(target) == "0017"
@@ -1420,7 +1421,7 @@ def test_test5_owner_upgrades_downgrades_and_upgrades_again_on_a_fresh_database(
         provision(target, names, "bootstrap")
         migrate(target, owner=names["owner"])
         provision(target, names, "grants")
-        assert version(target) == "0018"
+        assert version(target) == head()
         assert set(NEW_TABLES) <= _tables(target)
 
 
@@ -1438,7 +1439,7 @@ def test_test5_downgrade_refuses_while_lineage_exists(engine, source, kind):
                 conn.execute(text(FAILED_RUN), {"s": source})
         with pytest.raises(Exception, match="lineage"):
             migrate(target, "0017", owner=names["owner"], down=True)
-        assert version(target) == "0018"
+        assert version(target) == head()
         assert set(NEW_TABLES) <= _tables(target)
         table = "source_batches" if kind == "batch" else "ingestion_runs"
         with target.connect() as conn:
