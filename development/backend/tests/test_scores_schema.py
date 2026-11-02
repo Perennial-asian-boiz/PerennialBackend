@@ -1233,9 +1233,8 @@ def test_db4_policy_lists_the_new_tables():
     for table in (
         "ticker_sentiment",
         "fundamental_scores",
-        "fundamentals",
         "news_articles",
-    ):
+    ):  # S2-04 grants fundamentals by column (test_s2_04_fundamentals_grant)
         assert table not in roles.API_TABLES and table not in roles.API_COLUMNS, table
 
 
@@ -1280,7 +1279,6 @@ def test_db5_api_reads_only_the_served_columns(engine, groups):  # noqa: F811
         for table in (
             "ticker_sentiment",
             "fundamental_scores",
-            "fundamentals",
             "source_batches",
             "run_dependencies",
         ):
