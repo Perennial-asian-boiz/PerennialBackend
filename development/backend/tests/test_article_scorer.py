@@ -5,10 +5,11 @@ fake scorer everywhere, so nothing is downloaded and torch is never imported.
 Pinned interface, src/services/credibility/article_scorer.py (my proposal):
 
 * MODEL_NAME = "ProsusAI/finbert"; MODEL_REVISION, a pinned 40-hex commit;
-  MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}", stored as article_sentiment.model.
-* article_text(article) -> str: the text the model reads. Headline only for now
-  (news_articles stores no summary; adding one later is local to this function),
-  stripped and capped at MAX_TEXT_CHARS (at most 512).
+  MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}+text2" since decision 114,
+  stored as article_sentiment.model.
+* article_text(article) -> str: the text the model reads, stripped and capped at
+  MAX_TEXT_CHARS (at most 512). Decision 114 adds the stored summary after the
+  headline (test_d114_article_summary); an article without one reads as before.
 * polarity(probabilities) -> Decimal: P(positive) - P(negative), to 4 places.
 * score_articles(engine, *, scorer=None, now=None) -> ImportResult, the slot's
   Callable[[Engine], ImportResult]. A derived article_sentiment run:
@@ -193,7 +194,8 @@ def test_the_model_is_finbert_at_a_pinned_revision():
     assert len(mod.MODEL_REVISION) == 40 and set(mod.MODEL_REVISION) <= set(
         "0123456789abcdef"
     )
-    assert mod.MODEL_VERSION == f"ProsusAI/finbert@{mod.MODEL_REVISION}"
+    # Decision 114: "+text2" names the headline + summary text (test_d114_article_summary).
+    assert mod.MODEL_VERSION == f"ProsusAI/finbert@{mod.MODEL_REVISION}+text2"
     assert (
         len(mod.MODEL_VERSION) <= 64
     )  # article_sentiment.model, ticker_sentiment.model_version
@@ -465,12 +467,16 @@ def captured(monkeypatch):
     handler = Handler()
     log = logging.getLogger("src")
     monkeypatch.setattr(log, "disabled", False)
-    monkeypatch.setattr(log, "level", logging.DEBUG)
+    previous = log.level
+    # setLevel, not the attribute: it clears every logger's isEnabledFor cache, which
+    # otherwise keeps an INFO line from an earlier run in this process switched off.
+    log.setLevel(logging.DEBUG)
     log.addHandler(handler)
     try:
         yield handler
     finally:
         log.removeHandler(handler)
+        log.setLevel(previous)
 
 
 def assert_failed_closed(engine, result, handler):
