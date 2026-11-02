@@ -1010,6 +1010,7 @@ news_articles = Table(
     Column("finnhub_id", BigInteger, nullable=False),
     Column("url", String(2048), nullable=False),
     Column("headline", String(500), nullable=False),
+    Column("summary", String(2000)),  # Finnhub's, cut to fit (0020, decision 114)
     Column("outlet", String(100), nullable=False),
     Column("published_at", DateTime(timezone=True), nullable=False),
     Column("content_retrieved", String(24), nullable=False),

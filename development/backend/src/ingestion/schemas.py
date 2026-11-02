@@ -815,6 +815,7 @@ class NewsArticle(SourceRecord):
         "finnhub_id",
         "url",
         "headline",
+        "summary",
         "outlet",
         "published_at",
         "content_retrieved",
@@ -825,6 +826,8 @@ class NewsArticle(SourceRecord):
     finnhub_id: int = Field(gt=0, le=BIGINT_MAX, strict=True)
     url: Annotated[str, BeforeValidator(_text_validator(2048, required=True))]
     headline: Annotated[str, BeforeValidator(_text_validator(500, required=True))]
+    # Refuses over-length text; the news job cuts the summary to fit first.
+    summary: Annotated[Optional[str], BeforeValidator(_text_validator(2000))] = None
     outlet: Annotated[str, BeforeValidator(_text_validator(100, required=True))]
     published_at: datetime
     content_retrieved: Annotated[
