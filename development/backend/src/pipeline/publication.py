@@ -41,6 +41,13 @@ MAX_AGE = {
 }
 DOWNSTREAM = ("insider_trades", "short_interest")
 MARKET_CAP_OBSERVED_AGE = timedelta(days=3)
+# Providers whose values are measured less often than daily get their own
+# limit (#90, pending Bryan's approval of the D7 exception). SEC's public
+# float is measured at the end of fiscal Q2 and replaced by the next 10-K, so
+# a current value is up to about 20 months old.
+MARKET_CAP_OBSERVED_AGE_BY_PROVIDER = {
+    "sec_public_float": timedelta(days=730),
+}
 QUALITY_CHECKS = ("row_count", "null_share", "source_as_of")
 PUBLICATION_LOCK = 170099
 
@@ -503,8 +510,9 @@ def _select_market_caps(
     """Each candidate's latest eligible market_caps row, or an all-NULL pin (M4 MC-B).
 
     Eligible: a succeeded market_caps run in the publication's modes collected
-    within max_age, whose row was observed (if dated) within 3 days and not in
-    the future. A batch reused by later runs ages from the latest of them. The
+    within max_age, whose row was observed (if dated) within 3 days, or within
+    its provider's MARKET_CAP_OBSERVED_AGE_BY_PROVIDER limit, and not in the
+    future. A batch reused by later runs ages from the latest of them. The
     latest collected_at wins, ties to the higher run id; a NULL value wins too,
     and means unavailable (Q3). Only value IS NULL marks unavailability.
     """
@@ -533,6 +541,14 @@ def _select_market_caps(
                 and_(
                     caps.c.observed_at >= now - MARKET_CAP_OBSERVED_AGE,
                     caps.c.observed_at <= now + slack,
+                ),
+                *(
+                    and_(
+                        caps.c.provider == provider,
+                        caps.c.observed_at >= now - age,
+                        caps.c.observed_at <= now + slack,
+                    )
+                    for provider, age in MARKET_CAP_OBSERVED_AGE_BY_PROVIDER.items()
                 ),
             ),
         )

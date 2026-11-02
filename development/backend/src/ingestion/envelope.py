@@ -150,5 +150,56 @@ ENVELOPE_KEYS.update(
         "articles_found",
         "articles_new",
         "match_rule_version",
+        "truncated",  # SYMBOL:YYYY-MM-DD days Finnhub cut off at its per-request cap
+        "truncated_count",
+    ),
+)
+# S1-05 source credibility weighting (ticker_sentiment's keys are below).
+ENVELOPE_KEYS.update(
+    social_posts=(
+        "source",
+        "window_days",
+        "fresh",
+        "stale",
+        "missing",
+        "posts",
+        "skipped_tickers",
+        "skipped_tickers_count",
+    ),
+    article_sentiment=("model", "input_batch_id", "articles_scored"),
+)
+
+# Sprint 2 scores (derived runs). company_scores keeps score-v1's envelope
+# (score_version and weights as "component:weight" strings) and the input batches.
+ENVELOPE_KEYS.update(
+    ticker_sentiment=(  # PR #85's nine keys (decision 108)
+        "weights_version",
+        "window_days",
+        "universe",
+        "scored",
+        "no_data_count",
+        "news_used",
+        "social_used",
+        "social_batch_fresh",
+        "publishers_unknown",
+        "news_off_topic",  # S1-05 weights-v2
+        "half_life_days",
+    ),
+    company_scores=(
+        "score_version",
+        "weights",
+        "fundamental_scores_batch_id",
+        "ticker_sentiment_batch_id",
+        "watchlist_publication_id",
+        "universe",
+        "scored",
+        "unavailable_count",
+    ),
+    score_explanations=(
+        "template_version",
+        "company_scores_batch_id",
+        "universe",
+        "explained",
+        "carried_forward_count",
     ),
 )

@@ -99,5 +99,8 @@ def test_scheduler_and_consensus_still_work_from_json(tmp_path, monkeypatch, fix
     )
     written = json.loads((tmp_path / "consensus_watchlist.json").read_text())
     assert written["popular_stable"] == result["popular_stable"]
+    assert written["schema_version"] == "1.2"
+    assert written["market_cap_basis"] == "sec_public_float"
+    assert all("market_cap" in r["source_dates"] for r in written["popular_stable"])
     tickers = {r["ticker"] for bucket in ("popular_stable", "affordable_growing") for r in written[bucket]}
     assert {"ZZAA", "ZZDD", "ZZEE"} <= tickers

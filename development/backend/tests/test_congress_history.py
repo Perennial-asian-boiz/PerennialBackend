@@ -297,7 +297,7 @@ def test_gap_is_per_chamber(engine):
 def test_publication_pins_history_and_replays_after_more_arrives(engine, fixture_path):
     pub = publish_now(engine, fixture_path)
     stored = current(engine)["output"]
-    assert stored["ranking_version"] == "watchlist-v4"
+    assert stored["ranking_version"] == "watchlist-v5"  # decision 95: no ARK share price
     with engine.connect() as conn:
         through = conn.execute(
             select(models.publication_history_watermarks.c.through_history_id).where(
@@ -674,7 +674,7 @@ def test_demo_publication_ranks_history_from_fixture_runs(demo_engine):  # noqa:
 
     pub = run_demo(demo_engine, DemoReplay())
     stored = current(demo_engine)["output"]
-    assert stored["ranking_version"] == "watchlist-v4"
+    assert stored["ranking_version"] == "watchlist-v5"  # decision 95: no ARK share price
     d, w, p = (
         models.run_dependencies,
         models.publication_history_watermarks,

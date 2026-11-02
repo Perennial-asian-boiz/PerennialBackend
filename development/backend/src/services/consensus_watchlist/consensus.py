@@ -56,13 +56,16 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
+# Company size is SEC's public float (#90): public data we may display, unlike
+# FMP's or Finnhub's market caps. It is not a market cap (insiders' shares are
+# left out) and it is measured once a year, so the output says so in
+# market_cap_basis and dates each value in source_dates["market_cap"].
+MARKET_CAP_BASIS = "sec_public_float"
 
 MARKET_CAP_THRESHOLD = 10_000_000_000  # $10 Billion
 # Congress candidates evaluated per run, strongest first (same rule as the
 # database ranking's watchlist-v4). Complete House Clerk data has ~650
-# purchased tickers a year, and each candidate costs one FMP market-cap
-# request against a 250-a-day free plan.
+# purchased tickers a year; the cap dates from FMP's 250-a-day free plan.
 MAX_CONGRESS_CANDIDATES = 100
 
 
@@ -403,46 +406,76 @@ def load_short_interest_signals(file_path: Optional[Path] = None) -> Dict[str, D
 # MARKET CAP LOOKUP
 # ─────────────────────────────────────────────────────────
 
+class PublicFloatLookup:
+    """
+    SEC public float per ticker for one run: SEC's ticker map once, then one
+    small companyconcept request per company, paced for SEC's fair-access
+    rules by the fundamentals job's EdgarClient. Needs SEC_USER_AGENT.
+
+    No value: no SEC ticker (funds, units, most foreign listings), no USD
+    public float (20-F filers, companies without a 10-K yet), a latest value
+    of 0 (listed after the measurement date), or a failed request (logged).
+    """
+
+    def __init__(self, user_agent: Optional[str], client: Any = None) -> None:
+        self.user_agent = user_agent
+        self._client = client
+        self._ciks: Optional[Dict[str, int]] = None
+
+    def _ready(self) -> bool:
+        # Imported on first use: the shared client pulls in the ingestion stack.
+        from src.services.fundamentals.edgar import EdgarClient, EdgarError, user_agent_ok
+
+        if self._ciks is not None:
+            return True
+        if self._client is None:
+            if not user_agent_ok(self.user_agent):
+                logger.warning("SEC_USER_AGENT is not set: no company sizes this run")
+                self._ciks = {}
+                return True
+            self._client = EdgarClient(requests.Session(), self.user_agent)
+        try:
+            self._ciks = self._client.ticker_map()
+        except EdgarError as e:
+            logger.warning(f"SEC ticker map failed ({e}): no company sizes this run")
+            self._ciks = {}
+        return True
+
+    def __call__(self, ticker: str) -> Optional[Any]:
+        from src.ingestion.market_caps import sec_symbol
+        from src.services.fundamentals.edgar import EdgarError
+
+        self._ready()
+        spelled = sec_symbol(ticker)
+        cik = (self._ciks or {}).get(spelled) if spelled else None
+        if cik is None:
+            return None
+        try:
+            return self._client.public_float(cik)
+        except EdgarError as e:
+            logger.warning(f"Public float lookup failed for {ticker}: {e}")
+            return None
+
+
 def fetch_market_cap(
     ticker: str,
     cache: Dict[str, Optional[float]],
-    session: Optional[requests.Session] = None,
-    api_key: Optional[str] = None,
-) -> Optional[float]:
+    lookup: Optional[PublicFloatLookup] = None,
+) -> Tuple[Optional[float], Optional[str]]:
     """
-    Looks up market capitalization using cached values or FMP stable profile endpoint.
-    Endpoint: GET https://financialmodelingprep.com/stable/profile?symbol={ticker}&apikey={KEY}
+    The company size used for bucketing, and the date it was measured.
+    A value already in `cache` is used as is, with no date. Otherwise the
+    value is SEC's public float (see PublicFloatLookup).
     """
     if ticker in cache:
-        return cache[ticker]
-
-    if not api_key or api_key.lower().startswith("your_"):
+        return cache[ticker], None
+    found = lookup(ticker) if lookup is not None else None
+    if found is None:
         cache[ticker] = None
-        return None
-
-    req_session = session or requests.Session()
-
-    try:
-        resp = req_session.get(
-            FMP_PROFILE_URL,
-            params={"symbol": ticker, "apikey": api_key},
-            timeout=10
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and data:
-                item = data[0]
-                mcap = item.get("mktCap") or item.get("marketCap")
-                if mcap is not None:
-                    mcap_val = float(mcap)
-                    cache[ticker] = mcap_val
-                    return mcap_val
-        cache[ticker] = None
-        return None
-    except Exception as e:
-        logger.warning(f"Market cap lookup failed for {ticker}: {e}")
-        cache[ticker] = None
-        return None
+        return None, None
+    value = float(found.value)
+    cache[ticker] = value
+    return value, found.as_of.isoformat()
 
 
 # ─────────────────────────────────────────────────────────
@@ -575,10 +608,6 @@ def run(
     applies V1 deterministic ranking, and writes output atomically.
     """
     provider_settings = provider_settings or load_provider_settings()
-    api_key = (
-        provider_settings.fmp_api_key.get_secret_value()
-        if provider_settings.fmp_api_key is not None else None
-    )
     logger.info("Starting Consensus Watchlist Aggregation...")
 
     congress_signals = load_congress_signals(congress_file)
@@ -598,7 +627,7 @@ def run(
     )
 
     market_cap_cache: Dict[str, Optional[float]] = profile_cache if profile_cache is not None else {}
-    session = requests.Session()
+    lookup = PublicFloatLookup(provider_settings.sec_user_agent)
 
     popular_stable: List[Dict[str, Any]] = []
     affordable_growing: List[Dict[str, Any]] = []
@@ -606,7 +635,7 @@ def run(
     errors: List[str] = []
 
     for ticker in candidate_tickers:
-        mcap = fetch_market_cap(ticker, market_cap_cache, session=session, api_key=api_key)
+        mcap, mcap_as_of = fetch_market_cap(ticker, market_cap_cache, lookup)
 
         warnings: List[str] = []
 
@@ -628,6 +657,7 @@ def run(
             "insider": i_sig.get("most_recent_buy") if i_sig else None,
             "short_interest": si_sig.get("settlement_date") if si_sig else None,
             "ark": a_sig.get("fetched_at") if a_sig else None,
+            "market_cap": mcap_as_of,
         }
 
         # Build ark signal without internal fetched_at field
@@ -699,8 +729,10 @@ def run(
     )
 
     output_payload = {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # What market_cap holds: SEC's public float, not a market cap.
+        "market_cap_basis": MARKET_CAP_BASIS,
         # Health of the inputs this watchlist was built from. generated_at
         # says when we aggregated; this says whether the data was any good.
         "source_health": {

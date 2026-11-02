@@ -36,7 +36,12 @@ def _quality_defaults() -> dict[str, QualityThreshold]:
         "congress_trades": QualityThreshold(
             allow_equal_as_of=True, null_fields=("disclosure_date",)
         ),
-        "ark_holdings": QualityThreshold(null_fields=("share_price",)),
+        # Decision 87 (a): the batch is dated by its stalest fund, so one lagging
+        # fund can repeat the previous date while holdings change; that still
+        # publishes. A stale fund is excluded by collectors.ARK_MAX_AGE.
+        "ark_holdings": QualityThreshold(
+            allow_equal_as_of=True, null_fields=("share_price",)
+        ),
         "insider_trades": QualityThreshold(
             allow_equal_as_of=True, null_fields=("shares", "value")
         ),
@@ -128,8 +133,8 @@ class Settings(ProviderSettings):
         default=MARKET_CAP_MAX_REUSE_AGE, gt=timedelta(0)
     )
     trading_holidays: tuple[date, ...] = TRADING_HOLIDAYS
-    # A name in src.ingestion.market_caps.ADAPTERS. None keeps the legacy
-    # market-cap path (M4 MC-A); no production adapter exists yet.
+    # A name in src.ingestion.market_caps.ADAPTERS ("sec_public_float" is the
+    # live one, #90). None keeps the legacy FMP market-cap path (M4 MC-A).
     market_cap_adapter: str | None = None
 
     @field_validator("market_cap_adapter")

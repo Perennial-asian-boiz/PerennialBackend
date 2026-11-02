@@ -358,7 +358,8 @@ def test_read_routes_use_the_read_only_helper_once_in_the_integrated_app(
         monkeypatch.setattr(read, "read_transaction", recording)
         read_paths = [p for p in v1_routes(app) if not p.startswith(("/v1/auth", "/v1/me"))]
         assert sorted(read_paths) == [
-            "/v1/market-status", "/v1/securities/{symbol}", "/v1/watchlist"]
+            "/v1/market-status", "/v1/securities/{symbol}", "/v1/securities/{symbol}/score",
+            "/v1/watchlist"]
         for path in read_paths:
             calls.clear()
             assert c.get(path.replace("{symbol}", "ZZAA")).status_code == 200

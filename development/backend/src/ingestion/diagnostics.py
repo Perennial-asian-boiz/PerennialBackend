@@ -65,11 +65,13 @@ ERROR_SUMMARIES = {
     "security_conflict": "a ticker conflicts with an existing or in-batch security mapping",
     "unresolved_security": "a ticker does not resolve to exactly one active security",
     "missing_upstream": "upstream rows or fetcher files are missing or malformed",
+    "invalid_upstream": "an upstream batch's envelope is not usable; nothing was written",
     "plan_too_large": "too many tickers planned; collection refused rather than truncated",
     "fixture_adapter_not_allowed": "a fixture adapter cannot record a non-fixture run",
     "adapter_mode_mismatch": "a live adapter cannot record a non-live run",
     "database_error": "database write failed",
     "internal_error": "unexpected error; nothing was written",
+    "scoring_failed": "the article scorer failed to load or answered badly; nothing was written",
 }
 
 UNIT_KINDS = frozenset(
@@ -133,6 +135,11 @@ FAILURE_CODES = frozenset(
         "file_too_large",
         "pagination_exhausted",
         "deadline_exceeded",
+        # S1-12 description adapters (SEC EDGAR, FMP)
+        "submissions_malformed",
+        "ticker_map_malformed",
+        "request_failed",
+        "unexpected_error",
     }
 )
 _REQUEST_ERRORS = frozenset(

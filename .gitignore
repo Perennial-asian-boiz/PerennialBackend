@@ -70,3 +70,7 @@ mastodon_ticker_sentiment.json
 
 *_cookies.txt
 *_sentiments.json
+# Local sprint docs and team handoff (not committed)
+/Perennial_Sprint1_Completed_Review.pdf
+/Perennial_Sprint2_Demo_Verification_Matrix.pdf
+/docs/supabase-read-only-access.md

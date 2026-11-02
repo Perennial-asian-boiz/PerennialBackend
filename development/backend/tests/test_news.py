@@ -1,6 +1,6 @@
 """S1-03 news ingestion: Finnhub parsing, match-v1, coverage, and duplicates. Synthetic only."""
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import insert, select
@@ -11,7 +11,7 @@ from src.ingestion import collectors
 from src.services.news import finnhub, job
 from src.services.news.finnhub import FinnhubError, FinnhubNewsClient, RawArticle, parse_articles
 from src.services.fundamentals.job import Universe
-from src.services.news.job import collect_news, run_news
+from src.services.news.job import collect_news, fetch_window, run_news
 from src.services.news.matching import match_rule, name_variants
 
 TODAY = date(2026, 10, 26)
@@ -143,6 +143,53 @@ def test_every_ticker_failing_fails_the_batch():
     got = collect_news(Client({}, failing={"NVDA"}), ["NVDA"], NAMES, {}, TODAY)
     assert not got.outcome.succeeded and got.outcome.error_code == "collection_failed"
     assert got.coverage[0].status == "error"
+
+
+# ── Finnhub's 250-article cap ────────────────────────────
+
+
+class CappedClient:
+    """Finnhub's cap: an answer holds at most 250 articles, newest first."""
+
+    def __init__(self, per_day):
+        self.per_day, self.calls, self.session = per_day, [], None
+
+    def company_news(self, symbol, start, end):
+        self.calls.append((symbol, start, end))
+        found, day = [], end
+        while day >= start:
+            n = self.per_day.get(symbol, {}).get(day, 0)
+            found += [article(day.toordinal() * 1000 + i, f"{symbol} item {i}")
+                      for i in range(n)]
+            day -= timedelta(days=1)
+        return found[:finnhub.MAX_ARTICLES_PER_REQUEST], 0
+
+
+def test_a_quiet_ticker_takes_one_request_for_the_whole_window():
+    client = CappedClient({"RKLB": {TODAY: 3, TODAY - timedelta(days=6): 2}})
+    articles, truncated = fetch_window(client, "RKLB", TODAY - timedelta(days=7), TODAY)
+    assert (len(articles), truncated, len(client.calls)) == (5, [], 1)
+
+
+def test_a_full_window_is_fetched_one_day_at_a_time_and_a_full_day_is_reported():
+    busy = TODAY - timedelta(days=3)
+    client = CappedClient({"NVDA": {TODAY: 200, TODAY - timedelta(days=1): 150, busy: 260,
+                                    TODAY - timedelta(days=7): 1}})
+    got = collect_news(client, ["NVDA"], NAMES, {}, TODAY)
+    # the week, then each of its 8 days
+    assert len(client.calls) == 9
+    assert [c[1:] for c in client.calls[1:]] == [
+        (TODAY - timedelta(days=d), TODAY - timedelta(days=d)) for d in range(7, -1, -1)]
+    # 200 + 150 + the 250 Finnhub returns for the busy day + 1; the week alone gave 250
+    assert len(got.outcome.records) == 601
+    assert got.outcome.envelope["truncated"] == ["NVDA:2026-10-23"]
+    assert got.outcome.envelope["truncated_count"] == 1
+
+
+def test_no_ticker_cut_off_reports_an_empty_list():
+    got = collect_news(Client({"RKLB": [article(1, "Rocket Lab wins")]}), ["RKLB"], NAMES, {},
+                       TODAY)
+    assert (got.outcome.envelope["truncated"], got.outcome.envelope["truncated_count"]) == ([], 0)
 
 
 # ── database: duplicates and coverage rows (AC 4, 5) ─────

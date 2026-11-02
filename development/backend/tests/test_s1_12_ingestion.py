@@ -19,11 +19,12 @@ The seam (one module, src.ingestion.company_summaries):
   consensus_members(engine).
 
 The synthetic sentences were graded with textstat 0.7.13 while these tests were
-written: EASY ones are about grade -2 to 0, HARD ones about 34, and every mixed
-window used below is above 15. A test reads textstat only to check the stored
-grade and the pin.
+written: EASY ones are about grade -2 to 0, HARD ones about 38, and every mixed
+window used below is above 19 (above MAX_GRADE 16). A test reads textstat only
+to check the stored grade and the pin.
 """
 
+import ast
 import hashlib
 import re
 import socket
@@ -43,13 +44,17 @@ EASY = [
     "It has a small team.",
     "Most of its tools are for gardens.",
 ]
+# Lengthened 2026-10-28 for MAX_GRADE 16: with the shorter originals, a window
+# of three EASY sentences and one HARD graded 15.5-16.0 and would now pass.
 HARD = [
     "The corporation manufactures sophisticated semiconductor instrumentation, metrology"
     " equipment, and computational lithography infrastructure for multinational"
-    " manufacturing organizations.",
+    " manufacturing organizations, governmental laboratories, and international"
+    " telecommunications operators.",
     "Additionally, the organization provides comprehensive consulting, implementation,"
     " integration, and maintenance capabilities supporting enterprise digital"
-    " transformation initiatives internationally.",
+    " transformation initiatives internationally, alongside specialized educational"
+    " certification programs administered collaboratively.",
 ]
 URL = "https://profiles.example.com/zz/profile"
 SOURCE = "Synthetic Profiles"
@@ -186,7 +191,7 @@ def test_cs2_the_first_passing_window_is_taken_verbatim(case):
         assert excerpt is None
     else:
         assert excerpt is not None and excerpt.text == expected
-        assert float(excerpt.grade) <= 13.0  # MAX_GRADE, 8 until 2026-10-26
+        assert float(excerpt.grade) <= 16.0  # MAX_GRADE: 8, 13 on 10-26, 16 on 10-28
 
 
 def test_cs2_a_none_description_is_unavailable():
@@ -233,9 +238,52 @@ def test_cs3_every_excerpt_is_a_substring_of_the_description(case):
 MODEL_PACKAGES = ("anthropic", "openai", "transformers", "torch", "llama")
 
 
+# CS-3 keeps S1-12's summaries model-free: the summary modules and the summaries
+# CLI, and every src module they import (at any depth, function-level imports
+# included). Elsewhere a model may be imported lazily, as JOB-7's scorer does
+# (test_article_scorer.py pins that, and the locks below stay model-free).
+SUMMARY_MODULES = (
+    "src.ingestion.company_summaries",
+    "src.ingestion.sec_descriptions",
+    "src.ingestion.fmp_descriptions",
+    "src.ingestion.cli",
+)
+
+
+def summary_paths():
+    backend = REPO / "development" / "backend"
+
+    def path_of(name):
+        base = backend.joinpath(*name.split("."))
+        for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+            if candidate.exists():
+                return candidate
+        return None
+
+    seen, todo = {}, list(SUMMARY_MODULES)
+    while todo:
+        name = todo.pop()
+        path = path_of(name)
+        if name in seen or path is None:
+            continue
+        seen[name] = path
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module, *(f"{node.module}.{a.name}" for a in node.names)]
+            else:
+                continue
+            for imported in names:
+                parts = imported.split(".")
+                if parts[0] == "src":
+                    todo += [".".join(parts[:i]) for i in range(2, len(parts) + 1)]
+    assert set(SUMMARY_MODULES) <= set(seen)
+    return sorted(seen.values())
+
+
 def test_cs3_no_model_package_in_src_or_either_lock():
-    src = REPO / "development" / "backend" / "src"
-    for path in sorted(src.rglob("*.py")):
+    for path in summary_paths():
         source = path.read_text()
         for name in MODEL_PACKAGES:
             assert not re.search(rf"(?m)^\s*(import|from)\s+{name}", source), (

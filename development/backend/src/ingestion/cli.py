@@ -122,15 +122,22 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def _summaries(engine: Any, settings: Any) -> int:
-    """S1-12 (decision 76): run by hand, never scheduled. Counts only on stdout."""
-    from src.ingestion.company_summaries import summarize
-    from src.ingestion.fmp_descriptions import FmpProfileDescriptions
+    """S1-12 (decision 76): run by hand, never scheduled. Counts only on stdout.
 
-    key = settings.fmp_api_key.get_secret_value() if settings.fmp_api_key else ""
-    if not key.strip() or key.lower().startswith("your_"):
-        emit({"error_code": "missing_credential"})  # before any request
+    Descriptions come from SEC EDGAR (decisions 89-90, ED-8); FMP_API_KEY isn't read.
+    """
+    import requests
+
+    from src.ingestion.company_summaries import summarize
+    from src.ingestion.sec_descriptions import SecTenKDescriptions, seeded_ciks
+    from src.services.fundamentals.edgar import EdgarClient, user_agent_ok
+
+    agent = settings.sec_user_agent
+    if not user_agent_ok(agent):  # before any request or write
+        emit({"error_code": "missing_credential"})
         return 1
-    result = summarize(engine, FmpProfileDescriptions(key))
+    client = EdgarClient(requests.Session(), agent)
+    result = summarize(engine, SecTenKDescriptions(client, seeded_ciks(engine)))
     if not result.succeeded:
         emit({"error_code": result.error_code})
         return 1

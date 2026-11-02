@@ -100,7 +100,12 @@ later.
 
 Bootstrap also grants owner CREATE in `public` for Alembic's version table. Grant phase transfers the explicitly listed tables
 and their attached identity sequences to the owner, and fails if the migrated
-schema does not match the policy. Custom groups are available through `--owner`,
+schema does not match the policy: an unlisted table, or a listed table that's
+missing at the code's head. The one exception is a database whose Alembic revision is
+older than the code's head (grants run before the upgrade): its missing tables are
+skipped with a warning, "rerun the grants after the upgrade", and stay without
+grants until you do. So always run grants (and `provision_api_role.py`) after
+`alembic upgrade head`. Custom groups are available through `--owner`,
 `--importer`, and `--reader`. An administrator separately creates authenticated
 logins and grants exactly the corresponding group. Run migrations as owner
 (e.g. by the migration login's session role configuration), then run workers
@@ -129,6 +134,13 @@ an isolated server. The provisioning tool deliberately creates no passwords.
   Record backup storage separation, access controls and restore steps.
 - Configure supervisor, monitoring, alert delivery, on-call ownership and the
   recovery objectives below; exercise them before launch.
+- Company names (decision 92 (b)): after new securities appear, Bryan runs
+  `SEC_USER_AGENT=... OPS_DATABASE_URL=... python development/database/ops/seed_names.py`
+  by hand as the owner. It fills only empty `securities.name` from SEC's ticker
+  list (one request), keeps every existing name, and prints counts only
+  (`names_filled`, `not_in_sec_list`, `titles_skipped`: a title with a control
+  or format character, or over 200 characters, is never stored). Never
+  scheduled; the importer can't write names.
 
 ### API clocks and the email budget (#22 auth hardening)
 
@@ -163,6 +175,63 @@ it is not an offline verification option. Use pytest with synthetic collectors
 for offline checks. `src/services/consensus_watchlist/scheduler/cron.py` remains
 the legacy JSON workflow and is not the database production scheduler.
 
+The Sprint 2 Confidence Score isn't in the daily cron (`main()`). For the demo,
+run the one-shot jobs by hand from `development/backend`, in this order, after
+the daily pipeline has published:
+
+```bash
+python -m src.pipeline.scheduler --once --job fundamentals  # needs SEC_USER_AGENT
+python -m src.pipeline.scheduler --once --job sentiment     # needs FINNHUB_API_KEY
+python -m src.pipeline.scheduler --once --job scores
+```
+
+`--job sentiment` scores new articles with FinBERT (`ProsusAI/finbert`, pinned
+to one commit in `article_scorer.py`) before the weighting. The worker needs
+`torch` and `transformers`; without them, the scoring step fails
+`scoring_failed` and writes nothing, and the weighting still runs on the article
+scores already stored.
+
+**Installing the scorer (the worker only).** `requirements-scorer.lock` is the
+`scorer` extra: CPU-only torch from PyTorch's index (the lock names it with
+`--extra-index-url`) plus transformers, and every pin in `requirements.lock`
+unchanged. CI and the API never install it. Install it with hashes, alongside
+the runtime lock or on its own (it includes it):
+
+```bash
+python -m pip install --require-hashes -r requirements.lock -r requirements-scorer.lock
+```
+
+The lock is for Linux x86_64 (and other platforms with a `2.14.1+cpu` wheel:
+Linux aarch64, Windows); on macOS, install torch and transformers from PyPI by
+hand for local work. It downloads about 231 MB (the torch wheel is 196 MB) and
+adds about 1.03 GB to site-packages (torch alone 766 MB). To regenerate it, run
+the header's command on Linux x86_64 with Python 3.12, so the environment
+markers match `requirements.lock`.
+
+**The model.** The first scoring run downloads the pinned revision from the
+Hugging Face hub into `HF_HOME` (default `~/.cache/huggingface`): about 438 MB,
+almost all of it `model.safetensors`. To keep the job off the network, pre-seed
+the cache once and run the job with `HF_HUB_OFFLINE=1`:
+
+```bash
+HF_HOME=/srv/perennial/hf python -c "from huggingface_hub import snapshot_download; snapshot_download('ProsusAI/finbert', revision='0bc2ac10dda6929bcb1f77ccc43c7ec5c424f031', allow_patterns=['config.json', 'model.safetensors', 'vocab.txt', 'tokenizer_config.json', 'special_tokens_map.json'])"
+HF_HOME=/srv/perennial/hf HF_HUB_OFFLINE=1 python -m src.pipeline.scheduler --once --job sentiment
+```
+
+Keep the revision in step with `MODEL_REVISION` in `article_scorer.py`.
+
+`--job scores` derives `company_scores` from the latest successful
+`fundamental_scores` and `ticker_sentiment` batches, points `current_scores` at
+it, then derives `score_explanations` for that batch. It exits 0 only when both
+succeed. Unchanged inputs reuse the stored batches, and the pointer (and the
+API's `as_of`) doesn't move. With no `ticker_sentiment` batch at all, every
+score is unavailable (`only_fundamentals`); so is a security whose sentiment row
+counted nothing (a NULL value). If a cited `ticker_sentiment` batch's envelope
+has no positive whole-number `window_days`, the explanations run fails
+`invalid_upstream` and writes nothing, and `--job scores` exits 1. The scores
+batch it ran on is already current, with no explanations of its own; fix the
+sentiment producer's batch and rerun.
+
 Supervise the process and send logs to the deployment's log sink. Monitor worker
 availability, publication age, source freshness, repeated failed/abandoned runs,
 coverage/lineage failures, database availability/storage, backup snapshot age, and backup completion failures. Configure paging destinations, severity and thresholds in the deployment;
@@ -174,44 +243,76 @@ coverage, freshness or lineage rules to make a publication appear current.
 ## S1-12 company summaries (manual, staging only)
 
 Bryan runs this by hand to demo S1-12 on staging (decision 76). It is never
-scheduled and is not part of `run-pipeline`. Descriptions come from FMP's
-existing profile call (decision 75 (a)), still gated by decision 3's terms
-review, so don't run it against production.
+scheduled and is not part of `run-pipeline`. Descriptions come from SEC EDGAR:
+Item 1 ("Business") of each company's latest 10-K (decisions 89-90). FMP is
+no longer used: the command makes no FMP call and doesn't read `FMP_API_KEY`.
 
 Environment, the same as the worker's:
 - `DATABASE_URL`: the application's importer login (exactly importer
   membership). The importer may update only the seven summary columns of
   `company_profiles`.
-- `FMP_API_KEY`: the FMP key. A missing or placeholder key stops the command
-  before any request.
+- `SEC_USER_AGENT`: the contact SEC requires in every request's `User-Agent`,
+  the same setting as the fundamentals job. Use a team mailbox, for example
+  `Perennial Research team@<our domain>`. A missing or blank value, or one
+  containing `example.com` (the `.env.example` placeholder), stops the command
+  before any request or write. It isn't a credential, but it is never logged.
 
 ```sh
 cd development/backend
 python -m src.ingestion.cli summaries
 ```
 
-It summarizes the current production publication's consensus members: one FMP
-`/stable/profile` call per member with a company profile, on the same daily
-FMP quota as market caps and Congress. Output on stdout:
+It summarizes the current production publication's consensus members. SEC
+requests, all with only the `User-Agent` header:
+- 1 to `www.sec.gov/files/company_tickers.json`, only if some member's
+  company profile has no seeded CIK;
+- 1 to `data.sec.gov/submissions/CIK##########.json` per company profile with
+  a CIK (share classes such as GOOG and GOOGL share one);
+- 1 to the 10-K's primary document under `www.sec.gov/Archives/edgar/data/`
+  when that company has a usable 10-K.
+
+So about 2 per member at most: roughly 341 for 170 members. Requests are spaced
+at least 0.12 s apart (under 8.4 a second; SEC allows 10), so a full run takes
+at least about 41 s plus download time. Every run downloads each 10-K again;
+skipping unchanged filings is a possible follow-up.
+
+Which filing: the newest `10-K` (by filing date) in the company's recent
+filings, filed within the last 550 days. Amendments (`10-K/A`), `10-KT`,
+`20-F` and `40-F` don't count, so a company without a recent 10-K shows
+"Summary not available" (decision 91). The text is the prose of Item 1, up to
+the next Item 1A/1B/1C/2/3 heading. Filings laid out as a cross-reference index
+have no Item 1 heading and are unavailable too.
+
+Output on stdout:
 - Success, exit 0: `{"members": N, "with_summary": A, "unavailable": B}`. `A`
-  members now have a stored 2–4 sentence excerpt at Flesch–Kincaid grade 13
-  or below (8 until 2026-10-26, decision 88). `B` show "Summary not
-  available" (no description, no readable window, or no company profile). A
-  rerun with unchanged descriptions rewrites nothing. The grade limit and the
-  selector version are part of each row's description digest, so the first
-  run after either changes re-checks every stored row once, including those
-  stored "unavailable", with the usual one FMP call per profile.
+  members now have a stored 2–4 sentence excerpt at Flesch–Kincaid grade 16
+  or below (decision 89; 13 from decision 88, 8 before). `B` show "Summary
+  not available" (no CIK, no recent 10-K, no Item 1 prose, no readable window,
+  or no company profile). A rerun with unchanged filings rewrites nothing. The
+  grade limit, the selector version, the source name and the link are part of
+  each row's description digest, so the first run after any of them changes
+  re-checks every stored row once, including those stored "unavailable".
+- Every run, before its first SEC request, clears every stored summary that
+  came from another source (FMP), members or not, in its own committed step
+  (packet ED-9, decision 93 E1 (b)). Those companies show "Summary not
+  available" until this run, or a later one, decides them from SEC. The stderr
+  coverage line counts them as `cleared_other_source=N`; stdout doesn't.
 - Failure, exit 1: `{"error_code": "..."}`. `missing_credential` means
-  `FMP_API_KEY` isn't set. `collection_failed` means an FMP request failed (the
-  stderr log names the symbol and a fixed code). Nothing is written on
-  failure, and earlier summaries stay as they were.
+  `SEC_USER_AGENT` isn't set or is the placeholder. `collection_failed` means
+  an SEC request failed (a 403 or 429 included: SEC may block an IP or refuse a
+  User-Agent). The stderr log names the symbol and a fixed code. No summary is
+  written on failure: earlier SEC summaries stay as they were, but the
+  other-source clear above has already happened. `missing_credential` stops
+  before the clear, so that run changes nothing.
 - Exit 2: a configuration or database error (see stderr).
 
-Each stored summary is shown as "Source: Financial Modeling Prep", linked to
-FMP's public home page, https://financialmodelingprep.com/, for every company
-(decision 78 (a): FMP's per-company page only loads after logging in).
+Each stored summary is shown as "Source: SEC EDGAR", linked to the 10-K
+document it came from:
+`https://www.sec.gov/Archives/edgar/data/<CIK>/<accession number without dashes>/<primary document>`.
+`summary_as_of` stays the time it was stored, not the filing date.
 
-No company text, key or provider response appears in the output or logs.
+No company text, filing URL, User-Agent or provider response appears in the
+output or logs.
 
 ## M3 database observability plan (Supabase PostgreSQL 17)
 
@@ -348,10 +449,11 @@ the administrative login, against the new target database:
    the code: its `schema_revision` is in the manifest. At the current revision
    this does nothing, so always run it. It runs as the administrative login, not
    the migration login as in a deployment, because the restorer owns every
-   restored object until step 4. Skipping it fails closed: a backup at `0009`
-   makes `--phase grants` refuse ("table policy differs"), and one at `0010`
-   (any backup from before the account tables) passes grants, then
-   `provision_api_role.py` fails on the missing `app.email_is_registered`.
+   restored object until step 4. Skipping it never widens access, but it leaves the
+   database behind the code: with a backup older than the code's head,
+   `--phase grants` warns to rerun the grants after the upgrade, and the newer
+   tables don't exist. For any backup from before the account tables,
+   `provision_api_role.py` then fails on the missing `app.email_is_registered`.
 4. **Provision again:** `provision_roles.py --phase grants`, then
    `provision_api_role.py`. They re-own schemas `perennial` and `app` with their
    tables and sequences to the owner role, re-grant both schemas, and re-create
@@ -599,7 +701,7 @@ Archives are encrypted to a recipient **certificate**: the public half, which
 the backup host holds. Only the matching **private key** decrypts them. Losing
 the key makes every archive unreadable; leaking it, together with storage access,
 exposes every archive. Agents never create, hold or see the real key. The
-commands below are for Bryan, on his own machine.
+commands below are for Bryan to run on Bryan's own machine.
 
 **Key and certificate.** Generate an RSA-3072 key that is encrypted at rest from
 the start, plus a self-signed certificate for it:

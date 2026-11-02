@@ -101,7 +101,8 @@ def test_only_the_latest_six_fiscal_years_are_kept():
 def test_client_paces_requests_sends_contact_and_treats_404_as_no_data(monkeypatch):
     calls, clock, slept = [], [0.0], []
 
-    def get(session, url, *, headers, allowed_status):
+    def get(session, url, *, headers, allowed_status, raw=False):
+        assert not raw  # company facts are parsed JSON (S1-12 ED-3 adds raw documents)
         calls.append((url, headers["User-Agent"]))
         return collectors._Response(True, status=404) if "CIK0000000002" in url else collectors._Response(
             True, status=200, data={"facts": {"us-gaap": {}}})
