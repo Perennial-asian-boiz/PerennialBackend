@@ -35,8 +35,7 @@ requirements.txt
 
 ## Quick start: Sprint 1 app
 
-After the Sprint 1 pull requests are merged, clone the default `main` branch of
-both repositories. Use Python 3.12 and Node.js/npm. The steps below run the
+Clone the default `main` branch of both repositories. Use Python 3.12 and Node.js/npm. The steps below run the
 FastAPI app and its matching frontend locally; they do not deploy either app.
 
 ```bash
@@ -182,10 +181,6 @@ FastAPI runs at `http://127.0.0.1:8000` and its API reference is
 that local API URL. The dashboard still uses development fixture data until
 the company-data integration is complete.
 
-If the pull requests have not been merged, clone the matching
-`codex/supabase-auth-resend` branch in **both** repositories instead of the
-default branch.
-
 ## Other backend workflows
 
 ```bash
@@ -203,11 +198,10 @@ It publishes a verified watchlist without source JSON files. Read the
 
 ### Sprint 1: Supabase Auth + FastAPI
 
-The `codex/supabase-auth-resend` branch replaces the temporary custom
-password/OTP/session implementation with Supabase Auth. It follows
-[issue #3](https://github.com/Perennial-asian-boiz/PerennialBackend/issues/3).
-Review this branch together with the matching frontend branch before merging;
-it does not change `main` or the team's company-data collectors.
+Supabase Auth replaced the temporary custom password/OTP/session
+implementation (backend #22 and frontend #6, merged 2026-10-25). It follows
+[issue #3](https://github.com/Perennial-asian-boiz/PerennialBackend/issues/3)
+and does not change the team's company-data collectors.
 
 - **Supabase Auth** owns accounts, password hashing, email OTPs and JWT refresh.
 - **FastAPI** validates each JWT with this project's Supabase Auth `/user`
@@ -238,21 +232,13 @@ recovery flows, then replace Gmail with a transactional sender before real-user
 deployment. Resend requires a verified sending domain; the team does not have
 one yet. Passing offline tests or receiving one email does not prove the full
 authentication flow works.
-Production hosting, HTTPS, secret rotation, monitoring and team merge review
-are separate deployment work, not completed by this branch.
+Production hosting, HTTPS, secret rotation and monitoring are separate
+deployment work.
 
 #### Clone and run
 
-Use Python 3.12 (the CI version) and the matching branch in both repositories:
-
-```bash
-git clone --branch codex/supabase-auth-resend https://github.com/Perennial-asian-boiz/PerennialBackend.git
-git clone --branch codex/supabase-auth-resend https://github.com/Perennial-asian-boiz/PerennialFrontEnd.git
-cd PerennialBackend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-```
+Use Python 3.12 (the CI version). Clone `main` of both repositories and set
+up the virtual environment as in [Quick start](#quick-start-sprint-1-app).
 
 Fill your settings file privately; keep it
 [outside the repository](#your-settings-file-outside-the-repository).
@@ -476,8 +462,8 @@ ownership is established. Preferences/settings/watchlists remain per-user.
 Legacy custom-auth tables/migration files are retained for history/recovery,
 but are no longer read by the API. Old opaque tokens are invalid. Existing
 legacy users need to register with Supabase or follow a separately reviewed
-account/data migration; this branch does not copy passwords or silently
-reassign old user data. Do not delete historical migrations or legacy shared
+account/data migration; the switch to Supabase Auth did not copy passwords
+or silently reassign old user data. Do not delete historical migrations or legacy shared
 data during teammate cleanup. Supabase Auth users can be inspected under
 Authentication → Users; app data is under schema `app` in the Table Editor
 or SQL Editor, not `public`.
