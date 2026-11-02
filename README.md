@@ -93,10 +93,11 @@ running a backend command:
 set -a; . ~/.config/perennial/local.env; set +a
 ```
 
-In Windows PowerShell:
+In Windows PowerShell (not yet tested on Windows; a blank value leaves that
+variable unset, which the code treats the same as empty):
 
 ```powershell
-Get-Content "$HOME\.config\perennial\local.env" | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object { $name, $value = $_ -split '=', 2; Set-Item "Env:$name" ($value -replace '^[''"]|[''"]$', '') }
+Get-Content -Encoding UTF8 "$HOME\.config\perennial\local.env" | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object { $name, $value = $_ -split '=', 2; Set-Item "Env:$name" ($value -replace '^[''"]|[''"]$', '') }
 ```
 
 If you used to keep `development/backend/.env`, delete it once its values are
@@ -286,7 +287,7 @@ CREATE ROLE perennial_api_<name> LOGIN INHERIT
 \password perennial_api_<name>
 ```
 
-`\password` prompts for the password and sends only its hash, so the password
+`\password` prompts for the password and sends only a hash of it, so the password
 stays out of SQL and shell history. The login gets no grants of its own: it
 uses the `perennial_api` group's, and rerunning the grants after a migration
 covers every member. It must stay a member of nothing else, or the API's
