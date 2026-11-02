@@ -46,7 +46,8 @@ MUTABLE += ("current_scores",)
 IMMUTABLE += ("social_posts", "article_sentiment", "news_publishers")  # S1-05
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # M5 read API (perennial_api): published data only, never raw source tables,
-# runs or operator text. Two grants are column-level, so code selects columns.
+# runs or operator text; the one exception is fundamentals' reported line items
+# (decision 113). The API_COLUMNS grants are column-level, so code selects columns.
 API_TABLES = ("publications", "current_publication", "securities", "security_identifiers", "current_scores")
 API_COLUMNS = {
     # S1-12: the stored summary it serves; never summary_grade or description_digest.
@@ -61,6 +62,9 @@ API_COLUMNS = {
                                    "input_version", "record_id"))),
     "score_explanations": ("id", "batch_id", "security_id", "company_score_id", "status", "reason",
                            "template_version", "claims"),
+    # S2-04: Aalind's financials endpoint (decision 113); never concept or row_number.
+    "fundamentals": ("id", "batch_id", "security_id", "fiscal_year_end", "line_item", "value", "unit",
+                     "form", "filed"),
 }
 # What the S1-12 summary job (importer) may write on company_profiles.
 SUMMARY_COLUMNS = ("summary", "summary_grade", "summary_status", "summary_source_name",

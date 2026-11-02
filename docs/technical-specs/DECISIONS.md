@@ -10,6 +10,25 @@ reader can see *why*, not that the decision is final.
 
 ---
 
+## The read API may read fundamentals' line items
+
+**Status:** Accepted
+**Date:** 2026-11-02 (decision 113)
+**Code:** `development/database/ops/provision_roles.py` (`API_COLUMNS["fundamentals"]`)
+
+### Decision
+
+`perennial_api` gets column-level SELECT on nine columns of `perennial.fundamentals`, for the S2-04 Financials endpoint:
+- `id`, `batch_id` and `security_id`;
+- `fiscal_year_end`, `line_item`, `value` and `unit`;
+- `form` and `filed`.
+
+It never gets `concept` (the XBRL tag a value came from) or `row_number` (the batch's internal order). There's no table-level grant and no write.
+
+This is the one exception to "published data only". `fundamentals` is a raw source table, read here for its reported line items. Every other source table, and every run table, stays out of the API's reach. A new column on `fundamentals` isn't granted by default (the spec pins exactly eleven columns), so it needs its own decision.
+
+---
+
 ## Explanation template explain-v2
 
 **Status:** Accepted

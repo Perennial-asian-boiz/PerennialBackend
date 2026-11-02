@@ -73,6 +73,18 @@ COLUMNS = {
         "template_version",
         "claims",
     ),
+    # S2-04 (decision 113): the financials statement; never concept or row_number.
+    "fundamentals": (
+        "id",
+        "batch_id",
+        "security_id",
+        "fiscal_year_end",
+        "line_item",
+        "value",
+        "unit",
+        "form",
+        "filed",
+    ),
 }
 PUBLICATION_KEYS = {
     "id",
