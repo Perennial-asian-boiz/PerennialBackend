@@ -365,9 +365,7 @@ def score_articles(
                 )
             else:
                 try:
-                    outcome = _scores_outcome(
-                        articles, scorer, fetcher, news.batch_id
-                    )
+                    outcome = _scores_outcome(articles, scorer, fetcher, news.batch_id)
                 except Exception as exc:  # the class name only: never a headline
                     outcome = CollectionOutcome.failure(
                         SOURCE,
