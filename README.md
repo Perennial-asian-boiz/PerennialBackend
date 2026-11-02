@@ -46,17 +46,14 @@ cd PerennialBackend
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements-dev.txt
-cp development/backend/.env.example development/backend/.env
 ```
 
-On Windows PowerShell, use these equivalents for the virtual environment and
-copy step:
+On Windows PowerShell, use these equivalents for the virtual environment:
 
 ```powershell
 py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.txt
-Copy-Item development/backend/.env.example development/backend/.env
 ```
 
 Ask the project maintainer for the required local Supabase and database
@@ -65,6 +62,67 @@ configuration through an approved private channel. Do not commit or post
 Provider keys for the separate company-data pipeline are not needed just to
 run the authentication app.
 
+### Your settings file, outside the repository
+
+Keep your filled-in settings in a file outside the clone, for example
+`~/.config/perennial/local.env`:
+
+- `.gitignore` only stops `git add`. A file inside the clone still travels
+  when the folder is zipped, shared or synced, is deleted by `git clean -fdx`,
+  and is read by editors and AI tools that index the whole working tree.
+- One file serves every clone and worktree, so there is one copy to protect
+  and update.
+
+```bash
+mkdir -p ~/.config/perennial
+cp development/backend/.env.example ~/.config/perennial/local.env
+chmod 600 ~/.config/perennial/local.env
+```
+
+Fill it in privately (the settings are listed under
+[Clone and run](#clone-and-run)). Put every value in single quotes, for
+example `SEC_USER_AGENT='Perennial research you@example.com'`: the shell
+reads this file, so a space, `&` or `$` in an unquoted value breaks it.
+
+The code has no setting for another file location. The API reads only
+`development/backend/.env`, and only if it exists; Alembic and the pipeline
+commands read that file only with `PERENNIAL_ENV=local`. Exported environment
+variables win over it everywhere. So load your file into each terminal before
+running a backend command:
+
+```bash
+set -a; . ~/.config/perennial/local.env; set +a
+```
+
+In Windows PowerShell:
+
+```powershell
+Get-Content "$HOME\.config\perennial\local.env" | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object { $name, $value = $_ -split '=', 2; Set-Item "Env:$name" ($value -replace '^[''"]|[''"]$', '') }
+```
+
+If you used to keep `development/backend/.env`, delete it once its values are
+in the new file: the API still reads any setting your exported ones don't
+cover.
+
+### Your API database login
+
+The API connects only through `API_DATABASE_URL`, and that URL must name your
+own login whose only membership is the `perennial_api` group. Never put the
+owner, `postgres` or migration login there (the one in `DATABASE_URL` or
+`OPS_DATABASE_URL`). There is no fallback to `DATABASE_URL`: without
+`API_DATABASE_URL` the API stops with "API_DATABASE_URL must name the
+dedicated API login". At startup it also refuses a login that is a superuser,
+can create roles or databases, replicates or bypasses RLS, owns anything,
+holds more than provisioning grants, or is a member of any role other than
+`perennial_api`. It then logs "api_login_refused: the API login failed its
+startup check" and does not start.
+
+The database owner creates one login per person
+([recipe](#per-person-api-login)), so one person's access can be turned off
+without touching anyone else's.
+
+### Migrate and run
+
 The database migration updates the database schema. For the team's shared
 Supabase project, coordinate with the maintainer: an authorized person applies
 pending migrations once, after checking the target project. Do not have every
@@ -72,22 +130,21 @@ teammate run migrations against the shared project. For an isolated local
 database, use the separate [database setup guide](development/database/README.md).
 
 If the maintainer confirms that the shared database needs a migration, run it
-from the backend repository root. The local setting tells the migration tool
-to read `development/backend/.env`:
+from the backend repository root, with your settings file loaded (above):
 
 ```bash
-export PERENNIAL_ENV=local
+set -a; . ~/.config/perennial/local.env; set +a
 cd development/database
 python -m alembic upgrade head
 cd ../backend
 python -m src.api
 ```
 
-In Windows PowerShell, set the same setting with
-`$env:PERENNIAL_ENV = "local"` before running Alembic.
+In Windows PowerShell, load the file with the command above before running
+Alembic.
 
-If migrations have already been applied, start the API from
-`PerennialBackend/development/backend` instead:
+If migrations have already been applied, load your settings file and start
+the API from `PerennialBackend/development/backend` instead:
 
 ```bash
 python -m src.api
@@ -97,24 +154,33 @@ python -m src.api
 access log off (auth links carry tokens), its own proxy handling off (the app
 installs the only proxy middleware) and its loggers on the app's JSON handler.
 `API_HOST` and `API_PORT` pick the listener (default `127.0.0.1:8000`). The API
-needs `API_DATABASE_URL` (below) everywhere, including locally.
+needs `API_DATABASE_URL` (above) everywhere, including locally.
 
-In a second terminal, start the frontend:
+In a second terminal, start the frontend on `127.0.0.1`:
 
 ```bash
 cd PerennialFrontEnd
 cp .env.example .env
 npm ci
-npm run dev
+npm run dev -- --host 127.0.0.1
 ```
 
 On Windows PowerShell, replace `cp .env.example .env` with
 `Copy-Item .env.example .env`.
 
-Open `http://localhost:5173`. FastAPI runs at `http://127.0.0.1:8000` and its
-API reference is `http://127.0.0.1:8000/docs`. The frontend's `.env.example`
-already points to that local API URL. The dashboard still uses development
-fixture data until the company-data integration is complete.
+Open `http://127.0.0.1:5173`. Use `127.0.0.1`, not `localhost`, so the page
+and Supabase's email links use the same address: `AUTH_EMAIL_REDIRECT_URL`
+defaults to `http://127.0.0.1:5173/auth/confirm`, the address the
+[dashboard checklist](#supabase-email-dashboard-checklist) allows. Without
+`--host`, Vite listens on `localhost`, which on many machines (macOS included)
+is only the IPv6 address `::1`, so a link to `127.0.0.1:5173` can't connect.
+The API accepts requests from both `http://localhost:5173` and
+`http://127.0.0.1:5173` (`CORS_ORIGINS`).
+
+FastAPI runs at `http://127.0.0.1:8000` and its API reference is
+`http://127.0.0.1:8000/docs`. The frontend's `.env.example` already points to
+that local API URL. The dashboard still uses development fixture data until
+the company-data integration is complete.
 
 If the pull requests have not been merged, clone the matching
 `codex/supabase-auth-resend` branch in **both** repositories instead of the
@@ -186,10 +252,11 @@ cd PerennialBackend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
-cp development/backend/.env.example development/backend/.env
 ```
 
-Fill the ignored backend `.env` privately. Exported environment settings win.
+Fill your settings file privately; keep it
+[outside the repository](#your-settings-file-outside-the-repository).
+Exported environment settings win.
 
 | Setting | Purpose |
 |---|---|
@@ -215,18 +282,58 @@ start. An administrator, using `OPS_DATABASE_URL`:
    six `app` tables and `app.email_is_registered`, and creates the RLS policies
    that name it. Reapply both after every migration.
 
-Then give a dedicated login membership in `perennial_api` and use it in
-`API_DATABASE_URL`. Locally, for example:
+Then give each person a dedicated login and use it in that person's
+`API_DATABASE_URL`.
+
+##### Per-person API login
+
+`provision_roles.py` creates only NOLOGIN groups; it has no option that
+creates a login. Logins are deployment-owned, so the owner creates each one in
+`psql`, connected as the same administrative login that ran
+`provision_roles.py`. Replace `<name>` with a handle of lowercase letters,
+digits and underscores:
 
 ```sql
-CREATE ROLE perennial_api_local LOGIN INHERIT PASSWORD '...' IN ROLE perennial_api;
+CREATE ROLE perennial_api_<name> LOGIN INHERIT
+  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+  IN ROLE perennial_api;
+\password perennial_api_<name>
 ```
 
-The login must be NOSUPERUSER, NOCREATEDB, NOCREATEROLE and NOBYPASSRLS and a
-member of nothing else; the API's startup check refuses anything else.
-Importer/reader groups never receive access to `app`.
+`\password` prompts for the password and sends only its hash, so the password
+stays out of SQL and shell history. The login gets no grants of its own: it
+uses the `perennial_api` group's, and rerunning the grants after a migration
+covers every member. It must stay a member of nothing else, or the API's
+startup check refuses it. Importer/reader groups never receive access to
+`app`.
+
+On the shared Supabase project, the session pooler drops the timeouts the API
+sets when it connects, so also set them on the login (the API's values from
+`src/db/session.py`):
+
+```sql
+ALTER ROLE perennial_api_<name> SET statement_timeout = '5s';
+ALTER ROLE perennial_api_<name> SET lock_timeout = '5s';
+ALTER ROLE perennial_api_<name> SET idle_in_transaction_session_timeout = '60s';
+```
+
+Send the password to that person through the approved private channel. Their
+`API_DATABASE_URL`, with the password URL-encoded:
+
+- Supabase session pooler:
+  `postgresql://perennial_api_<name>.PROJECT_REF:ENCODED_PASSWORD@POOLER_HOST:5432/postgres?sslmode=require`
+- Local Docker database:
+  `postgresql://perennial_api_<name>:ENCODED_PASSWORD@127.0.0.1:5433/perennial`
+
+To turn one person's access off, run
+`ALTER ROLE perennial_api_<name> NOLOGIN;`, then end that login's open
+sessions with
+`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'perennial_api_<name>';`.
+
+With your settings file loaded:
 
 ```bash
+set -a; . ~/.config/perennial/local.env; set +a
 cd development/database
 ../../.venv/bin/alembic upgrade head
 cd ../backend
@@ -234,9 +341,11 @@ cd ../backend
 ```
 
 In the frontend repo, copy `.env.example` to `.env`, keep
-`VITE_API_URL=http://127.0.0.1:8000`, then run `npm ci` and `npm run dev`.
-Open the frontend at port 5173, not the API port. API reference: port 8000
-`/docs`. No Supabase secret, database password or Resend key goes in `VITE_*`.
+`VITE_API_URL=http://127.0.0.1:8000`, then run `npm ci` and
+`npm run dev -- --host 127.0.0.1`. Open `http://127.0.0.1:5173`, not the API
+port (see [Quick start](#quick-start-sprint-1-app) for why `127.0.0.1`). API
+reference: port 8000 `/docs`. No Supabase secret, database password or Resend
+key goes in `VITE_*`.
 
 #### Supabase email dashboard checklist
 
@@ -438,7 +547,11 @@ in production.
   unmergeable.
 - **Never hardcode a path depth.** Import `paths.py` rather than counting
   `parents[N]` or matching on the repo's directory name.
-- **Credentials live in `development/backend/.env`.** Nothing else is loaded.
+- **Credentials come from the environment.** The only file the code loads is
+  `development/backend/.env` (the API always, other commands with
+  `PERENNIAL_ENV=local`), and exported variables win over it. Keep your own
+  file [outside the repository](#your-settings-file-outside-the-repository)
+  and load it into the shell.
 
 ### Backend quality checks
 
