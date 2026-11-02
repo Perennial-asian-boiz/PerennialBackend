@@ -6,7 +6,8 @@ For every ticker in the current production watchlist publication (the consensus
 list), fetch the last WINDOW_DAYS of Finnhub company news, keep the articles that
 name the company (matching.py, match-v1), and store each (security, article)
 pair once: a run's batch holds only the pairs not stored before, and the table's
-UNIQUE (security_id, finnhub_id) rejects any duplicate (AC 4).
+UNIQUE (security_id, finnhub_id) rejects any duplicate (AC 4). An article
+keeps Finnhub's summary too, cut to SUMMARY_CHARS (decision 114).
 
 Each ticker also gets a news_coverage row for the run: 'covered' with counts,
 'no_coverage' when nothing matched, or 'error' with a fixed code when Finnhub
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "news_articles"
 WINDOW_DAYS = 7
+SUMMARY_CHARS = 2000  # news_articles.summary (migration 0020)
 
 
 @dataclass
@@ -93,20 +95,27 @@ def stored_ids(conn: Connection, symbols: list[str]) -> dict[str, set[int]]:
     return out
 
 
+def stored_summary(summary: str) -> str | None:
+    """Finnhub's summary as stored: NULs dropped (Postgres refuses them),
+    whitespace normalized like the headline, then cut to SUMMARY_CHARS rather
+    than refused, since a teaser's head carries its point. None when blank."""
+    return " ".join(summary.replace("\x00", "").split())[:SUMMARY_CHARS] or None
+
+
 def _record(symbol: str, article: RawArticle, rule: str) -> dict[str, Any]:
     digest = hashlib.sha256(
         f"{article.headline}\n{article.summary}".encode()
     ).hexdigest()
+    summary = stored_summary(article.summary)
     return {
         "ticker": symbol,
         "finnhub_id": article.finnhub_id,
         "url": article.url,
         "headline": article.headline,
+        "summary": summary,
         "outlet": article.outlet,
         "published_at": article.published_at,
-        "content_retrieved": "headline_and_summary"
-        if article.summary
-        else "headline_only",
+        "content_retrieved": "headline_and_summary" if summary else "headline_only",
         "match_rule": rule,
         "content_hash": digest,
     }
