@@ -1007,6 +1007,7 @@ def test_every_v1_route_uses_the_helper_exactly_once(engine, fixture_path, group
             assert routes == [
                 "/v1/market-status",
                 "/v1/securities/{symbol}",
+                "/v1/securities/{symbol}/financials",  # S2-04
                 "/v1/securities/{symbol}/score",  # Sprint 2 (S2-01..03)
                 "/v1/watchlist",
             ]
