@@ -1,9 +1,10 @@
-# news_sentiment.py
+# article_scoring.py
 """Score news articles from Supabase with FinBERT and store the scores.
 
 Steps (run_scoring(engine) does all of them):
-    1. fetch_unscored_articles   news_articles rows minus the ids already in
-                                 article_sentiment for this model
+    1. iter_unscored_articles    news_articles rows with no article_sentiment row
+                                 for this model, filtered in SQL and read one
+                                 page (BATCH_ARTICLES) at a time
     2. download_article_texts    article text from each row's url (in parallel)
     3. score_texts_finbert       FinBERT -> one number per article, positive - negative
     4. upload_scores             hands every new score, as one collection, to the
@@ -13,26 +14,38 @@ Steps (run_scoring(engine) does all of them):
                                  and row_number
 
 Reads use psycopg directly. The connection string comes from the engine you
-pass in (or from SUPABASE_DB_URL in the environment / .env).
+pass in (or from DATABASE_URL in the environment / .env).
 
 Hook into the credibility job (between news ingestion and weighting):
-    from src.services.credibility.news_sentiment import run_scoring
+    from src.services.articles_scorer.article_scoring import run_scoring
     import_result = run_scoring(engine)
 
 The importer does not skip duplicates: if one article already has a score from
 this model, the whole import fails. That is why step 1 filters out articles
-already in article_sentiment.
+already in article_sentiment. The NOT EXISTS filter is fast when
+article_sentiment has an index on (news_article_id, model) (a unique
+constraint on those columns counts).
 
-Articles whose page can't be downloaded (paywall, 403, timeout) are scored on
-their headline alone; set HEADLINE_FALLBACK = False to skip them instead, so a
-later run tries the download again.
+Articles whose page can't be downloaded (paywall, 403, timeout, or disallowed
+by the site's robots.txt) are scored on their headline alone; set
+HEADLINE_FALLBACK = False to skip them instead, so a later run tries the
+download again.
+
+Downloading is done openly as a bot: requests carry a user agent that names
+this crawler and a contact address (CONTACT; SCRAPER_CONTACT overrides it),
+every site's robots.txt is checked before each request (including every
+redirect hop), and a site that blocks us (401/403/429) is not retried. We never
+pose as a browser.
 """
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 import json
 import logging
 import os
+import threading
 from typing import Optional
+from urllib.parse import urljoin, urlsplit
+from urllib.robotparser import RobotFileParser
 
 import psycopg
 import requests
@@ -58,8 +71,13 @@ DOWNLOAD_WORKERS = 8
 DOWNLOAD_TIMEOUT = 20        # seconds per request
 MIN_TEXT_CHARS = 200         # shorter extractions count as a failed download
 HEADLINE_FALLBACK = True
-USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
+MAX_REDIRECTS = 5
+# Honest bot identity. Sites can see who we are, read our contact address, and
+# block us through robots.txt. SCRAPER_CONTACT overrides the contact address.
+BOT_NAME = "PerennialSentimentBot"
+BOT_VERSION = "1.0"
+CONTACT = os.environ.get("SCRAPER_CONTACT", "").strip() or "perennial491@gmail.com"
+USER_AGENT = f"{BOT_NAME}/{BOT_VERSION} (+mailto:{CONTACT})"
 
 
 @dataclass
@@ -79,11 +97,11 @@ class ScoringResult:
 # ---- database -------------------------------------------------------------------------------
 def get_db_url():
     load_dotenv()
-    return os.environ["SUPABASE_DB_URL"]
+    return os.environ["DATABASE_URL"]
 
 
 def get_engine(db_url=None):
-    """SQLAlchemy engine for SUPABASE_DB_URL, using the psycopg (v3) driver."""
+    """SQLAlchemy engine for DATABASE_URL, using the psycopg (v3) driver."""
     url = db_url or get_db_url()
     for prefix in ("postgresql://", "postgres://"):
         if url.startswith(prefix):
@@ -96,34 +114,49 @@ def engine_db_url(engine):
     return engine.url.set(drivername="postgresql").render_as_string(hide_password=False)
 
 
-def fetch_articles_info(db_url=None):
-    """All news_articles rows as a list of dicts:
-    {id, symbol, row_number, finnhub_id, url, headline}, ordered by id."""
+_UNSCORED_SQL = f"""
+    SELECT na.id, s.symbol, na.row_number, na.finnhub_id, na.url, na.headline
+    FROM perennial.news_articles AS na
+    JOIN perennial.securities    AS s ON s.id = na.security_id
+    WHERE na.id > %(after_id)s
+      AND NOT EXISTS (SELECT 1 FROM {SCORES_TABLE} AS sc
+                      WHERE sc.news_article_id = na.id AND sc.model = %(model)s)
+    ORDER BY na.id
+    LIMIT %(page)s;
+"""
+
+
+def fetch_unscored_page(conn, model=MODEL_ID, after_id=0, page=BATCH_ARTICLES):
+    """Up to `page` articles `model` hasn't scored, with id > after_id, as dicts:
+    {id, symbol, row_number, finnhub_id, url, headline}, ordered by id.
+
+    The filtering happens in Postgres, so only new articles leave the database,
+    and only one page of them at a time.
+    """
+    cur = conn.execute(_UNSCORED_SQL, {"after_id": after_id, "model": model, "page": page})
+    cols = [c.name for c in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def iter_unscored_articles(db_url=None, model=MODEL_ID, limit=None, page=BATCH_ARTICLES):
+    """Yield pages (lists) of unscored articles, oldest id first, up to `limit` total.
+
+    Keyset pagination (id > last id seen) keeps memory at one page and never
+    returns the same article twice in a run, even if its page fails to score.
+    """
+    remaining = limit
+    after_id = 0
     with psycopg.connect(db_url or get_db_url()) as conn:
-        cur = conn.execute(
-            "SELECT na.id, s.symbol, na.row_number, na.finnhub_id, na.url, na.headline "
-            "FROM perennial.news_articles AS na "
-            "JOIN perennial.securities    AS s ON s.id = na.security_id "
-            "ORDER BY na.id;"
-        )
-        cols = [c.name for c in cur.description]
-        return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def fetch_scored_ids(db_url=None, model=MODEL_ID):
-    """news_article_id values already in article_sentiment for `model`, as a set."""
-    with psycopg.connect(db_url or get_db_url()) as conn:
-        rows = conn.execute(
-            f"SELECT DISTINCT news_article_id FROM {SCORES_TABLE} WHERE model = %s;",
-            (model,),
-        ).fetchall()
-    return {r[0] for r in rows}
-
-
-def fetch_unscored_articles(db_url=None, model=MODEL_ID):
-    """Articles from news_articles that `model` hasn't scored yet."""
-    done = fetch_scored_ids(db_url, model)
-    return [a for a in fetch_articles_info(db_url) if a["id"] not in done]
+        while remaining is None or remaining > 0:
+            size = page if remaining is None else min(page, remaining)
+            rows = fetch_unscored_page(conn, model, after_id, size)
+            if not rows:
+                return
+            yield rows
+            after_id = rows[-1]["id"]
+            if remaining is not None:
+                remaining -= len(rows)
+            conn.commit()       # end the read transaction between pages
 
 
 # ---- upload ---------------------------------------------------------------------------------
@@ -174,22 +207,92 @@ def upload_scores(rows, engine: Engine, *, mode=COLLECTION_MODE,
 
 
 # ---- downloading ----------------------------------------------------------------------------
+_robots: dict = {}              # "scheme://host" -> [lock, RobotFileParser or None]
+_robots_lock = threading.Lock()
+_session_local = threading.local()
+
+
+def _session():
+    """One requests.Session per download thread, carrying the bot's headers."""
+    s = getattr(_session_local, "s", None)
+    if s is None:
+        s = _session_local.s = requests.Session()
+        s.headers.update({"User-Agent": USER_AGENT,
+                          "From": CONTACT,      # the HTTP header meant for a bot's contact
+                          "Accept-Language": "en-US,en;q=0.9"})
+    return s
+
+
+def _robots_for(url):
+    """Parsed robots.txt for url's site, fetched once per site per process."""
+    parts = urlsplit(url)
+    site = f"{parts.scheme}://{parts.netloc}"
+    with _robots_lock:
+        entry = _robots.get(site)
+        if entry is None:
+            entry = _robots[site] = [threading.Lock(), None]
+    lock, rp = entry
+    if rp is not None:
+        return rp
+    with lock:                  # other threads for this site wait for one fetch
+        if entry[1] is None:
+            entry[1] = _fetch_robots(site)
+        return entry[1]
+
+
+def _fetch_robots(site):
+    rp = RobotFileParser()
+    try:
+        resp = _session().get(site + "/robots.txt", timeout=DOWNLOAD_TIMEOUT)
+        if resp.status_code in (401, 403):
+            rp.disallow_all = True          # same rule urllib's own read() uses
+        elif resp.status_code >= 400:
+            rp.allow_all = True             # no robots.txt: everything allowed
+        else:
+            rp.parse(resp.text.splitlines())
+    except requests.RequestException as e:
+        log.debug("robots.txt unavailable for %s: %s", site, e)
+        rp.disallow_all = True              # can't tell, so don't crawl the site
+    return rp
+
+
+def allowed_by_robots(url):
+    """True if url's robots.txt lets our user agent fetch it."""
+    return _robots_for(url).can_fetch(USER_AGENT, url)
+
+
 def download_article_text(url):
     """Main text of the article at `url`, or None if it can't be fetched/extracted.
 
-    Redirects (e.g. Finnhub's redirect links) are followed.
+    Redirects (e.g. Finnhub's redirect links) are followed one hop at a time so
+    robots.txt is checked on every URL we request. Pages robots.txt disallows,
+    and sites that refuse us (401/403/429), give None; we don't work around them.
     """
     if not url:
         return None
     try:
-        resp = requests.get(url, timeout=DOWNLOAD_TIMEOUT, allow_redirects=True,
-                            headers={"User-Agent": USER_AGENT,
-                                     "Accept-Language": "en-US,en;q=0.9"})
+        for _ in range(MAX_REDIRECTS + 1):
+            if urlsplit(url).scheme not in ("http", "https"):
+                return None
+            if not allowed_by_robots(url):
+                log.debug("robots.txt disallows %s", url)
+                return None
+            resp = _session().get(url, timeout=DOWNLOAD_TIMEOUT, allow_redirects=False)
+            if resp.is_redirect and "location" in resp.headers:
+                url = urljoin(url, resp.headers["location"])
+                continue
+            break
+        else:
+            log.debug("too many redirects for %s", url)
+            return None
+        if resp.status_code in (401, 403, 429):
+            log.debug("site refused %s (%s)", url, resp.status_code)
+            return None
         resp.raise_for_status()
     except requests.RequestException as e:
         log.debug("download failed for %s: %s", url, e)
         return None
-    body = trafilatura.extract(resp.text, url=resp.url, include_comments=False,
+    body = trafilatura.extract(resp.text, url=url, include_comments=False,
                                include_tables=False, favor_precision=True)
     if not body or len(body) < MIN_TEXT_CHARS:
         return None
@@ -226,7 +329,7 @@ def run_scoring(engine: Optional[Engine] = None, model=MODEL_ID, limit=None, *,
     Then every score is imported in one import_collection call.
 
     Args:
-        engine: SQLAlchemy engine (default: built from SUPABASE_DB_URL). Reads
+        engine: SQLAlchemy engine (default: built from DATABASE_URL). Reads
             use psycopg on the same database.
         model: model name written to the `model` field.
         limit: optional max number of articles to process this run.
@@ -242,15 +345,11 @@ def run_scoring(engine: Optional[Engine] = None, model=MODEL_ID, limit=None, *,
     db_url = engine_db_url(engine)
     result = last_scoring = ScoringResult(model=model)
 
-    articles = fetch_unscored_articles(db_url, model)
-    if limit is not None:
-        articles = articles[:limit]
-    result.candidates = len(articles)
-    log.info("%d articles to score with %s", len(articles), model)
+    log.info("scoring unscored articles with %s", model)
 
     rows = []
-    for start in range(0, len(articles), BATCH_ARTICLES):
-        batch = articles[start:start + BATCH_ARTICLES]
+    for batch in iter_unscored_articles(db_url, model, limit):
+        result.candidates += len(batch)
         try:
             bodies = download_article_texts([a["url"] for a in batch])
             inputs = []
@@ -274,8 +373,7 @@ def run_scoring(engine: Optional[Engine] = None, model=MODEL_ID, limit=None, *,
             log.exception("batch starting at article id %s failed", batch[0]["id"])
             result.errors.append(f"articles {batch[0]['id']}..{batch[-1]['id']}: {e!r}")
 
-        log.info("%d/%d articles processed", min(start + BATCH_ARTICLES, len(articles)),
-                 len(articles))
+        log.info("%d articles processed", result.candidates)
 
     log.info("scoring summary: %s", result.as_dict())
     return upload_scores(rows, engine, mode=mode, run_id=run_id)
