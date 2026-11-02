@@ -37,6 +37,7 @@ import os
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -91,7 +92,15 @@ def article_text(article: Mapping[str, Any], body: str | None = None) -> str:
     return f"{headline}.\n\n{body}" if headline else body
 
 
-_robots: dict = {}  # "scheme://host" -> [lock, RobotFileParser or None]
+@dataclass
+class _SiteRobots:
+    """One site's robots.txt, fetched at most once; lock serialises the fetch."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    parser: RobotFileParser | None = None
+
+
+_robots: dict[str, _SiteRobots] = {}  # "scheme://host" -> its robots.txt
 _robots_lock = threading.Lock()
 _session_local = threading.local()
 
@@ -118,16 +127,11 @@ def _robots_for(url: str) -> RobotFileParser:
     parts = urlsplit(url)
     site = f"{parts.scheme}://{parts.netloc}"
     with _robots_lock:
-        entry = _robots.get(site)
-        if entry is None:
-            entry = _robots[site] = [threading.Lock(), None]
-    lock, parser = entry
-    if parser is not None:
-        return parser
-    with lock:  # other threads for this site wait for one fetch
-        if entry[1] is None:
-            entry[1] = _fetch_robots(site)
-        return entry[1]
+        entry = _robots.setdefault(site, _SiteRobots())
+    with entry.lock:  # other threads for this site wait for one fetch
+        if entry.parser is None:
+            entry.parser = _fetch_robots(site)
+        return entry.parser
 
 
 def _fetch_robots(site: str) -> RobotFileParser:
@@ -136,14 +140,15 @@ def _fetch_robots(site: str) -> RobotFileParser:
     parser = RobotFileParser()
     try:
         response = _session().get(site + "/robots.txt", timeout=DOWNLOAD_TIMEOUT)
-        if response.status_code in (401, 403):
-            parser.disallow_all = True  # same rule urllib's own read() uses
-        elif response.status_code >= 400:
-            parser.allow_all = True  # no robots.txt: everything allowed
-        else:
-            parser.parse(response.text.splitlines())
     except requests.RequestException:
-        parser.disallow_all = True  # can't tell, so don't crawl the site
+        response = None
+    if response is None or response.status_code in (401, 403):
+        # Can't tell, or refused (the rule urllib's own read() uses): crawl nothing.
+        parser.parse(["User-agent: *", "Disallow: /"])
+    elif response.status_code >= 400:
+        parser.parse([])  # no robots.txt: everything allowed
+    else:
+        parser.parse(response.text.splitlines())
     return parser
 
 
@@ -261,12 +266,12 @@ def finbert() -> Scorer:
         sums = [torch.zeros(len(labels)) for _ in texts]
         weights = [0] * len(texts)
         for i in range(0, len(windows), WINDOW_BATCH):
-            batch = tokenizer.pad(
+            padded = tokenizer.pad(
                 {"input_ids": windows[i : i + WINDOW_BATCH]}, return_tensors="pt"
             )
-            batch = {k: v.to(device) for k, v in batch.items()}
+            inputs = {k: v.to(device) for k, v in padded.items()}
             with torch.no_grad():
-                rows = torch.softmax(model(**batch).logits.float(), dim=-1).cpu()
+                rows = torch.softmax(model(**inputs).logits.float(), dim=-1).cpu()
             for k, row in enumerate(rows, start=i):
                 size = len(windows[k])  # longer windows count for more
                 sums[owners[k]] += row * size
@@ -296,8 +301,8 @@ def _unscored(conn: Connection, start: datetime, end: datetime) -> list[Any]:
 def _scores_outcome(
     articles: Sequence[Any],
     scorer: Scorer | None,
-    fetcher: Fetcher | None,
     news_batch: int,
+    fetcher: Fetcher | None = None,
 ) -> CollectionOutcome:
     score = scorer or finbert()
     fetch = fetcher or download_bodies
@@ -365,7 +370,9 @@ def score_articles(
                 )
             else:
                 try:
-                    outcome = _scores_outcome(articles, scorer, fetcher, news.batch_id)
+                    outcome = _scores_outcome(
+                        articles, scorer, news.batch_id, fetcher=fetcher
+                    )
                 except Exception as exc:  # the class name only: never a headline
                     outcome = CollectionOutcome.failure(
                         SOURCE,
