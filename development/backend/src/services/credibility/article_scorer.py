@@ -1,16 +1,19 @@
 """JOB-7: the S1-04 article scorer for #85's score_articles slot, FinBERT over the
-headline (a stand-in until the article-sentiment-scoring work replaces it).
+headline and Finnhub's summary (a stand-in until the article-sentiment-scoring
+work replaces it).
 
 score_articles is a derived article_sentiment run. Its input is every stored
 news article published in derive_sentiment's window that has no score from
-MODEL_VERSION yet, so a failed run is caught up by the next one and nothing
-outside the window is read. The scorer reads the texts in news_article_id
-order, in chunks of at most BATCH_SIZE; each article's score is
-P(positive) - P(negative). With nothing new to score there is no run at all.
+MODEL_VERSION yet, so a failed run is caught up by the next one, a new
+MODEL_VERSION re-scores the window once, and nothing outside the window is
+read. The scorer reads the texts in news_article_id order, in chunks of at most
+BATCH_SIZE; each article's score is P(positive) - P(negative). With nothing new
+to score there is no run at all.
 
 The run fails closed: the model failing to load (torch or transformers missing,
 or the weights unavailable) or the scorer raising or answering badly fails it
-"scoring_failed" with no batch, and no headline reaches a log or the run record.
+"scoring_failed" with no batch, and no headline or summary reaches a log or the
+run record.
 
 torch and transformers are imported only on the scoring path, so importing this
 module (and CI, which installs neither) never needs them. On first load,
@@ -38,7 +41,9 @@ logger = logging.getLogger(__name__)
 SOURCE, NEWS = "article_sentiment", "news_articles"
 MODEL_NAME = "ProsusAI/finbert"
 MODEL_REVISION = "0bc2ac10dda6929bcb1f77ccc43c7ec5c424f031"  # main as of 2026-11-01
-MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}"
+# "+text2" is the text recipe, headline + summary (decision 114): scores of the
+# headline alone carry no suffix, so the two never share a version.
+MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}+text2"
 MAX_TEXT_CHARS = 512  # BERT reads at most 512 tokens; a headline is far shorter
 BATCH_SIZE = 32
 LABELS = ("positive", "negative", "neutral")
@@ -48,9 +53,12 @@ Scorer = Callable[[Sequence[str]], Sequence[Mapping[str, float]]]
 
 
 def article_text(article: Mapping[str, Any]) -> str:
-    """What the model reads: the headline, stripped and capped. news_articles
-    stores no summary; adding one later changes only this function."""
-    return str(article["headline"]).strip()[:MAX_TEXT_CHARS]
+    """What the model reads: the headline, then the stored summary on its own
+    line (the news job's content-hash join), capped. Without a summary, the
+    headline alone."""
+    headline = str(article["headline"]).strip()
+    summary = (article.get("summary") or "").strip()
+    return (f"{headline}\n{summary}" if summary else headline)[:MAX_TEXT_CHARS]
 
 
 def polarity(probabilities: Mapping[str, float]) -> Decimal:
@@ -111,7 +119,7 @@ def _unscored(conn: Connection, start: datetime, end: datetime) -> list[Any]:
     scored = exists().where(a.c.news_article_id == na.c.id, a.c.model == MODEL_VERSION)
     return list(
         conn.execute(
-            select(na.c.id, m.securities.c.symbol, na.c.headline)
+            select(na.c.id, m.securities.c.symbol, na.c.headline, na.c.summary)
             .join(m.securities, m.securities.c.id == na.c.security_id)
             .where(na.c.published_at >= start, na.c.published_at <= end, ~scored)
             .order_by(na.c.id)
