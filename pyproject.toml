@@ -13,7 +13,7 @@ dependencies = [
     "alembic==1.20.0",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
-    "pypdf==6.21.2",
+    "pypdf==6.21.4",
     # M5 read API; the same pins as #22 so its rebase is a lock recompile.
     "fastapi==0.143.1",
     "uvicorn==0.34.0",
@@ -37,18 +37,12 @@ dev = [
     # starlette 1.9's TestClient imports httpx2 (httpx is deprecated there).
     "httpx2==2.13.1",
 ]
-# News-article sentiment scorer (src/services/articles_scorer). Kept out of the
-# base install so only the scoring job downloads torch. The jobs run on Linux,
-# where PyPI's torch pulls in ~3GB of CUDA libraries; the +cpu build comes from
-# the PyTorch CPU index instead. Compile on Linux with Python 3.12:
-#   pip-compile --allow-unsafe --extra=sentiment --generate-hashes \
-#     --extra-index-url https://download.pytorch.org/whl/cpu \
-#     --output-file=requirements-sentiment.lock pyproject.toml
-sentiment = [
-    "torch==2.15.0+cpu",
-    "transformers==5.22.1",
-    "huggingface-hub==2.4.0",
-    "trafilatura==2.3.1",
+# JOB-7's FinBERT article scorer, for the worker that runs --job sentiment only.
+# Locked separately in requirements-scorer.lock (CPU torch from PyTorch's index);
+# CI and requirements*.lock never install it (test_article_scorer pins that).
+scorer = [
+    "torch==2.14.1+cpu",
+    "transformers==5.20.1",
 ]
 
 [tool.ruff]
@@ -63,6 +57,7 @@ include = [
     "development/backend/sentiment/**/*.py",
     "development/database/ops/quality_gate.py",
     "development/database/ops/provision_api_role.py",
+    "development/database/ops/seed_names.py",
     "development/backend/tests/test_supabase_accounts.py",
     "development/backend/tests/test_pr22_auth_hardening.py",
     "development/backend/tests/test_pr22_auth_hardening_edges.py",
@@ -104,9 +99,11 @@ files = [
     "development/backend/src/ingestion",
     "development/backend/src/pipeline",
     "development/backend/src/services/fundamentals",
+    "development/backend/src/services/scores",
     "development/backend/src/services/news/finnhub.py",
     "development/backend/src/services/news/matching.py",
     "development/backend/src/services/news/job.py",
+    "development/backend/src/services/credibility",
     # Decision 29: the read API, the dashboard adapters and the integrated app;
     # #22's accounts, supabase_auth and account_models get typed in a follow-up.
     "development/backend/src/api/__init__.py",
@@ -125,6 +122,11 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = ["src.services.*"]
 follow_imports = "skip"
+
+[[tool.mypy.overrides]]
+# JOB-7's FinBERT scorer imports these lazily; CI installs neither.
+module = ["torch", "transformers"]
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 # Not yet strict (decision 29): analyzed for app.py's imports, errors not reported.
