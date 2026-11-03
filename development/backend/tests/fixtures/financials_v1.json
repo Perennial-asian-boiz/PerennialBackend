@@ -1,0 +1,149 @@
+{
+  "_comment": "S2-04 AC 3: fundamentals rows per company and the /financials body each must produce (batch_id aside). Rows: [fiscal_year_end, line_item, value, unit, form, filed].",
+  "ZZFA": {
+    "_case": "full: four years with 2023 missing, so 2024 has no growth; the latest filed row sets a year's form",
+    "rows": [
+      ["2025-12-31", "revenue", "1200", "USD", "10-K", "2026-02-01"],
+      ["2025-12-31", "net_income", "180", "USD", "10-K", "2026-02-01"],
+      ["2025-12-31", "long_term_debt", "400", "USD", "10-K", "2026-02-01"],
+      ["2025-12-31", "equity", "800", "USD", "10-K/A", "2026-03-15"],
+      ["2025-12-31", "operating_cash_flow", "250", "USD", "10-K", "2026-02-01"],
+      ["2025-12-31", "assets", "5000", "USD", "10-K", "2026-02-01"],
+      ["2024-12-31", "revenue", "1000", "USD", "10-K", "2025-02-03"],
+      ["2024-12-31", "net_income", "100", "USD", "10-K", "2025-02-03"],
+      ["2024-12-31", "long_term_debt", "500", "USD", "10-K", "2025-02-03"],
+      ["2024-12-31", "equity", "1000", "USD", "10-K", "2025-02-03"],
+      ["2024-12-31", "operating_cash_flow", "200", "USD", "10-K", "2025-02-03"],
+      ["2022-12-31", "revenue", "900", "USD", "10-K", "2023-02-06"],
+      ["2022-12-31", "net_income", "90", "USD", "10-K", "2023-02-06"],
+      ["2022-12-31", "long_term_debt", "300", "USD", "10-K", "2023-02-06"],
+      ["2022-12-31", "equity", "600", "USD", "10-K", "2023-02-06"],
+      ["2022-12-31", "operating_cash_flow", "150", "USD", "10-K", "2023-02-06"],
+      ["2021-12-31", "revenue", "750", "USD", "10-K", "2022-02-07"],
+      ["2021-12-31", "net_income", "-30", "USD", "10-K", "2022-02-07"],
+      ["2021-12-31", "long_term_debt", "300", "USD", "10-K", "2022-02-07"],
+      ["2021-12-31", "equity", "500", "USD", "10-K", "2022-02-07"],
+      ["2021-12-31", "operating_cash_flow", "100", "USD", "10-K", "2022-02-07"]
+    ],
+    "expected": {
+      "source": "SEC EDGAR",
+      "status": "ok",
+      "revenue_basis": "revenue",
+      "years": [
+        {"fiscal_year_end": "2025-12-31", "form": "10-K/A", "filed": "2026-03-15",
+         "revenue": {"value": 1200.0, "unit": "USD"}, "net_income": {"value": 180.0, "unit": "USD"},
+         "long_term_debt": {"value": 400.0, "unit": "USD"}, "equity": {"value": 800.0, "unit": "USD"},
+         "operating_cash_flow": {"value": 250.0, "unit": "USD"},
+         "revenue_growth": 0.2, "net_margin": 0.15, "debt_to_equity": 0.5},
+        {"fiscal_year_end": "2024-12-31", "form": "10-K", "filed": "2025-02-03",
+         "revenue": {"value": 1000.0, "unit": "USD"}, "net_income": {"value": 100.0, "unit": "USD"},
+         "long_term_debt": {"value": 500.0, "unit": "USD"}, "equity": {"value": 1000.0, "unit": "USD"},
+         "operating_cash_flow": {"value": 200.0, "unit": "USD"},
+         "revenue_growth": null, "net_margin": 0.1, "debt_to_equity": 0.5},
+        {"fiscal_year_end": "2022-12-31", "form": "10-K", "filed": "2023-02-06",
+         "revenue": {"value": 900.0, "unit": "USD"}, "net_income": {"value": 90.0, "unit": "USD"},
+         "long_term_debt": {"value": 300.0, "unit": "USD"}, "equity": {"value": 600.0, "unit": "USD"},
+         "operating_cash_flow": {"value": 150.0, "unit": "USD"},
+         "revenue_growth": 0.2, "net_margin": 0.1, "debt_to_equity": 0.5},
+        {"fiscal_year_end": "2021-12-31", "form": "10-K", "filed": "2022-02-07",
+         "revenue": {"value": 750.0, "unit": "USD"}, "net_income": {"value": -30.0, "unit": "USD"},
+         "long_term_debt": {"value": 300.0, "unit": "USD"}, "equity": {"value": 500.0, "unit": "USD"},
+         "operating_cash_flow": {"value": 100.0, "unit": "USD"},
+         "revenue_growth": null, "net_margin": -0.04, "debt_to_equity": 0.6}
+      ]
+    }
+  },
+  "ZZFM": {
+    "_case": "a missing line item, and values in different currency units",
+    "rows": [
+      ["2025-06-30", "revenue", "500", "USD", "20-F", "2025-10-20"],
+      ["2025-06-30", "long_term_debt", "100", "EUR", "20-F", "2025-10-20"],
+      ["2025-06-30", "equity", "400", "USD", "20-F", "2025-10-20"],
+      ["2024-06-30", "revenue", "400", "EUR", "20-F", "2024-10-21"],
+      ["2024-06-30", "net_income", "40", "USD", "20-F", "2024-10-21"],
+      ["2024-06-30", "long_term_debt", "100", "USD", "20-F", "2024-10-21"],
+      ["2024-06-30", "equity", "200", "USD", "20-F", "2024-10-21"]
+    ],
+    "expected": {
+      "source": "SEC EDGAR",
+      "status": "ok",
+      "revenue_basis": "revenue",
+      "years": [
+        {"fiscal_year_end": "2025-06-30", "form": "20-F", "filed": "2025-10-20",
+         "revenue": {"value": 500.0, "unit": "USD"}, "net_income": null,
+         "long_term_debt": {"value": 100.0, "unit": "EUR"}, "equity": {"value": 400.0, "unit": "USD"},
+         "operating_cash_flow": null,
+         "revenue_growth": null, "net_margin": null, "debt_to_equity": null},
+        {"fiscal_year_end": "2024-06-30", "form": "20-F", "filed": "2024-10-21",
+         "revenue": {"value": 400.0, "unit": "EUR"}, "net_income": {"value": 40.0, "unit": "USD"},
+         "long_term_debt": {"value": 100.0, "unit": "USD"}, "equity": {"value": 200.0, "unit": "USD"},
+         "operating_cash_flow": null,
+         "revenue_growth": null, "net_margin": null, "debt_to_equity": 0.5}
+      ]
+    }
+  },
+  "ZZFB": {
+    "_case": "a bank: revenue is revenue net of interest, as the fundamentals score uses",
+    "rows": [
+      ["2025-12-31", "revenue", "1000", "USD", "10-K", "2026-02-20"],
+      ["2025-12-31", "revenue_net_of_interest", "800", "USD", "10-K", "2026-02-20"],
+      ["2025-12-31", "noninterest_expense", "500", "USD", "10-K", "2026-02-20"],
+      ["2025-12-31", "net_income", "200", "USD", "10-K", "2026-02-20"],
+      ["2025-12-31", "long_term_debt", "1000", "USD", "10-K", "2026-02-20"],
+      ["2025-12-31", "equity", "2000", "USD", "10-K", "2026-02-20"],
+      ["2024-12-31", "revenue", "900", "USD", "10-K", "2025-02-21"],
+      ["2024-12-31", "revenue_net_of_interest", "640", "USD", "10-K", "2025-02-21"],
+      ["2024-12-31", "noninterest_expense", "450", "USD", "10-K", "2025-02-21"],
+      ["2024-12-31", "net_income", "160", "USD", "10-K", "2025-02-21"],
+      ["2024-12-31", "long_term_debt", "1000", "USD", "10-K", "2025-02-21"],
+      ["2024-12-31", "equity", "2500", "USD", "10-K", "2025-02-21"]
+    ],
+    "expected": {
+      "source": "SEC EDGAR",
+      "status": "ok",
+      "revenue_basis": "revenue_net_of_interest",
+      "years": [
+        {"fiscal_year_end": "2025-12-31", "form": "10-K", "filed": "2026-02-20",
+         "revenue": {"value": 800.0, "unit": "USD"}, "net_income": {"value": 200.0, "unit": "USD"},
+         "long_term_debt": {"value": 1000.0, "unit": "USD"}, "equity": {"value": 2000.0, "unit": "USD"},
+         "operating_cash_flow": null,
+         "revenue_growth": 0.25, "net_margin": 0.25, "debt_to_equity": 0.5},
+        {"fiscal_year_end": "2024-12-31", "form": "10-K", "filed": "2025-02-21",
+         "revenue": {"value": 640.0, "unit": "USD"}, "net_income": {"value": 160.0, "unit": "USD"},
+         "long_term_debt": {"value": 1000.0, "unit": "USD"}, "equity": {"value": 2500.0, "unit": "USD"},
+         "operating_cash_flow": null,
+         "revenue_growth": null, "net_margin": 0.25, "debt_to_equity": 0.4}
+      ]
+    }
+  },
+  "ZZFN": {
+    "_case": "negative equity and revenue at or below zero",
+    "rows": [
+      ["2025-12-31", "revenue", "-50", "USD", "10-K", "2026-02-02"],
+      ["2025-12-31", "net_income", "10", "USD", "10-K", "2026-02-02"],
+      ["2025-12-31", "long_term_debt", "100", "USD", "10-K", "2026-02-02"],
+      ["2025-12-31", "equity", "-500", "USD", "10-K", "2026-02-02"],
+      ["2024-12-31", "revenue", "0", "USD", "10-K", "2025-02-03"],
+      ["2024-12-31", "net_income", "5", "USD", "10-K", "2025-02-03"],
+      ["2024-12-31", "long_term_debt", "100", "USD", "10-K", "2025-02-03"],
+      ["2024-12-31", "equity", "100", "USD", "10-K", "2025-02-03"]
+    ],
+    "expected": {
+      "source": "SEC EDGAR",
+      "status": "ok",
+      "revenue_basis": "revenue",
+      "years": [
+        {"fiscal_year_end": "2025-12-31", "form": "10-K", "filed": "2026-02-02",
+         "revenue": {"value": -50.0, "unit": "USD"}, "net_income": {"value": 10.0, "unit": "USD"},
+         "long_term_debt": {"value": 100.0, "unit": "USD"}, "equity": {"value": -500.0, "unit": "USD"},
+         "operating_cash_flow": null,
+         "revenue_growth": null, "net_margin": null, "debt_to_equity": null},
+        {"fiscal_year_end": "2024-12-31", "form": "10-K", "filed": "2025-02-03",
+         "revenue": {"value": 0.0, "unit": "USD"}, "net_income": {"value": 5.0, "unit": "USD"},
+         "long_term_debt": {"value": 100.0, "unit": "USD"}, "equity": {"value": 100.0, "unit": "USD"},
+         "operating_cash_flow": null,
+         "revenue_growth": null, "net_margin": null, "debt_to_equity": 1.0}
+      ]
+    }
+  }
+}

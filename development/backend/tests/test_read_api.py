@@ -1007,6 +1007,7 @@ def test_every_v1_route_uses_the_helper_exactly_once(engine, fixture_path, group
             assert routes == [
                 "/v1/market-status",
                 "/v1/securities/{symbol}",
+                "/v1/securities/{symbol}/financials",  # S2-04
                 "/v1/securities/{symbol}/score",  # Sprint 2 (S2-01..03)
                 "/v1/watchlist",
             ]
@@ -1092,6 +1093,7 @@ def test_v1_routes_are_exactly_the_r1_reads_and_market_status():
         "/v1/securities/{symbol}": ["GET"],
         "/v1/market-status": ["GET"],  # S1-11
         "/v1/securities/{symbol}/score": ["GET"],  # Sprint 2 (S2-01..03)
+        "/v1/securities/{symbol}/financials": ["GET"],  # S2-04
     }
     assert callable(create_app)
 

@@ -30,6 +30,7 @@ text.
 import logging
 import re
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 from pr22_support import drop_roles, ops_module, provision_roles, role_names
@@ -55,9 +56,22 @@ def _head():
     return _script().get_current_head()
 
 
+def _created(revision):
+    source = Path(revision.path).read_text()
+    return set(re.findall(r"create_table\(\s*[\"'](\w+)[\"']", source))
+
+
+def _newest_table_migration():
+    """The newest migration that creates listed tables. Not always the head: 0020
+    (decision 114) only adds a column."""
+    listed = set(ops_module("provision_roles").TABLES)
+    return next(r for r in _script().walk_revisions() if _created(r) & listed)
+
+
 def _behind_head():
-    """The head's down_revision: the newest migration's tables are still missing."""
-    return _script().get_revision(_head()).down_revision
+    """Just before the newest table-creating migration: its tables are still missing,
+    and the version is an ancestor of the head."""
+    return _newest_table_migration().down_revision
 
 
 def _tables(scratch):
@@ -124,13 +138,11 @@ def roles(engine):
         drop_roles(engine, names.values())
 
 
-def test_the_newest_migration_adds_listed_tables():
-    """The behind-head cases need the head migration to create perennial tables."""
-    from pathlib import Path
-
-    source = Path(_script().get_revision(_head()).path).read_text()
-    created = set(re.findall(r"create_table\(\s*[\"'](\w+)[\"']", source))
-    assert created & set(ops_module("provision_roles").TABLES), created
+def test_a_migration_adds_listed_tables_behind_the_head():
+    """The behind-head cases need a migration that creates perennial tables."""
+    newest = _newest_table_migration()
+    assert _created(newest) & set(ops_module("provision_roles").TABLES)
+    assert newest.down_revision in {r.revision for r in _script().walk_revisions()}
 
 
 @pytest.mark.db

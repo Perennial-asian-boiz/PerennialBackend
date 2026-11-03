@@ -135,6 +135,77 @@
         "summary": "Get Security"
       }
     },
+    "/v1/securities/{symbol}/financials": {
+      "get": {
+        "description": "A security's yearly SEC EDGAR figures, with growth, margin and debt/equity (S2-04).\n\n200 with status \"unavailable\" when nothing is stored for it; 404 only for an\nunknown ticker.",
+        "operationId": "get_financials_v1_securities__symbol__financials_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FinancialsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown_security"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "invalid_request"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Financials"
+      }
+    },
     "/v1/securities/{symbol}/score": {
       "get": {
         "description": "A security's current Confidence Score, its breakdown and why it is recommended.\n\n200 with score.status \"unavailable\" when the current scores batch has no row\nfor it; 404 only for an unknown ticker.",
@@ -258,6 +329,25 @@
     }
   },
   "schemas": {
+    "Amount": {
+      "properties": {
+        "unit": {
+          "description": "As filed: an ISO currency code, e.g. USD",
+          "title": "Unit",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "value",
+        "unit"
+      ],
+      "title": "Amount",
+      "type": "object"
+    },
     "Claim": {
       "description": "One sentence and the stored record it came from. Unknown keys are dropped.",
       "properties": {
@@ -420,6 +510,195 @@
         "claims"
       ],
       "title": "Explanation",
+      "type": "object"
+    },
+    "FinancialYear": {
+      "properties": {
+        "debt_to_equity": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Debt To Equity"
+        },
+        "equity": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Amount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "filed": {
+          "description": "When that figure was filed",
+          "title": "Filed",
+          "type": "string"
+        },
+        "fiscal_year_end": {
+          "title": "Fiscal Year End",
+          "type": "string"
+        },
+        "form": {
+          "description": "The form of the year's latest filed figure",
+          "title": "Form",
+          "type": "string"
+        },
+        "long_term_debt": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Amount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "net_income": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Amount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "net_margin": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Net Margin"
+        },
+        "operating_cash_flow": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Amount"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "revenue": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Amount"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Revenue net of interest for a bank (see revenue_basis)"
+        },
+        "revenue_growth": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Against the next-older year, if it ended about a year earlier",
+          "title": "Revenue Growth"
+        }
+      },
+      "required": [
+        "fiscal_year_end",
+        "form",
+        "filed",
+        "revenue",
+        "net_income",
+        "long_term_debt",
+        "equity",
+        "operating_cash_flow",
+        "revenue_growth",
+        "net_margin",
+        "debt_to_equity"
+      ],
+      "title": "FinancialYear",
+      "type": "object"
+    },
+    "FinancialsResponse": {
+      "properties": {
+        "api_version": {
+          "examples": [
+            "v1"
+          ],
+          "title": "Api Version",
+          "type": "string"
+        },
+        "batch_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The fundamentals batch served",
+          "title": "Batch Id"
+        },
+        "revenue_basis": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "revenue, or revenue_net_of_interest for a bank; null when unavailable",
+          "title": "Revenue Basis"
+        },
+        "source": {
+          "examples": [
+            "SEC EDGAR"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "status": {
+          "description": "ok, or unavailable when nothing is stored",
+          "title": "Status",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "The canonical ticker",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "years": {
+          "description": "Newest first; empty when unavailable",
+          "items": {
+            "$ref": "#/components/schemas/FinancialYear"
+          },
+          "title": "Years",
+          "type": "array"
+        }
+      },
+      "required": [
+        "api_version",
+        "symbol",
+        "source",
+        "status",
+        "batch_id",
+        "revenue_basis",
+        "years"
+      ],
+      "title": "FinancialsResponse",
       "type": "object"
     },
     "MarketStatusResponse": {

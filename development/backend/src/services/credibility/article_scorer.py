@@ -1,34 +1,23 @@
-"""JOB-7: the S1-04 article scorer for #85's score_articles slot, FinBERT over each
-article's full text, falling back to its headline.
+"""JOB-7: the S1-04 article scorer for #85's score_articles slot, FinBERT over the
+headline and Finnhub's summary (a stand-in until the article-sentiment-scoring
+work replaces it).
 
 score_articles is a derived article_sentiment run. Its input is every stored
 news article published in derive_sentiment's window that has no score from
-MODEL_VERSION yet, so a failed run is caught up by the next one and nothing
-outside the window is read. For each article the page at its url is downloaded
-and its main text extracted; when that fails (paywall, block, timeout, too
-little text, or disallowed by the site's robots.txt) the article is scored
-on its headline alone, never skipped. The
-scorer reads the texts in news_article_id order, in chunks of at most
-BATCH_SIZE articles; a text longer than FinBERT's 512-token window is split
-into overlapping windows whose probabilities are averaged, weighted by length.
-Each article's score is P(positive) - P(negative). With nothing new to score
-there is no run at all.
+MODEL_VERSION yet, so a failed run is caught up by the next one, a new
+MODEL_VERSION re-scores the window once, and nothing outside the window is
+read. The scorer reads the texts in news_article_id order, in chunks of at most
+BATCH_SIZE; each article's score is P(positive) - P(negative). With nothing new
+to score there is no run at all.
 
 The run fails closed: the model failing to load (torch or transformers missing,
 or the weights unavailable) or the scorer raising or answering badly fails it
-"scoring_failed" with no batch, and no headline, url or article text reaches a
-log or the run record. A failed download is not a failure: it falls back.
+"scoring_failed" with no batch, and no headline or summary reaches a log or the
+run record.
 
-Downloading is done openly as a bot: requests carry a user agent that names
-this crawler and a contact address (CONTACT; SCRAPER_CONTACT overrides it),
-every site's robots.txt is checked before each request (including every
-redirect hop), and a site that blocks us (401/403/429) is not retried. We never
-pose as a browser.
-
-torch, transformers, requests and trafilatura are imported only on the scoring
-path, so importing this module (and CI, which installs none of them) never
-needs them. On first load, transformers fetches the pinned weights from the
-Hugging Face hub.
+torch and transformers are imported only on the scoring path, so importing this
+module (and CI, which installs neither) never needs them. On first load,
+transformers fetches the pinned weights from the Hugging Face hub.
 """
 
 import logging
@@ -58,11 +47,11 @@ logger = logging.getLogger(__name__)
 SOURCE, NEWS = "article_sentiment", "news_articles"
 MODEL_NAME = "ProsusAI/finbert"
 MODEL_REVISION = "0bc2ac10dda6929bcb1f77ccc43c7ec5c424f031"  # main as of 2026-11-01
-MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}"
-MAX_TOKENS = 512  # FinBERT's window, special tokens included
-STRIDE = 64  # tokens shared by neighbouring windows of one long text
-BATCH_SIZE = 32  # articles per scorer call
-WINDOW_BATCH = 16  # 512-token windows per forward pass
+# "+text2" is the text recipe, headline + summary (decision 114): scores of the
+# headline alone carry no suffix, so the two never share a version.
+MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}+text2"
+MAX_TEXT_CHARS = 512  # BERT reads at most 512 tokens; a headline is far shorter
+BATCH_SIZE = 32
 LABELS = ("positive", "negative", "neutral")
 
 DOWNLOAD_WORKERS = 8
@@ -82,135 +71,13 @@ Scorer = Callable[[Sequence[str]], Sequence[Mapping[str, float]]]
 Fetcher = Callable[[Sequence[str | None]], Sequence[str | None]]
 
 
-def article_text(article: Mapping[str, Any], body: str | None = None) -> str:
-    """What the model reads: the headline followed by the downloaded body, or
-    the headline alone when there is no body. The scorer handles any length."""
-    headline = str(article["headline"] or "").strip()
-    body = (body or "").strip()
-    if not body:
-        return headline
-    return f"{headline}.\n\n{body}" if headline else body
-
-
-@dataclass
-class _SiteRobots:
-    """One site's robots.txt, fetched at most once; lock serialises the fetch."""
-
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    parser: RobotFileParser | None = None
-
-
-_robots: dict[str, _SiteRobots] = {}  # "scheme://host" -> its robots.txt
-_robots_lock = threading.Lock()
-_session_local = threading.local()
-
-
-def _session() -> Any:
-    """One requests.Session per download thread, carrying the bot's headers."""
-    import requests
-
-    session = getattr(_session_local, "s", None)
-    if session is None:
-        session = _session_local.s = requests.Session()
-        session.headers.update(
-            {
-                "User-Agent": USER_AGENT,
-                "From": CONTACT,  # the HTTP header meant for a bot's contact
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-        )
-    return session
-
-
-def _robots_for(url: str) -> RobotFileParser:
-    """Parsed robots.txt for url's site, fetched once per site per process."""
-    parts = urlsplit(url)
-    site = f"{parts.scheme}://{parts.netloc}"
-    with _robots_lock:
-        entry = _robots.setdefault(site, _SiteRobots())
-    with entry.lock:  # other threads for this site wait for one fetch
-        if entry.parser is None:
-            entry.parser = _fetch_robots(site)
-        return entry.parser
-
-
-def _fetch_robots(site: str) -> RobotFileParser:
-    import requests
-
-    parser = RobotFileParser()
-    try:
-        response = _session().get(site + "/robots.txt", timeout=DOWNLOAD_TIMEOUT)
-    except requests.RequestException:
-        response = None
-    if response is None or response.status_code in (401, 403):
-        # Can't tell, or refused (the rule urllib's own read() uses): crawl nothing.
-        parser.parse(["User-agent: *", "Disallow: /"])
-    elif response.status_code >= 400:
-        parser.parse([])  # no robots.txt: everything allowed
-    else:
-        parser.parse(response.text.splitlines())
-    return parser
-
-
-def allowed_by_robots(url: str) -> bool:
-    """True if url's robots.txt lets our user agent fetch it."""
-    return _robots_for(url).can_fetch(USER_AGENT, url)
-
-
-def _download(url: str | None) -> str | None:
-    """The main text of the page at url, or None if it can't be had.
-
-    Redirects (e.g. Finnhub's redirect links) are followed one hop at a time so
-    robots.txt is checked on every URL we request. Pages robots.txt disallows,
-    and sites that refuse us (401/403/429), give None; we don't work around
-    them. Nothing here logs: a url must not reach a log.
-    """
-    import requests
-    import trafilatura
-
-    if not url:
-        return None
-    try:
-        for _ in range(MAX_REDIRECTS + 1):
-            if urlsplit(url).scheme not in ("http", "https"):
-                return None
-            if not allowed_by_robots(url):
-                return None
-            response = _session().get(
-                url, timeout=DOWNLOAD_TIMEOUT, allow_redirects=False
-            )
-            if response.is_redirect and "location" in response.headers:
-                url = urljoin(url, response.headers["location"])
-                continue
-            break
-        else:
-            return None  # too many redirects
-        if response.status_code in (401, 403, 429):
-            return None
-        response.raise_for_status()
-    except requests.RequestException:
-        return None
-    body = trafilatura.extract(
-        response.text,
-        url=url,
-        include_comments=False,
-        include_tables=False,
-        favor_precision=True,
-    )
-    return body if body and len(body) >= MIN_BODY_CHARS else None
-
-
-def download_bodies(urls: Sequence[str | None]) -> list[str | None]:
-    """_download for every url, in parallel; results in input order. Without
-    requests or trafilatura installed every article falls back to its headline."""
-    try:
-        import requests  # noqa: F401
-        import trafilatura  # noqa: F401
-    except ImportError:
-        logger.warning("article scores: requests/trafilatura missing, headlines only")
-        return [None] * len(urls)
-    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as pool:
-        return list(pool.map(_download, urls))
+def article_text(article: Mapping[str, Any]) -> str:
+    """What the model reads: the headline, then the stored summary on its own
+    line (the news job's content-hash join), capped. Without a summary, the
+    headline alone."""
+    headline = str(article["headline"]).strip()
+    summary = (article.get("summary") or "").strip()
+    return (f"{headline}\n{summary}" if summary else headline)[:MAX_TEXT_CHARS]
 
 
 def polarity(probabilities: Mapping[str, float]) -> Decimal:
@@ -290,7 +157,7 @@ def _unscored(conn: Connection, start: datetime, end: datetime) -> list[Any]:
     scored = exists().where(a.c.news_article_id == na.c.id, a.c.model == MODEL_VERSION)
     return list(
         conn.execute(
-            select(na.c.id, m.securities.c.symbol, na.c.headline, na.c.url)
+            select(na.c.id, m.securities.c.symbol, na.c.headline, na.c.summary)
             .join(m.securities, m.securities.c.id == na.c.security_id)
             .where(na.c.published_at >= start, na.c.published_at <= end, ~scored)
             .order_by(na.c.id)
