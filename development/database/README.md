@@ -56,6 +56,21 @@ It runs in one transaction, prints counts only, is idempotent, and refuses
 (rolling back) when the manifest disagrees with stored identity. Additions to
 `seeds/identity.json` need Bryan's approval.
 
+After new securities appear, Bryan fills their empty names from SEC's ticker
+list (decision 92 (b)), by hand as the owner; it is never scheduled:
+
+```bash
+SEC_USER_AGENT=... OPS_DATABASE_URL=... python development/database/ops/seed_names.py
+```
+
+One request to `company_tickers.json`. Only a NULL or blank name is filled,
+with SEC's title as filed; existing names are kept. A security SEC doesn't list
+(IBIT, ARKY, BYDDY on staging) keeps no name and counts as `not_in_sec_list`.
+A title with a control or format character, or over 200 characters, isn't
+stored, cleaned or cut: the name stays empty and counts as `titles_skipped`.
+`SEC_USER_AGENT` follows the summaries command's rule: missing, blank or
+`example.com` prints `{"error_code": "missing_credential"}` before any request.
+
 ## Importing
 
 Run from `development/backend`. Exit code 0 means the import succeeded, 1

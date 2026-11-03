@@ -20,12 +20,12 @@ DAY = date(2026, 10, 13)  # target day: the last complete UTC day before NOW
 THEMES = ThemeMap({"ECON_OILPRICE": {}, "ECON_INFLATION": {}}, ("reuters.com",))
 
 
-def counts(target, baseline=30, days=89, gaps=()):
+def counts(target, baseline=30, days=89, gaps=(), day=DAY):
     """A full 90-day window (89 baseline days plus the target day), as GDELT serves."""
-    out = {DAY - timedelta(days=n): baseline for n in range(1, days + 1)}
-    out[DAY] = target
+    out = {day - timedelta(days=n): baseline for n in range(1, days + 1)}
+    out[day] = target
     for gap in gaps:
-        out.pop(DAY - timedelta(days=gap), None)
+        out.pop(day - timedelta(days=gap), None)
     return out
 
 
@@ -51,8 +51,18 @@ class Client:
         ] + [Article("https://spam.example/x", "x", "spam.example", None)]
 
 
-def client(oil=90, inflation=31, **kwargs):
-    return Client({"ECON_OILPRICE": counts(oil), "ECON_INFLATION": counts(inflation)}, **kwargs)
+def client(oil=90, inflation=31, day=DAY, **kwargs):
+    return Client(
+        {"ECON_OILPRICE": counts(oil, day=day), "ECON_INFLATION": counts(inflation, day=day)},
+        **kwargs,
+    )
+
+
+def run_today(engine):
+    """A run at the real clock, served a window that ends on its target day, so
+    health() sees it fresh whatever the date (NOW's window expires in 2027-01)."""
+    now = datetime.now(timezone.utc)
+    return run_contract(engine, client(day=contract.target_day(now)), THEMES, now)
 
 
 def runs(engine, source):
@@ -277,7 +287,7 @@ def test_gdelt_staleness_is_an_advisory_not_a_watchlist_issue(engine):
     assert set(report["advisories"]) == {f"{s}:stale" for s in models.SUBJECTLESS_SOURCES}
     assert not any("gdelt" in issue for issue in report["issues"])
 
-    run_contract(engine, client(), THEMES, datetime.now(timezone.utc))
+    run_today(engine)
     assert health(engine)["advisories"] == []
 
     with engine.begin() as conn:
@@ -330,7 +340,7 @@ def test_a_gdelt_run_does_not_mask_a_missed_watchlist_run(engine):
     """M3's missed-run monitor counts only watchlist sources (merge with #32)."""
     from src.pipeline.health import health
 
-    run_contract(engine, client(), THEMES, datetime.now(timezone.utc))
+    run_today(engine)
     report = health(engine)
     assert "pipeline:missed_run" in report["issues"]
     assert report["advisories"] == []

@@ -26,7 +26,12 @@ The current production publication.
 - **Conditional request:** `If-None-Match` with the current tag returns `304` with no body.
 - **`404 no_current_publication`:** when nothing is current.
 
-`watchlist` is `publications.output`, verbatim: `{schema_version, ranking_version, generated_at, popular_stable, affordable_growing, unresolved, errors}`. Each record has `ticker`, `bucket`, `rank`, `market_cap`, `signals`, `source_dates` and `warnings`. The API never recomputes or reshapes it; it equals `replay()` of the publication.
+`watchlist` is `publications.output`, verbatim: `{schema_version, ranking_version, generated_at, popular_stable, affordable_growing, unresolved, errors}`. Each served record has `ticker`, `bucket`, `rank`, `signals`, `source_dates` and `warnings`. The API never recomputes or reshapes it; it equals `replay()` of the publication, with two exceptions, both because no source has a licence to display the value (decision 95):
+
+- **The market cap is never served** (decision 112 A1). Every stored record has a `market_cap`, and the API drops it from every record in every bucket, whatever its value, in `/v1/watchlist` and in `/v1/securities/{symbol}`'s `entry`. The bucket a record is in, its `market_cap_unavailable` warning and the envelope's `market_caps_unavailable` count are still served as stored.
+- **ARK's share price is never served** (L5 a). Ranking `watchlist-v5` doesn't publish it, and for an older publication that stores it, the API drops `signals.ark.share_price` from every record, on the same two routes.
+
+The stored publication is unchanged, and the `ETag` still names the publication.
 
 ### The `publication` object
 
@@ -90,6 +95,84 @@ A short excerpt of a published company description, stored at ingestion. The API
 - **`"summary": null`** when the security has no company profile, no stored summary, or its summary status is `unavailable`. Show "Summary not available".
 - The route has no `ETag` (`Cache-Control: no-cache`). If one is ever added, it must cover `as_of`.
 - The profile's readability grade and description digest are never served.
+
+## `GET /v1/securities/{symbol}/score`
+
+A security's current Confidence Score (S2-01), its breakdown (S2-02) and why Perennial recommends it (S2-03). One request serves all three.
+
+- **Symbol handling and errors:** as `/v1/securities/{symbol}`: `404 unknown_security` for an unknown ticker, `422 invalid_request` for an invalid one. An alias finds the canonical security, and `symbol` in the body is the canonical ticker.
+- **What is served:** the row for the security in the batch that `current_scores` points at (channel `production`), and the newest explanation written for that row. Re-pointing `current_scores` is the rollback. The API never reads a newer, unpromoted batch, and never serves `watchlist_publication_id` or the explanation's `input_digest`.
+- **`200` with `score.status: "unavailable"`** when there is no row for the security in the current batch (or no batch is current): `reason: "not_scored"`. It's never a `404`.
+- **Headers:** `Cache-Control: no-cache` and an `ETag`. The `ETag` changes when the pointer moves and when the explanation is written (explanations are derived after the scores batch is promoted). `If-None-Match` with a matching tag returns `304` with no body. The `read` rate-limit bucket.
+- **Numbers** are JSON numbers. The body is canonical JSON, like the other `/v1` routes.
+
+Full score (score-v1 always lists `event_exposure` as missing):
+
+```json
+{"api_version": "v1", "symbol": "ZZSA",
+ "score": {"status": "ok", "value": 74.3, "score_version": "score-v1",
+   "as_of": "2026-11-05T17:02:11+00:00", "recommended": true,
+   "components": [
+     {"name": "fundamentals", "status": "ok", "value": 78.0, "nominal_weight": 0.6, "weight": 0.7059,
+      "contribution": 55.06, "input_as_of": "2025-06-30", "input_version": "fundamentals-v1",
+      "record": {"table": "fundamental_scores", "id": 812}},
+     {"name": "sentiment", "status": "ok", "value": 65.5, "nominal_weight": 0.25, "weight": 0.2941,
+      "contribution": 19.26, "input_as_of": "2026-11-04", "input_version": "weights-v3",
+      "record": {"table": "ticker_sentiment", "id": 77}},
+     {"name": "event_exposure", "status": "unavailable", "value": null, "nominal_weight": 0.15,
+      "weight": 0.0, "contribution": 0.0, "input_as_of": null, "input_version": null, "record": null,
+      "note": "weight redistributed to the remaining components"}],
+   "missing": ["event_exposure"]},
+ "explanation": {"status": "ok", "template_version": "explain-v2", "as_of": "2026-11-05T17:02:11+00:00",
+   "claims": [
+     {"order": 1, "text": "Keeps 42 cents of every sales dollar as operating profit.", "component": "fundamentals",
+      "measure": "operating_margin", "record": {"table": "fundamental_scores", "id": 812, "batch_id": 5},
+      "as_of": "2025-06-30", "value": "0.420000"},
+     {"order": 2, "text": "Profitability improved 3 points from last year.", "component": "fundamentals",
+      "measure": "operating_margin_trend", "record": {"table": "fundamental_scores", "id": 812, "batch_id": 5},
+      "as_of": "2025-06-30", "value": "0.030000"},
+     {"order": 3, "text": "News coverage over the last 7 days leaned positive (12 articles).", "component": "sentiment",
+      "measure": "value", "record": {"table": "ticker_sentiment", "id": 77, "batch_id": 9},
+      "as_of": "2026-11-04", "value": "0.3100"}]}}
+```
+
+Score unavailable:
+
+```json
+{"api_version": "v1", "symbol": "ZZSU",
+ "score": {"status": "unavailable", "reason": "only_fundamentals", "value": null, "score_version": "score-v1",
+   "as_of": "2026-11-05T17:02:11+00:00", "recommended": false, "components": [],
+   "missing": ["sentiment", "event_exposure"]},
+ "explanation": {"status": "unavailable", "reason": "score_unavailable", "template_version": "explain-v2",
+   "as_of": "2026-11-05T17:02:11+00:00", "claims": []}}
+```
+
+### The `score` object
+
+| field | type | meaning |
+|---|---|---|
+| `status` | string | `ok` or `unavailable` |
+| `reason` | string | only when unavailable: `no_fundamentals`, `only_fundamentals` (a score needs fundamentals and at least one other component), or `not_scored` |
+| `value` | number or null | 0-100, to 0.1; `null` when unavailable |
+| `score_version` | string or null | e.g. `score-v1`; `null` when `not_scored` |
+| `as_of` | string or null | when the scores batch was promoted (`current_scores.promoted_at`), ISO 8601 UTC |
+| `recommended` | boolean | score `ok`, at least 60, and in the production watchlist publication it was judged against |
+| `components` | list | fundamentals, sentiment, event_exposure, in that order; empty when unavailable |
+| `missing` | list of strings | the components that had no input |
+
+Each component has `name`, `status` (`ok` or `unavailable`), `value` (0-100 or `null`), `nominal_weight` (score-v1: 0.60, 0.25, 0.15), `weight` (the effective weight: a missing component's weight is redistributed over the present ones, so score-v1 gives 0.7059 and 0.2941), `contribution` (`value` x `weight`, to 0.01; the contributions add up to `value` to its rounding), `input_as_of`, `input_version` and `record` (`{table, id}` of the stored input, or `null`). An unavailable component also has `note`: "weight redistributed to the remaining components". The breakdown is recomputed by score-v1 from the stored values: a stored row that disagrees with it is never served. The request fails closed with `500` and `{"detail": "request failed", "code": "internal_error"}`, nothing from the row in the body, and the server log names the security and the field.
+
+### The `explanation` object
+
+| field | type | meaning |
+|---|---|---|
+| `status` | string | `ok`, `not_recommended` (claims are written only for a recommended score) or `unavailable` |
+| `reason` | string | only when unavailable: `score_unavailable`, `insufficient_supporting_data` (recommended, but no component had a claim to cite), `not_scored`, or `not_explained_yet` (the score is promoted but its explanation isn't written yet) |
+| `template_version` | string | e.g. `explain-v2`; absent when no explanation is stored |
+| `as_of` | string | as the score's `as_of`; absent when no explanation is stored |
+| `claims` | list | up to three, in `order` |
+
+A claim is `{order, text, component, measure, record: {table, id, batch_id}, as_of, value}`: a sentence and the stored record, measure, value and date it came from. Only a supporting signal is a claim (decision 103 (c)): fundamentals measures worth at least 50 points, highest first, then sentiment that leans positive, always last. The sentiment sentence names what was counted: news articles, social posts or both. A missing component never has a claim. Claims are served through a typed model, so a stored key outside that shape is never served, and a stored claim that isn't claim-shaped fails closed with the same `500 internal_error` as a refused score row (the log names only the ids).
 
 ## `GET /v1/market-status`
 
@@ -190,7 +273,14 @@ Each `/v1/auth` and `/v1/me` route has exactly one limit, checked before the bea
 
 ## Database access
 
-- **Role:** the API connects as a login that inherits only `perennial_api`, provisioned by `development/database/ops/provision_roles.py`. That role can SELECT `publications`, `current_publication`, `securities` and `security_identifiers`, plus the columns `company_profiles(id, sector, industry)` and `publication_events(id, publication_id, kind, checks, created_at)`. That means no operator `actor`/`reason`, no raw source tables or runs, and no writes. The login is Bryan's to create: `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE perennial_api`, a member of nothing else, with a `CONNECTION LIMIT` sized to the `api` pool.
+- **Role:** the API connects as a login that inherits only `perennial_api`, provisioned by `development/database/ops/provision_roles.py`. That role can SELECT `publications`, `current_publication`, `securities`, `security_identifiers` and `current_scores`, plus these columns (`provision_roles.API_COLUMNS`):
+  - `company_profiles(id, sector, industry, summary, summary_status, summary_source_name, summary_source_url, summary_as_of)`
+  - `publication_events(id, publication_id, kind, checks, created_at)`
+  - `company_scores`' 30 served columns, never `watchlist_publication_id`
+  - `score_explanations(id, batch_id, security_id, company_score_id, status, reason, template_version, claims)`, never `input_digest`
+  - `fundamentals(id, batch_id, security_id, fiscal_year_end, line_item, value, unit, form, filed)` (S2-04, decision 113), never `concept` or `row_number`
+
+  That means no operator `actor`/`reason`, no runs, no other raw source table, and no writes. The login is Bryan's to create: `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE perennial_api`, a member of nothing else, with a `CONNECTION LIMIT` sized to the `api` pool.
 - **Startup check:** `create_app()` (or `check_startup` in #22's app) refuses to serve unless the login:
   - has no unsafe attributes
   - is a member of exactly `perennial_api`

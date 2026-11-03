@@ -130,10 +130,6 @@ def company_from_record(
     if not isinstance(warnings, list):
         warnings = []
 
-    ark_signal = signals.get("ark")
-    ark_price = (
-        ark_signal.get("share_price") if isinstance(ark_signal, Mapping) else None
-    )
     has_warning = bool(warnings)
     has_signal = any(value is not None for value in signals.values())
 
@@ -141,7 +137,8 @@ def company_from_record(
         name=name,
         ticker=ticker,
         sector=sector,
-        price=_number(record.get("price", ark_price)),
+        # Decision 95 (L5 a): no licence to display a price, so none is shown.
+        price=None,
         change_percent=_number(record.get("change_percent")),
         confidence_score=_number(record.get("confidence_score")),
         sentiment="Watch" if has_warning else ("Positive" if has_signal else "Neutral"),

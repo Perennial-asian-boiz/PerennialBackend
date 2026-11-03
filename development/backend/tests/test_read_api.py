@@ -29,7 +29,14 @@ REPO = Path(__file__).resolve().parents[3]
 SNAPSHOT = Path(__file__).parent / "fixtures" / "api" / "openapi_v1.json"
 
 WATCHLIST = models.WATCHLIST_SOURCES
-FULL_TABLES = ("publications", "current_publication", "securities", "security_identifiers")
+FULL_TABLES = (
+    "publications",
+    "current_publication",
+    "securities",
+    "security_identifiers",
+    "current_scores",  # Sprint 2: the scores pointer
+)
+_SCORE_PARTS = ("value", "nominal_weight", "weight", "contribution", "input_as_of", "input_version", "record_id")
 COLUMNS = {
     # S1-12: the API also reads the stored summary (never summary_grade or description_digest).
     "company_profiles": (
@@ -43,6 +50,41 @@ COLUMNS = {
         "summary_as_of",
     ),
     "publication_events": ("id", "publication_id", "kind", "checks", "created_at"),
+    # Sprint 2 (S2-01..03): never watchlist_publication_id or input_digest.
+    "company_scores": (
+        "id",
+        "batch_id",
+        "security_id",
+        "status",
+        "unavailable_reason",
+        "score",
+        "score_version",
+        "missing",
+        "recommended",
+        *(f"{c}_{p}" for c in ("fundamentals", "sentiment", "event_exposure") for p in _SCORE_PARTS),
+    ),
+    "score_explanations": (
+        "id",
+        "batch_id",
+        "security_id",
+        "company_score_id",
+        "status",
+        "reason",
+        "template_version",
+        "claims",
+    ),
+    # S2-04 (decision 113): the financials statement; never concept or row_number.
+    "fundamentals": (
+        "id",
+        "batch_id",
+        "security_id",
+        "fiscal_year_end",
+        "line_item",
+        "value",
+        "unit",
+        "form",
+        "filed",
+    ),
 }
 PUBLICATION_KEYS = {
     "id",
@@ -226,6 +268,7 @@ def test_no_current_publication_is_404(api):
 @pytest.mark.db
 def test_watchlist_envelope_is_the_current_publication_verbatim(engine, fixture_path, api):
     from src.pipeline.publication import replay
+    from test_no_price_v1 import without_market_cap
 
     pub = publish_run(engine, feed(fixture_path))
     response = api.get("/v1/watchlist")
@@ -241,8 +284,9 @@ def test_watchlist_envelope_is_the_current_publication_verbatim(engine, fixture_
     assert meta["id"] == pub
     assert meta["ranking_version"] == stored.ranking_version
     assert datetime.fromisoformat(meta["created_at"]) == stored.created_at
-    assert body["watchlist"] == json.loads(json.dumps(stored.output))
-    assert body["watchlist"] == json.loads(json.dumps(replay(engine, pub)))
+    # Verbatim except each record's market_cap (decision 112 A1, test_no_market_cap_v1).
+    assert body["watchlist"] == without_market_cap(stored.output)
+    assert body["watchlist"] == without_market_cap(replay(engine, pub))
     # RA-4b: not degraded, every cap present.
     assert meta["degraded"] is False and meta["stale_sources"] == []
     assert meta["market_caps_unavailable"] == 0 and meta["congress_history_gaps"] == 0
@@ -473,6 +517,7 @@ def test_security_entry_is_its_record_in_the_current_publication(engine, fixture
     from decimal import Decimal
 
     from test_degraded_publishing import market_caps
+    from test_no_price_v1 import without_market_cap
 
     def spread(symbols):
         """One missing cap (unresolved), one under the threshold, the rest above."""
@@ -489,7 +534,8 @@ def test_security_entry_is_its_record_in_the_current_publication(engine, fixture
     assert len(buckets) > 1  # entries are found in every bucket, not just the first
     for record in records(output):
         body = api.get(f"/v1/securities/{record['ticker']}").json()
-        assert body["current"] == {"publication": envelope, "entry": record}, record["ticker"]
+        entry = without_market_cap(record)  # decision 112 A1
+        assert body["current"] == {"publication": envelope, "entry": entry}, record["ticker"]
     seed_security(engine, "ZZOUT")
     outside = api.get("/v1/securities/ZZOUT").json()["current"]
     assert outside == {"publication": envelope, "entry": None}
@@ -958,7 +1004,12 @@ def test_every_v1_route_uses_the_helper_exactly_once(engine, fixture_path, group
                     outside.append(statement)
 
             routes = sorted(v1_routes(app))
-            assert routes == ["/v1/market-status", "/v1/securities/{symbol}", "/v1/watchlist"]
+            assert routes == [
+                "/v1/market-status",
+                "/v1/securities/{symbol}",
+                "/v1/securities/{symbol}/score",  # Sprint 2 (S2-01..03)
+                "/v1/watchlist",
+            ]
             for path in routes:
                 calls.clear()
                 response = c.get(path.replace("{symbol}", "ZZAA"))
@@ -1040,6 +1091,7 @@ def test_v1_routes_are_exactly_the_r1_reads_and_market_status():
         "/v1/watchlist": ["GET"],
         "/v1/securities/{symbol}": ["GET"],
         "/v1/market-status": ["GET"],  # S1-11
+        "/v1/securities/{symbol}/score": ["GET"],  # Sprint 2 (S2-01..03)
     }
     assert callable(create_app)
 
