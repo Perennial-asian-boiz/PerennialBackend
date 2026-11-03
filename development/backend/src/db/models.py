@@ -1131,6 +1131,36 @@ news_publishers = Table(
 
 SOURCE_TABLES.update(social_posts=social_posts, article_sentiment=article_sentiment)
 
+# JOB-7 / AC 4: failed article-scoring attempts, per article and model version. The
+# scorer writes it: a row exists only while an article is unscored after at least one
+# failed attempt, attempts and last_error are bumped on each failure, and the row is
+# deleted once the article is scored. At ARTICLE_SCORING_MAX_ATTEMPTS the article is
+# no longer read. A new model version has no rows, so its retries start fresh.
+ARTICLE_SCORING_ERRORS = ("failed", "timeout", "import_failed")
+ARTICLE_SCORING_MAX_ATTEMPTS = 3
+
+article_scoring_attempts = Table(
+    "article_scoring_attempts",
+    metadata,
+    Column(
+        "news_article_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.news_articles.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("model", String(64), primary_key=True),
+    Column("attempts", SmallInteger, nullable=False),
+    Column("last_error", String(16), nullable=False),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint("attempts >= 1", name="attempts"),
+    CheckConstraint(_in("last_error", ARTICLE_SCORING_ERRORS), name="last_error"),
+)
+
 # The credibility-weighted sentiment per security over the window (derived): PR #85's
 # table plus model_version (decision 108). One row per (batch, security).
 ticker_sentiment = Table(
