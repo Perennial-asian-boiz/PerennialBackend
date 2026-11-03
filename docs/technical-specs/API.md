@@ -174,6 +174,53 @@ Each component has `name`, `status` (`ok` or `unavailable`), `value` (0-100 or `
 
 A claim is `{order, text, component, measure, record: {table, id, batch_id}, as_of, value}`: a sentence and the stored record, measure, value and date it came from. Only a supporting signal is a claim (decision 103 (c)): fundamentals measures worth at least 50 points, highest first, then sentiment that leans positive, always last. The sentiment sentence names what was counted: news articles, social posts or both. A missing component never has a claim. Claims are served through a typed model, so a stored key outside that shape is never served, and a stored claim that isn't claim-shaped fails closed with the same `500 internal_error` as a refused score row (the log names only the ids).
 
+## `GET /v1/securities/{symbol}/financials`
+
+A security's yearly figures from SEC EDGAR (S2-04), for the Company Financials table and its chart.
+
+- **Symbol handling and errors:** as `/v1/securities/{symbol}/score`: `404 unknown_security` for an unknown ticker, `422 invalid_request` for an invalid one. `symbol` in the body is the canonical ticker.
+- **What is served:** every fiscal year in the security's newest `fundamentals` batch (up to six), newest first, and that batch's `batch_id`. Only successful imports store rows, so it's the latest good data.
+- **`200` with `"status": "unavailable"`** and `"years": []` when nothing is stored for the security. It's never a `404`.
+- **Headers:** `Cache-Control: no-cache` and an `ETag` that changes with the batch; `If-None-Match` with a matching tag returns `304` with no body. The `read` rate-limit bucket.
+
+```json
+{"api_version": "v1", "symbol": "ZZFA", "source": "SEC EDGAR", "status": "ok", "batch_id": 41,
+ "revenue_basis": "revenue",
+ "years": [
+   {"fiscal_year_end": "2025-12-31", "form": "10-K/A", "filed": "2026-03-15",
+    "revenue": {"value": 1200.0, "unit": "USD"}, "net_income": {"value": 180.0, "unit": "USD"},
+    "long_term_debt": {"value": 400.0, "unit": "USD"}, "equity": {"value": 800.0, "unit": "USD"},
+    "operating_cash_flow": {"value": 250.0, "unit": "USD"},
+    "revenue_growth": 0.2, "net_margin": 0.15, "debt_to_equity": 0.5},
+   {"fiscal_year_end": "2024-12-31", "form": "10-K", "filed": "2025-02-03",
+    "revenue": {"value": 1000.0, "unit": "USD"}, "net_income": {"value": 100.0, "unit": "USD"},
+    "long_term_debt": {"value": 500.0, "unit": "USD"}, "equity": {"value": 1000.0, "unit": "USD"},
+    "operating_cash_flow": {"value": 200.0, "unit": "USD"},
+    "revenue_growth": null, "net_margin": 0.1, "debt_to_equity": 0.5}]}
+```
+
+Nothing stored:
+
+```json
+{"api_version": "v1", "symbol": "ZZFU", "source": "SEC EDGAR", "status": "unavailable", "batch_id": null,
+ "revenue_basis": null, "years": []}
+```
+
+| field | type | meaning |
+|---|---|---|
+| `fiscal_year_end` | string | ISO date |
+| `form`, `filed` | string | the form and filing date of the year's latest filed figure (an amendment, `10-K/A`, wins) |
+| `revenue`, `net_income`, `long_term_debt`, `equity`, `operating_cash_flow` | object or null | `{value, unit}` as filed; `unit` is a currency code, since a foreign filer may report in non-USD. `null` when the line item isn't stored for that year |
+| `revenue_growth` | number or null | revenue / the next-older year's revenue - 1, to 6 places |
+| `net_margin` | number or null | net income / revenue |
+| `debt_to_equity` | number or null | long-term debt / equity |
+
+`revenue_basis` is `revenue`, or `revenue_net_of_interest` for a bank: a company whose filings report non-interest expense for its latest revenue year, as the fundamentals score decides. The table then shows the same revenue the score used.
+
+A computed field is `null` when either input is missing, the two units differ, or the divisor is zero or negative (negative equity, revenue, or the prior year's revenue). `revenue_growth` is also `null` for the oldest year, and when the next-older year in the batch didn't end about a year earlier (365 ± 20 days), so a missing year never turns two years' change into one.
+
+The route reads only `fundamentals`' granted columns, never `concept` or `row_number`. `market_cap` is not served on `/v1` (#100), so the table's company size stays "coming soon" until the SEC public float is served.
+
 ## `GET /v1/market-status`
 
 Whether the US stock market (the NYSE calendar, `XNYS`) is in regular hours, and its next open and close (S1-11). It's public, touches no database and takes no input: query parameters and headers don't change the answer. Unlike the other routes, its body has no `api_version`.
