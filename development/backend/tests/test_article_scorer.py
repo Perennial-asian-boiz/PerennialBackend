@@ -11,6 +11,9 @@ Pinned interface, src/services/credibility/article_scorer.py (my proposal):
   MAX_TEXT_CHARS (at most 512). Decision 114 adds the stored summary after the
   headline (test_d114_article_summary); an article without one reads as before.
 * polarity(probabilities) -> Decimal: P(positive) - P(negative), to 4 places.
+* label_for(score) -> "negative" for [-1, -0.2], "neutral" for (-0.2, 0.2),
+  "positive" for [0.2, 1]; confidence(probabilities, label) -> Decimal: the
+  probability of the label's own class, to 4 places. Both stored per article.
 * score_articles(engine, *, scorer=None, now=None) -> ImportResult, the slot's
   Callable[[Engine], ImportResult]. A derived article_sentiment run:
   - input: every stored news_articles row published in derive_sentiment's window
@@ -20,13 +23,23 @@ Pinned interface, src/services/credibility/article_scorer.py (my proposal):
     per text, called in chunks of at most BATCH_SIZE texts, ordered by
     news_article_id. None means FinBERT, whose torch and transformers imports
     happen inside the scoring path only.
-  - one row per article (row_number in news_article_id order); run_dependencies =
+  - one row per article (row_number in the importer's canonical order); run_dependencies =
     the latest successful news_articles batch; envelope {model, input_batch_id,
     articles_scored}.
   - nothing to score: no new batch and no new rows.
   - no news batch at all: failed, missing_upstream.
-  - the model failing to load, or the scorer raising or answering badly: failed,
-    "scoring_failed" (in ERROR_SUMMARIES), no batch, no headline in any log.
+  - a chunk the scorer raises on or answers badly for is skipped and the next one
+    is scored; a chunk slower than BATCH_TIMEOUT stops scoring (the rest are not
+    attempted). What was scored is stored (coverage incomplete; the run's
+    diagnostics name the failed chunks as BATCH-<n> with code failed/timeout);
+    the skipped articles are scored by a later run.
+  - retries (article_scoring_attempts): each article of a failed / timed-out
+    chunk gains one attempt with code failed / timeout (every scored article
+    gains import_failed if the import fails); at 3 attempts it is not read again
+    for this MODEL_VERSION; a scored article's attempts row is deleted; articles
+    never attempted and a model that fails to load count against nothing.
+  - nothing scored at all (every chunk failed, or the model failing to load):
+    failed, "scoring_failed" (in ERROR_SUMMARIES), no batch, no headline in any log.
 * credibility.job.run_once passes score_articles to run_sentiment.
 """
 
@@ -34,6 +47,7 @@ import ast
 import logging
 import subprocess
 import sys
+import time
 import types
 from contextlib import contextmanager
 from datetime import timedelta
@@ -117,6 +131,8 @@ def scores(engine):
             select(
                 models.news_articles.c.finnhub_id,
                 models.article_sentiment.c.score,
+                models.article_sentiment.c.label,
+                models.article_sentiment.c.confidence,
                 models.article_sentiment.c.model,
                 models.article_sentiment.c.batch_id,
                 models.article_sentiment.c.row_number,
@@ -126,6 +142,20 @@ def scores(engine):
             )
         ).all()
     return {r.finnhub_id: r for r in rows}
+
+
+def attempts(engine):
+    """{finnhub_id: (attempts, last_error)} for the current MODEL_VERSION."""
+    t = models.article_scoring_attempts
+    with engine.connect() as conn:
+        rows = conn.execute(
+            select(models.news_articles.c.finnhub_id, t.c.attempts, t.c.last_error)
+            .join(
+                models.news_articles, models.news_articles.c.id == t.c.news_article_id
+            )
+            .where(t.c.model == scorer_module().MODEL_VERSION)
+        ).all()
+    return {r.finnhub_id: (r.attempts, r.last_error) for r in rows}
 
 
 def batches(engine):
@@ -213,6 +243,34 @@ def test_the_model_is_finbert_at_a_pinned_revision():
 )
 def test_polarity_is_p_positive_minus_p_negative(probabilities, expected):
     assert scorer_module().polarity(probabilities) == expected
+
+
+@pytest.mark.parametrize(
+    "score,label",
+    [
+        (Decimal("-1.0000"), "negative"),
+        (Decimal("-0.2000"), "negative"),
+        (Decimal("-0.1999"), "neutral"),
+        (Decimal("0.0000"), "neutral"),
+        (Decimal("0.1999"), "neutral"),
+        (Decimal("0.2000"), "positive"),
+        (Decimal("1.0000"), "positive"),
+    ],
+)
+def test_the_label_comes_from_the_score_thresholds(score, label):
+    assert scorer_module().label_for(score) == label
+
+
+def test_the_confidence_is_the_probability_of_the_labels_own_class():
+    mod = scorer_module()
+    # +0.15 is neutral although positive is the single largest class.
+    probabilities = {"positive": 0.40, "negative": 0.25, "neutral": 0.35}
+    label = mod.label_for(mod.polarity(probabilities))
+    assert label == "neutral"
+    assert mod.confidence(probabilities, label) == Decimal("0.3500")
+    assert mod.confidence(
+        {"positive": 0.8, "negative": 0.1, "neutral": 0.1}, "positive"
+    ) == (Decimal("0.8000"))
 
 
 def test_the_text_is_the_headline_only_stripped_and_capped():
@@ -337,12 +395,18 @@ def test_every_article_in_the_window_gets_one_row_and_the_run_names_its_input(
         12: Decimal("-0.8500"),
         13: Decimal("0.5000"),
     }
+    assert {f: (r.label, r.confidence) for f, r in stored.items()} == {
+        11: ("positive", Decimal("0.8000")),
+        12: ("negative", Decimal("0.9000")),
+        13: ("positive", Decimal("0.6000")),
+    }
     assert {r.model for r in stored.values()} == {mod.MODEL_VERSION}
     assert {r.batch_id for r in stored.values()} == {result.batch_id}
     # Deterministic: the scorer reads the texts, and rows are numbered, by article id.
     by_id = sorted(stored, key=lambda f: articles[f].id)
     assert fake.texts == [mod.article_text(articles[f]._mapping) for f in by_id]
-    assert [stored[f].row_number for f in by_id] == [1, 2, 3]
+    # The importer numbers rows in its canonical (sorted-JSON) order, not by id.
+    assert sorted(stored[f].row_number for f in by_id) == [1, 2, 3]
     news_batch = latest_news_batch(engine)
     assert dependencies(engine, result.run_id) == {"news_articles": news_batch}
     assert envelope(engine, result.batch_id) == {
@@ -364,6 +428,125 @@ def test_the_scorer_is_called_in_bounded_chunks(
     fake = Fake()
     assert score_now(engine, fake).succeeded
     assert [len(c) for c in fake.calls] == [2, 1]
+
+
+@pytest.mark.db
+def test_a_failed_chunk_is_skipped_the_rest_is_stored_and_a_rerun_catches_up(
+    engine,
+    seeded,  # noqa: F811
+    monkeypatch,
+):
+    run_news(engine, NewsClient(IN_WINDOW), NOW.date())
+    monkeypatch.setattr(scorer_module(), "BATCH_SIZE", 1)
+    articles = stored_articles(engine)
+    by_id = sorted(articles, key=lambda f: articles[f].id)
+    with captured(monkeypatch) as handler:
+        result = score_now(engine, Fake(fail_on_call=2))
+    assert result.succeeded, result.error_code
+    assert set(scores(engine)) == {by_id[0], by_id[2]}  # chunk 2 skipped, 3 scored
+    run = run_of(engine, result)
+    assert run["coverage"] == {"complete": False, "scope": "derivation"}
+    assert run["diagnostics"]["failures"] == [{"unit": "BATCH-2", "code": "failed"}]
+    assert (run["diagnostics"]["attempted"], run["diagnostics"]["failed"]) == (3, 1)
+    for headline in HEADLINES:
+        assert headline not in " ".join([*handler.messages, str(run["diagnostics"])])
+    again = Fake()
+    assert score_now(engine, again).succeeded
+    assert again.texts == [articles[by_id[1]].headline]
+    assert set(scores(engine)) == {11, 12, 13}
+
+
+@pytest.mark.db
+def test_a_failing_article_is_retried_up_to_three_attempts_then_left_unscored(
+    engine,
+    seeded,  # noqa: F811
+    monkeypatch,
+):
+    run_news(engine, NewsClient(IN_WINDOW), NOW.date())
+    monkeypatch.setattr(scorer_module(), "BATCH_SIZE", 1)
+    articles = stored_articles(engine)
+    by_id = sorted(articles, key=lambda f: articles[f].id)
+    bad = articles[by_id[1]].headline
+
+    def failing_on_bad(texts):
+        if texts == [bad]:
+            raise RuntimeError("synthetic model failure")
+        return Fake()(texts)
+
+    assert score_now(engine, failing_on_bad).succeeded
+    assert attempts(engine) == {by_id[1]: (1, "failed")}
+    for n in (2, 3):
+        result = score_now(engine, failing_on_bad)
+        assert (result.status, result.error_code) == ("failed", "scoring_failed")
+        assert attempts(engine) == {by_id[1]: (n, "failed")}
+    fake = Fake()
+    assert score_now(engine, fake) is None  # exhausted: nothing left to read
+    assert fake.texts == [] and by_id[1] not in scores(engine)  # stays unscored
+
+
+@pytest.mark.db
+def test_scoring_an_article_forgets_its_failed_attempts(
+    engine,
+    seeded,  # noqa: F811
+):
+    run_news(engine, NewsClient({"RKLB": IN_WINDOW["RKLB"]}), NOW.date())
+    assert not score_now(engine, Fake(fail_on_call=1)).succeeded
+    assert attempts(engine) == {11: (1, "failed"), 12: (1, "failed")}
+    assert score_now(engine, Fake()).succeeded
+    assert attempts(engine) == {} and set(scores(engine)) == {11, 12}
+
+
+@pytest.mark.db
+def test_a_model_that_fails_to_load_counts_against_no_article(
+    engine,
+    seeded,  # noqa: F811
+    monkeypatch,
+):
+    run_news(engine, NewsClient(IN_WINDOW), NOW.date())
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "transformers", None)
+    result = scorer_module().score_articles(engine, now=NOW)
+    assert (result.status, result.error_code) == ("failed", "scoring_failed")
+    assert attempts(engine) == {}
+
+
+class Slow:
+    """A scorer whose given call outlasts the batch timeout."""
+
+    def __init__(self, slow_call):
+        self.fake, self.slow_call = Fake(), slow_call
+
+    def __call__(self, texts):
+        if len(self.fake.calls) + 1 == self.slow_call:
+            self.fake.calls.append(list(texts))
+            time.sleep(1.0)
+            return []
+        return self.fake(texts)
+
+
+@pytest.mark.db
+def test_a_chunk_that_times_out_stops_scoring_and_keeps_what_was_scored(
+    engine,
+    seeded,  # noqa: F811
+    monkeypatch,
+):
+    run_news(engine, NewsClient(IN_WINDOW), NOW.date())
+    monkeypatch.setattr(scorer_module(), "BATCH_SIZE", 1)
+    monkeypatch.setattr(scorer_module(), "BATCH_TIMEOUT", 0.2)
+    articles = stored_articles(engine)
+    by_id = sorted(articles, key=lambda f: articles[f].id)
+    slow = Slow(slow_call=2)
+    result = score_now(engine, slow)
+    assert result.succeeded, result.error_code
+    assert len(slow.fake.calls) == 2  # chunk 3 never attempted
+    assert set(scores(engine)) == {by_id[0]}
+    diagnostics = run_of(engine, result)["diagnostics"]
+    assert diagnostics["failures"] == [{"unit": "BATCH-2", "code": "timeout"}]
+    assert diagnostics["not_attempted"] == 1
+    assert attempts(engine) == {by_id[1]: (1, "timeout")}  # chunk 3 isn't counted
+    monkeypatch.setattr(scorer_module(), "BATCH_TIMEOUT", 120.0)
+    assert score_now(engine, Fake()).succeeded
+    assert set(scores(engine)) == {11, 12, 13}
 
 
 @pytest.mark.db
@@ -501,10 +684,13 @@ class Wrong:
         return self.answer(texts)
 
 
+# Every chunk fails, so nothing is scored and the run fails closed.
 FAILURES = {
-    "raises on the second chunk": lambda: Fake(fail_on_call=2),
+    "raises on every chunk": lambda: Wrong(lambda texts: 1 / 0),
     "too few answers": lambda: Wrong(
-        lambda texts: [{"positive": 1.0, "negative": 0.0, "neutral": 0.0}]
+        lambda texts: [
+            {"positive": 1.0, "negative": 0.0, "neutral": 0.0} for _ in texts[1:]
+        ]
     ),
     "a missing label": lambda: Wrong(
         lambda texts: [{"positive": 0.5, "neutral": 0.5} for _ in texts]

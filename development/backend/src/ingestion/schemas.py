@@ -909,18 +909,38 @@ class SocialPost(SourceRecord):
 
 
 class ArticleSentiment(SourceRecord):
-    """S1-04's score for one stored news article, in [-1, 1]."""
+    """S1-04's score for one stored news article, in [-1, 1], with its label and
+    the model's probability for that label's class (JOB-7 AC 1)."""
 
-    DB_COLUMNS = ("news_article_id", "score", "model")
+    DB_COLUMNS = ("news_article_id", "score", "model", "label", "confidence")
 
     news_article_id: int = Field(gt=0, le=BIGINT_MAX, strict=True)
     score: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
     model: Annotated[str, BeforeValidator(_text_validator(64, required=True))]
+    label: Annotated[str, BeforeValidator(_text_validator(8, required=True))]
+    confidence: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
 
     @field_validator("score")
     @classmethod
     def _score(cls, v: Decimal) -> Decimal:
         _between(v, -1, 1)
+        return v
+
+    @field_validator("label")
+    @classmethod
+    def _label(cls, v: str) -> str:
+        if v not in (
+            "negative",
+            "neutral",
+            "positive",
+        ):  # models.ARTICLE_SENTIMENT_LABELS
+            raise ValueError("unknown label")
+        return v
+
+    @field_validator("confidence")
+    @classmethod
+    def _confidence(cls, v: Decimal) -> Decimal:
+        _between(v, 0, 1)
         return v
 
 

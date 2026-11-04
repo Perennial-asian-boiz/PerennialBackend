@@ -77,6 +77,7 @@ ERROR_SUMMARIES = {
 UNIT_KINDS = frozenset(
     {
         "ARK funds",
+        "article batches",
         "GDELT themes",
         "Congress requests",
         "insider tickers",
