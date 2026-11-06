@@ -289,7 +289,8 @@ def score_articles(engine, model="finbert", scores=SCORES):
         rows = conn.execute(select(models.securities.c.symbol, models.news_articles.c.id,
                                    models.news_articles.c.finnhub_id)
                             .join(models.securities)).all()
-    records = [{"ticker": s, "news_article_id": i, "score": scores[f], "model": model}
+    records = [{"ticker": s, "news_article_id": i, "score": scores[f], "model": model,
+                "label": "neutral", "confidence": "0.5000"}  # not read downstream
                for s, i, f in rows]
     run_id = begin_run(engine, "article_sentiment", "derived")
     return import_collection(engine, CollectionOutcome.success(

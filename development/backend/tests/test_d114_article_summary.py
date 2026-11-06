@@ -319,7 +319,7 @@ def article_count(target):
 def test_with_no_summary_stored_the_downgrade_drops_the_column_and_keeps_the_rows(
     scratch,
 ):
-    migrate(scratch, "head")
+    migrate(scratch, "0020")
     seed_rklb(scratch)
     first = run_news(
         scratch,
@@ -337,14 +337,14 @@ def test_with_no_summary_stored_the_downgrade_drops_the_column_and_keeps_the_row
     assert version(scratch) == "0019"
     assert not has_summary(scratch)
     assert article_count(scratch) == 2
-    migrate(scratch, "head")  # over stored rows: they keep a NULL summary
+    migrate(scratch, "0020")  # over stored rows: they keep a NULL summary
     assert version(scratch) == "0020" and has_summary(scratch)
     assert set(summaries(scratch).values()) == {None}
 
 
 @pytest.mark.db
 def test_while_a_summary_is_stored_the_downgrade_refuses_and_changes_nothing(scratch):
-    migrate(scratch, "head")
+    migrate(scratch, "0020")
     seed_rklb(scratch)
     run_news(
         scratch,

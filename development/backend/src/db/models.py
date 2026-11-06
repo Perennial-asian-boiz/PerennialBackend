@@ -1092,6 +1092,8 @@ social_posts = Table(
 )
 Index("ix_social_posts_security_id", social_posts.c.security_id)
 
+ARTICLE_SENTIMENT_LABELS = ("negative", "neutral", "positive")
+
 # S1-04's output, the agreed handoff: one score in [-1, 1] per news article and
 # model. A batch holds only newly scored articles; readers take each article's
 # score from its latest batch.
@@ -1110,10 +1112,19 @@ article_sentiment = Table(
     ),
     Column("score", Numeric(5, 4), nullable=False),
     Column("model", String(64), nullable=False),
+    # JOB-7 AC 1 (0022): the label the score falls in, and the model's probability
+    # for that label's class. NULL only on rows scored before 0022.
+    Column("label", String(8)),
+    Column("confidence", Numeric(5, 4)),
     UniqueConstraint("batch_id", "row_number"),
     UniqueConstraint("news_article_id", "model"),
     CheckConstraint("row_number >= 1", name="row_number"),
     CheckConstraint("score >= -1 AND score <= 1", name="score"),
+    CheckConstraint(
+        f"label IS NULL OR {_in('label', ARTICLE_SENTIMENT_LABELS)}", name="label"
+    ),
+    CheckConstraint("confidence >= 0 AND confidence <= 1", name="confidence"),
+    CheckConstraint("(label IS NULL) = (confidence IS NULL)", name="label_confidence"),
 )
 Index("ix_article_sentiment_security_id", article_sentiment.c.security_id)
 
@@ -1130,6 +1141,36 @@ news_publishers = Table(
 )
 
 SOURCE_TABLES.update(social_posts=social_posts, article_sentiment=article_sentiment)
+
+# JOB-7 / AC 4: failed article-scoring attempts, per article and model version. The
+# scorer writes it: a row exists only while an article is unscored after at least one
+# failed attempt, attempts and last_error are bumped on each failure, and the row is
+# deleted once the article is scored. At ARTICLE_SCORING_MAX_ATTEMPTS the article is
+# no longer read. A new model version has no rows, so its retries start fresh.
+ARTICLE_SCORING_ERRORS = ("failed", "timeout", "import_failed")
+ARTICLE_SCORING_MAX_ATTEMPTS = 3
+
+article_scoring_attempts = Table(
+    "article_scoring_attempts",
+    metadata,
+    Column(
+        "news_article_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.news_articles.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("model", String(64), primary_key=True),
+    Column("attempts", SmallInteger, nullable=False),
+    Column("last_error", String(16), nullable=False),
+    Column(
+        "updated_at",
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    ),
+    CheckConstraint("attempts >= 1", name="attempts"),
+    CheckConstraint(_in("last_error", ARTICLE_SCORING_ERRORS), name="last_error"),
+)
 
 # The credibility-weighted sentiment per security over the window (derived): PR #85's
 # table plus model_version (decision 108). One row per (batch, security).

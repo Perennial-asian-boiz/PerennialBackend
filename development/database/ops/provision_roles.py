@@ -44,6 +44,10 @@ IMMUTABLE += ("news_articles", "news_coverage")  # S1-03 news ingestion
 IMMUTABLE += ("ticker_sentiment", "company_scores", "score_explanations")
 MUTABLE += ("current_scores",)
 IMMUTABLE += ("social_posts", "article_sentiment", "news_publishers")  # S1-05
+# JOB-7 / AC 4 article-scoring retry state: the scorer bumps attempts on each failure
+# and deletes the row once the article is scored, so the importer also needs DELETE.
+MUTABLE += ("article_scoring_attempts",)
+DELETABLE = ("article_scoring_attempts",)
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # M5 read API (perennial_api): published data only, never raw source tables,
 # runs or operator text; the one exception is fundamentals' reported line items
@@ -230,6 +234,8 @@ def provision(conn, roles, *, phase, supabase_roles=SUPABASE_API_ROLES):
             conn.execute(sql.SQL("GRANT SELECT ON TABLE {} TO {}").format(ident, sql.Identifier(reader)))
             if table in MUTABLE:
                 conn.execute(sql.SQL("GRANT UPDATE ON TABLE {} TO {}").format(ident, sql.Identifier(importer)))
+                if table in DELETABLE:
+                    conn.execute(sql.SQL("GRANT DELETE ON TABLE {} TO {}").format(ident, sql.Identifier(importer)))
             elif table == "securities":
                 conn.execute(sql.SQL("GRANT UPDATE (exchange, currency) ON TABLE {} TO {}")
                              .format(ident, sql.Identifier(importer)))
