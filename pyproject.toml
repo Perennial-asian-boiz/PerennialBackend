@@ -40,12 +40,9 @@ dev = [
 # JOB-7's FinBERT article scorer, for the worker that runs --job sentiment only.
 # Locked separately in requirements-scorer.lock (CPU torch from PyTorch's index);
 # CI and requirements*.lock never install it (test_article_scorer pins that).
-# trafilatura extracts each article's text from its page; without it the scorer
-# falls back to headlines only.
 scorer = [
     "torch==2.14.1+cpu",
     "transformers==5.20.1",
-    "trafilatura==2.3.1",
 ]
 
 [tool.ruff]
@@ -128,8 +125,8 @@ module = ["src.services.*"]
 follow_imports = "skip"
 
 [[tool.mypy.overrides]]
-# JOB-7's FinBERT scorer imports these lazily; CI installs none of them.
-module = ["torch", "transformers", "trafilatura"]
+# JOB-7's FinBERT scorer imports these lazily; CI installs neither.
+module = ["torch", "transformers"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
