@@ -6,7 +6,7 @@ a new version, not an edit to v1. Input snapshots are selected by the caller.
 
 import json
 from collections import defaultdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Mapping, Sequence, cast
 
@@ -21,6 +21,10 @@ from typing import Any, Mapping, Sequence, cast
 # become the ticker's "most recent" buy. Stored rows keep the date as filed.
 # v5 is v4 without share_price in the ARK signal: no source has a licence to
 # display a price (decision 95, L5 a).
+# v6 is v5 labelled for SEC's public float (decision 112): a record carries
+# public_float and its public_float_as_of instead of market_cap, weak values
+# go in size_flags (any warnings entry makes the dashboard row "Watch"), and
+# the output names its size_basis. Buckets and order are v5's.
 VERSION = "watchlist-v5"
 VERSIONS = (
     "watchlist-v1",
@@ -28,14 +32,26 @@ VERSIONS = (
     "watchlist-v3",
     "watchlist-v4",
     "watchlist-v5",
+    "watchlist-v6",
 )
 # Versions with v4's candidate cap and its after-disclosure filter.
-_CAPPED = ("watchlist-v4", "watchlist-v5")
+_CAPPED = ("watchlist-v4", "watchlist-v5", "watchlist-v6")
 _ARK_KEYS = ("funds", "fund_count", "total_weight")
+# The size provider each labelled version ranks, and so the version a pinned
+# publication of that provider's values must use. Any other provider's values
+# are market caps, ranked under VERSION.
+SIZE_BASIS = {"watchlist-v6": "sec_public_float"}
+# A public float older than this is flagged size_estimate_stale (B2).
+SIZE_STALE_AGE = timedelta(days=548)
 DEFAULT_CONFIG = {
     "market_cap_threshold": "10000000000",
     "max_congress_candidates": 100,
 }
+
+
+def version_for(provider: str | None) -> str:
+    """The ranking version that labels a size provider's values correctly."""
+    return next((v for v, p in SIZE_BASIS.items() if p == provider), VERSION)
 
 
 def candidate_symbols(
@@ -48,7 +64,7 @@ def candidate_symbols(
     Symbols a publication evaluates (and fetches market caps for).
 
     v1-v3: every Congress purchase symbol plus every ARK holding.
-    v4, v5: the top `max_congress_candidates` Congress purchase symbols, by
+    v4-v6: the top `max_congress_candidates` Congress purchase symbols, by
     distinct buyers, then buy count, then most recent transaction, then
     symbol, counting only purchases with a plausible date; plus every ARK
     holding.
@@ -139,9 +155,15 @@ def calculate(
     config: Mapping[str, Any] | None = None,
     *,
     version: str = VERSION,
+    size_as_of: Mapping[str, datetime | None] | None = None,
 ) -> dict[str, Any]:
+    """
+    size_as_of is each value's measurement time (market_caps.observed_at). v6
+    publishes it as public_float_as_of and requires it for every value.
+    """
     if version not in VERSIONS:
         raise ValueError("unsupported ranking version")
+    basis = SIZE_BASIS.get(version)
     config = dict(DEFAULT_CONFIG if config is None else config)
     threshold = Decimal(config["market_cap_threshold"])
     congress: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -195,7 +217,9 @@ def calculate(
             }
         if a:
             keys = (
-                _ARK_KEYS if version == "watchlist-v5" else (*_ARK_KEYS, "share_price")
+                _ARK_KEYS
+                if version in ("watchlist-v5", "watchlist-v6")
+                else (*_ARK_KEYS, "share_price")
             )
             ars = {k: a[k] for k in keys}
         if si:
@@ -211,12 +235,18 @@ def calculate(
             if cap is None
             else ("popular_stable" if cap > threshold else "affordable_growing")
         )
+        if basis is None:
+            size: dict[str, Any] = {"market_cap": cap}
+            warnings = ["market_cap_unavailable"] if cap is None else []
+        else:
+            size = _labelled_size(cap, (size_as_of or {}).get(symbol), generated_at)
+            warnings = []  # size_flags carries v6's size problems
         buckets[bucket].append(
             {
                 "ticker": symbol,
                 "bucket": bucket,
                 "rank": None,
-                "market_cap": cap,
+                **size,
                 "signals": {
                     "congress": cs,
                     "insider": ins,
@@ -231,7 +261,7 @@ def calculate(
                     else None,
                     "short_interest": sis["settlement_date"] if sis else None,
                 },
-                "warnings": ["market_cap_unavailable"] if cap is None else [],
+                "warnings": warnings,
             }
         )
 
@@ -269,8 +299,25 @@ def calculate(
                 "schema_version": "1.0",
                 "ranking_version": version,
                 "generated_at": generated_at,
+                **({"size_basis": basis} if basis else {}),
                 **buckets,
                 "errors": [],
             }
         ),
     )
+
+
+def _labelled_size(
+    value: Decimal | None, observed_at: datetime | None, generated_at: datetime
+) -> dict[str, Any]:
+    """v6's size fields for one record."""
+    if value is None:
+        flags = ["size_unavailable"]
+        day = None
+    else:
+        if observed_at is None:
+            raise ValueError("a public float needs its as-of date")
+        day = observed_at.astimezone(timezone.utc).date()
+        age = generated_at.astimezone(timezone.utc).date() - day
+        flags = ["size_estimate_stale"] if age > SIZE_STALE_AGE else []
+    return {"public_float": value, "public_float_as_of": day, "size_flags": flags}

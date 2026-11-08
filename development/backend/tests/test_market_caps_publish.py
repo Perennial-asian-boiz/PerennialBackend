@@ -359,10 +359,11 @@ def cap_run(engine, values, *, name=ADAPTER, mode="live", age=None, observed_at=
     return result
 
 
-def publish_pinned(engine, runs):
+def publish_pinned(engine, runs, **kwargs):
     from src.pipeline.publication import publish
 
-    return publish(engine, runs, None, market_caps="pinned", quality_thresholds=THRESHOLDS)
+    return publish(engine, runs, None, market_caps="pinned", quality_thresholds=THRESHOLDS,
+                   **kwargs)
 
 
 def every(value):
@@ -454,12 +455,18 @@ def test_rows_observed_outside_three_days_are_not_eligible(engine, fixture_path,
 def test_sec_public_float_rows_have_their_own_observed_age_limit(
     engine, fixture_path, days, eligible
 ):
-    """#90: public float is measured yearly, so its rows may be up to 730 days old."""
+    """#90: public float is measured yearly, so its rows may be up to 730 days old.
+
+    Every row is SEC's: ranking v6 refuses any other provider (decision 112).
+    """
+    now = datetime.now(timezone.utc)
     runs = import_all(engine, Feed(fixture_path))
-    cap_run(engine, {s: "20000000000.00" for s in CANDIDATES if s != "ZZAA"})
+    cap_run(engine, {s: "20000000000.00" for s in CANDIDATES if s != "ZZAA"},
+            name="sec_public_float", observed_at=now - timedelta(days=10))
     yearly = cap_run(engine, {"ZZAA": "30000000000.00"}, name="sec_public_float",
-                     observed_at=datetime.now(timezone.utc) - timedelta(days=days))
-    pinned = cap_pins(engine, publish_pinned(engine, runs))
+                     observed_at=now - timedelta(days=days))
+    pub = publish_pinned(engine, runs, market_cap_adapter="sec_public_float")
+    pinned = cap_pins(engine, pub)
     assert (pinned["ZZAA"]["run_id"] == yearly.run_id) is eligible
 
 

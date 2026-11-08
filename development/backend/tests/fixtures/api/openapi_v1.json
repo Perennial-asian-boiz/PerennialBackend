@@ -789,7 +789,7 @@
           "type": "integer"
         },
         "market_caps_unavailable": {
-          "description": "Records warning market_cap_unavailable, across all buckets",
+          "description": "Records warning market_cap_unavailable or, from ranking watchlist-v6, flagging size_unavailable, across all buckets",
           "title": "Market Caps Unavailable",
           "type": "integer"
         },
