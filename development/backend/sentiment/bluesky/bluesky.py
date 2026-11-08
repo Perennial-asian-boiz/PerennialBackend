@@ -78,14 +78,6 @@ load_dotenv()  # reads BSKY_HANDLE / BSKY_APP_PASSWORD from a .env file next to 
 PDS_URL = (
     "https://bsky.social/xrpc"  # authenticated; proxies searchPosts to the AppView
 )
-# symbol -> company name (fallback when the securities table is unavailable)
-FALLBACK_COMPANIES = {
-    "NVDA": "NVIDIA",
-    "AAPL": "Apple",
-    "MSFT": "Microsoft",
-    "AMZN": "Amazon",
-    "GOOGL": "Alphabet",
-}
 ENGLISH_ONLY = True
 PAGE_LIMIT = 100  # API max per page
 DEFAULT_LOOKBACK_DAYS = 7  # used when --since is not given
@@ -524,7 +516,6 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
 
 # ---------- Ticker loading ----------
 SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")  # what CASHTAG_RE can actually match
-NAME_TO_SYMBOL = {n.lower(): s for s, n in FALLBACK_COMPANIES.items()}
 
 
 def parse_companies(raw):
@@ -565,19 +556,19 @@ async def load_tickers(cli_tickers):
     symbol (NVDA) or a company name (Nvidia). Unknown values are treated as
     plain symbols.
     """
-    companies = {}
-    source = "database"
     try:
         fetched = await fetch_ticker_map()
-        if fetched:
-            companies = parse_companies(fetched)
     except Exception as e:
-        log.warning("ticker fetch failed, using fallback: %s: %s", type(e).__name__, e)
-        _out.info(f"Ticker fetch failed, using fallback: {e}")
+        log.error("ticker fetch failed: %s: %s", type(e).__name__, e)
+        raise SystemExit(f"Could not load tickers from the database: {e}") from e
+    companies = parse_companies(fetched) if fetched else {}
     if not companies:
-        companies = dict(FALLBACK_COMPANIES)
-        source = "fallback"
-    log.info("tickers loaded source=%s count=%d", source, len(companies))
+        log.error("no tickers loaded from the securities table; stopping")
+        raise SystemExit(
+            "Could not load tickers from the database (securities table "
+            "unreachable or has no usable active securities); stopping."
+        )
+    log.info("tickers loaded source=database count=%d", len(companies))
 
     if not cli_tickers:
         return set(companies)
@@ -603,7 +594,7 @@ def main():
     ap.add_argument(
         "--tickers",
         nargs="+",
-        help="Tickers or company names to query (default: every active security, else fallback list)",
+        help="Tickers or company names to query (default: every active security)",
     )
     ap.add_argument(
         "--since",

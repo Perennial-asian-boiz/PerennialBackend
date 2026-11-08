@@ -2,8 +2,10 @@
 Single entry point for the sentiment pipeline.
 
 Order:
+    0. ticker check              the tickers are read from perennial.securities; if that
+                                 fails, nothing is run and the exit code is 1
     1. mastodon_server_crawler   runs alone first (refreshes mastodon/mastodon_servers.json)
-    2. bluesky, mastodon_stock_fetcher, reddit, youtube
+    2. bluesky, mastodon_stock_fetcher, youtube
                                  run at the same time, each in its own process
 
 Every script runs as a separate subprocess (`python -m sentiment.<folder>.<file>`)
@@ -13,11 +15,11 @@ shared `src.utils.fetch_tickers` and `sentiment.sentiment_scorer` imports work.
 Each script keeps writing its own results JSON and its own log file, exactly as when it is
 run on its own.
 
-Options (both optional; passed unchanged to the 4 source scripts, not to the crawler):
+Options (both optional; passed unchanged to the 3 source scripts, not to the crawler):
     --days N   only keep data from the last N days         (default: each script's own, 7)
-    --time T   minutes; after T minutes the 4 scripts stop making requests, then finish
+    --time T   minutes; after T minutes the 3 scripts stop making requests, then finish
                scoring and saving what they already have.  (default: no limit)
-               The clock starts when the 4 scripts start, i.e. after the crawler is done.
+               The clock starts when the 3 scripts start, i.e. after the crawler is done.
 
 Failures:
     One script failing never stops the others. If the crawler fails, the Mastodon fetcher
@@ -34,7 +36,8 @@ Run (from backend/):
 
 NOTE:
  - tickers come from perennial.securities, so DATABASE_URL must be set
- - before running ensure fresh reddit_cookies and youtube_cookies
+ - before running ensure fresh youtube_cookies
+ - reddit is not run (sentiment/reddit/ is kept, but how to use Reddit is undecided)
 """
 
 import argparse
@@ -48,6 +51,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.utils.console import stdout_logger
+from src.utils.fetch_tickers import fetch_tickers
 
 _out = stdout_logger()  # console lines (print() is banned in src/)
 
@@ -82,6 +86,7 @@ MASTODON = Script("mastodon", "mastodon", "mastodon_stock_fetcher")
 SOURCES = (
     Script("bluesky", "bluesky", "bluesky"),
     MASTODON,
+    # Reddit is deliberately not run: how to handle it is still undecided.
     # Script("reddit", "reddit", "reddit"),
     Script("youtube", "youtube", "youtube"),
 )
@@ -217,6 +222,15 @@ async def run_all(days, minutes):
     run_start = time.monotonic()
     results = []
 
+    # 0. the tickers come from the database; without them there is nothing to run
+    if not await fetch_tickers():
+        say(
+            "tickers",
+            "could not load tickers from the database (securities table "
+            "unreachable or empty); stopping",
+        )
+        return 1
+
     # 1. the crawler, alone
     crawl = await run_script(CRAWLER)
     results.append(crawl)
@@ -287,7 +301,7 @@ def positive(value):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Run the Mastodon server crawler, then the Bluesky, Mastodon, Reddit and "
+        description="Run the Mastodon server crawler, then the Bluesky, Mastodon and "
         "YouTube sentiment scripts in parallel."
     )
     ap.add_argument(

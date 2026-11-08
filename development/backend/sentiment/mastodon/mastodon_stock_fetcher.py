@@ -4,8 +4,8 @@ stock tickers, score the sentiment of each, and save the per-ticker sentiment.
 
 Flow:
     1. load_tickers()           -> tickers to look for, from perennial.securities
-                                   (src/utils/fetch_tickers.py); a small fallback
-                                   list is used if the database is unavailable
+                                   (src/utils/fetch_tickers.py); the run stops
+                                   if the database can't be read
     2. Read the server list     -> Mastodon server domains (JSON file)
     3. For every server, query the hashtag timeline for each ticker (#AAPL, ...)
        in batches, AND crawl the broad finance "discovery" hashtags (#stocks,
@@ -112,16 +112,6 @@ LOG_FILE = Path(__file__).with_name("mastodon.log")
 LOG_MAX_BYTES = 5_000_000  # rotate at ~5 MB, keep 3 old files
 LOG_BACKUPS = 3
 BODY_SNIPPET = 200  # max chars of an error response body to log
-
-# Used when the securities table is unavailable. Same shape as fetch_ticker_map():
-# company name -> ticker.
-FALLBACK_TICKERS = {
-    "NVIDIA": "NVDA",
-    "Apple": "AAPL",
-    "Microsoft": "MSFT",
-    "Amazon": "AMZN",
-    "Alphabet": "GOOGL",
-}
 
 DAYS = 7  # how many days back to fetch
 LOCAL_ONLY = False  # True = only posts authored on each server
@@ -435,23 +425,25 @@ def parse_tickers(data):
 
 
 def load_tickers():
-    """Tickers from the securities table (fetch_ticker_map), or FALLBACK_TICKERS if it is unavailable."""
-    tickers, source = [], "database"
+    """Tickers from the securities table (fetch_ticker_map).
+
+    Raises SystemExit if the database can't be read or has no usable tickers:
+    there is no fallback list, the run stops instead.
+    """
     try:
         raw = asyncio.run(fetch_ticker_map())
-        if raw:
-            tickers = parse_tickers(raw)
-        else:
-            log.warning("ticker source unavailable or empty; using fallback")
     except Exception as e:
-        log.warning("ticker fetch failed, using fallback: %s: %s", type(e).__name__, e)
-        _out.info(f"Ticker fetch failed, using fallback: {e}")
+        log.error("ticker fetch failed: %s: %s", type(e).__name__, e)
+        raise SystemExit(f"Could not load tickers from the database: {e}") from e
+    tickers = parse_tickers(raw) if raw else []
     if not tickers:
-        tickers = parse_tickers(FALLBACK_TICKERS)
-        source = "fallback"
+        log.error("no tickers loaded from the securities table; stopping")
+        raise SystemExit(
+            "Could not load tickers from the database (securities table "
+            "unreachable or has no usable active securities); stopping."
+        )
     log.info(
-        "tickers loaded source=%s count=%d tickers=%s",
-        source,
+        "tickers loaded source=database count=%d tickers=%s",
         len(tickers),
         [t["symbol"] for t in tickers],
     )
@@ -1530,11 +1522,7 @@ def run(workers, output_path, days=DAYS, time_limit_minutes=None, deadline=None)
         deadline = run_start + time_limit_minutes * 60
     _deadline = deadline
 
-    tickers = load_tickers()
-    if not tickers:
-        log.error("no tickers loaded; nothing to do")
-        _out.info("No tickers loaded; nothing to do.")
-        return
+    tickers = load_tickers()  # exits the run if the database can't be read
     index = TickerIndex(tickers)
     symbols = [t["symbol"] for t in tickers]
 
