@@ -264,14 +264,14 @@ def test_a_crash_while_weighting_is_recorded_as_internal_error(
 
 
 @pytest.mark.db
-def test_a_crash_while_reading_social_files_is_recorded_as_internal_error(
+def test_a_crash_while_reading_social_reports_is_recorded_as_internal_error(
     engine,
     seeded,  # noqa: F811
     monkeypatch,
 ):
     """The same rule for the package's other run, the social import."""
     monkeypatch.setattr(social, "collect_social", boom)
-    result = social.run_social(engine, NOW, window_days=7)
+    result = social.run_social(engine, NOW, seeded, window_days=7)
     assert_recorded(engine, "social_posts", result, "RuntimeError", None)
 
 

@@ -96,7 +96,7 @@ def _batch_probs(texts, contexts, tokenizer, model, device):
 def _summarize(p, bullish_idx, bearish_idx, neutral_idx):
     pb, pr, pn = p[bullish_idx].item(), p[bearish_idx].item(), p[neutral_idx].item()
     net = pb - pr  # -1 .. 1
-    return round(5.5 + 4.5 * net, 2), pb, pr, pn  # score 1 .. 10
+    return round(net, 4), pb, pr, pn  # score -1 (bearish) .. 1 (bullish)
 
 
 def _handle_oom(device, batch_size):
@@ -110,7 +110,7 @@ def _handle_oom(device, batch_size):
 
 
 def score_texts(texts, filename, batch_size=BATCH_SIZE, resume=True):
-    """Score each string from 1 (most negative) to 10 (most positive) and
+    """Score each string from -1 (most negative) to 1 (most positive) and
     append the results to `filename` after each completed batch.
 
     Format is JSON Lines: one {"text": ..., "score": ...} object per line.
@@ -194,7 +194,7 @@ def score_items(items, filename, batch_size=BATCH_SIZE, resume=True):
     identical texts under different ids are kept as separate records.
 
     Output is JSON Lines, one record per item, appended after every batch:
-        {"id": ..., "score": 1..10, "bullish": p, "bearish": p, "neutral": p}
+        {"id": ..., "score": -1..1, "bullish": p, "bearish": p, "neutral": p}
     Read it back with load_score_records(filename).
 
     Texts are scored shortest-first to minimise padding; the file order

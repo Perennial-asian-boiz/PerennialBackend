@@ -1072,8 +1072,8 @@ EXPLANATION_MAX_CLAIMS = 3
 # S1-05 source credibility weighting (docs/work-items/source-credibility-design-note.md).
 SOCIAL_PLATFORMS = ("reddit", "bluesky", "mastodon", "youtube")
 
-# One row per (platform post, security) from the social pipeline's JSON files.
-# Scores are the pipeline's own 1-10 scale (FinTwitBERT).
+# One row per (platform post, security), written by the social sentiment pipeline.
+# Scores are FinTwitBERT's bullish minus bearish probability, in [-1, 1].
 social_posts = Table(
     "social_posts",
     metadata,
@@ -1083,12 +1083,12 @@ social_posts = Table(
     Column("row_number", Integer, nullable=False),
     Column("platform", String(16), nullable=False),
     Column("post_id", String(500), nullable=False),
-    Column("score", Numeric(4, 2), nullable=False),
+    Column("score", Numeric(5, 4), nullable=False),
     UniqueConstraint("batch_id", "row_number"),
     UniqueConstraint("batch_id", "security_id", "platform", "post_id"),
     CheckConstraint("row_number >= 1", name="row_number"),
     CheckConstraint(_in("platform", SOCIAL_PLATFORMS), name="platform"),
-    CheckConstraint("score >= 1 AND score <= 10", name="score"),
+    CheckConstraint("score >= -1 AND score <= 1", name="score"),
 )
 Index("ix_social_posts_security_id", social_posts.c.security_id)
 
@@ -1218,7 +1218,8 @@ ticker_sentiment = Table(
         name="social_sentiment_range",
     ),
     CheckConstraint(
-        "social_sentiment IS NULL OR social_count > 0", name="social_sentiment_counted"
+        "social_sentiment IS NULL OR social_count > 0 OR social_sentiment = 0",
+        name="social_sentiment_counted",
     ),
 )
 Index("ix_ticker_sentiment_security_id", ticker_sentiment.c.security_id)

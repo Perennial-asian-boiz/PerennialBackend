@@ -7,13 +7,19 @@ Order:
     1. mastodon_server_crawler   runs alone first (refreshes mastodon/mastodon_servers.json)
     2. bluesky, mastodon_stock_fetcher, youtube
                                  run at the same time, each in its own process
+    3. database write            after the 3 scripts have exited, every scored post is
+                                 written to perennial.social_posts as ONE batch (scores in
+                                 [-1, 1]). The credibility job later turns the latest batch
+                                 into ticker_sentiment.social_count / social_sentiment.
+                                 Not done after Ctrl+C.
 
 Every script runs as a separate subprocess (`python -m sentiment.<folder>.<file>`)
 with its own folder as the working directory, so files it reads/writes by relative path
 (cookie files, mastodon_servers.json) live next to it. backend/ is put on PYTHONPATH so the
 shared `src.utils.fetch_tickers` and `sentiment.sentiment_scorer` imports work.
-Each script keeps writing its own results JSON and its own log file, exactly as when it is
-run on its own.
+Each script writes its own log file. Its results are not written to disk: the script
+prints them as one results line (sentiment/results.py), which the runner keeps instead of
+showing, and step 3 writes them to the database.
 
 Options (both optional; passed unchanged to the 3 source scripts, not to the crawler):
     --days N   only keep data from the last N days         (default: each script's own, 7)
@@ -24,7 +30,8 @@ Options (both optional; passed unchanged to the 3 source scripts, not to the cra
 Failures:
     One script failing never stops the others. If the crawler fails, the Mastodon fetcher
     uses the existing mastodon_servers.json from an earlier run; if there is none, it is
-    skipped. A summary is printed at the end and the exit code is 1 if anything failed.
+    skipped. The database write uses whatever the scripts that succeeded produced. A summary
+    is printed at the end and the exit code is 1 if anything failed.
 
 Console output of all scripts is streamed live, each line prefixed with the script name.
 Ctrl+C reaches every script (they save their partial results) and the runner waits for
@@ -35,7 +42,7 @@ Run (from backend/):
     python -m sentiment.sentiment_manager --days 2 --time 7 (quick test)
 
 NOTE:
- - tickers come from perennial.securities, so DATABASE_URL must be set
+ - tickers come from, and results go to, the database, so DATABASE_URL must be set
  - before running ensure fresh youtube_cookies
  - reddit is not run (sentiment/reddit/ is kept, but how to use Reddit is undecided)
 """
@@ -47,9 +54,10 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
+from sentiment.results import parse_results_line
 from src.utils.console import stdout_logger
 from src.utils.fetch_tickers import fetch_tickers
 
@@ -94,7 +102,8 @@ SERVERS_FILE = (
     MASTODON.cwd / "mastodon_servers.json"
 )  # written by the crawler, read by the fetcher
 
-WIDTH = max(len(s.name) for s in (CRAWLER, *SOURCES))
+DB_WRITE = "social_posts"  # label of the database write in the console and summary
+WIDTH = max(len(n) for n in (CRAWLER.name, *(s.name for s in SOURCES), DB_WRITE))
 
 
 @dataclass
@@ -121,9 +130,20 @@ def fmt_num(x):
     return f"{x:g}"
 
 
-async def pump(stream, name):
+async def pump(stream, name, reports=None):
     """Forward a child's output line by line with a name prefix. Splits on \\r as well as
-    \\n, so progress bars that redraw a line still show up and can't grow without bound."""
+    \\n, so progress bars that redraw a line still show up and can't grow without bound.
+    A results line (sentiment/results.py) is not shown: it is stored in reports[name]."""
+
+    def line_out(text):
+        report = parse_results_line(text)
+        if report is not None:
+            if reports is not None:
+                reports[name] = report
+            say(name, f"results received ({len(report)} tickers)")
+        elif text:
+            say(name, text)
+
     buf = b""
     while True:
         chunk = await stream.read(65536)
@@ -132,12 +152,8 @@ async def pump(stream, name):
         buf += chunk
         *lines, buf = re.split(rb"\r\n|\r|\n", buf)
         for line in lines:
-            text = line.decode("utf-8", "replace").rstrip()
-            if text:
-                say(name, text)
-    text = buf.decode("utf-8", "replace").rstrip()
-    if text:
-        say(name, text)
+            line_out(line.decode("utf-8", "replace").rstrip())
+    line_out(buf.decode("utf-8", "replace").rstrip())
 
 
 # ---- running one script -------------------------------------------------------------------
@@ -171,7 +187,7 @@ async def stop_child(proc, name):
         await proc.wait()
 
 
-async def run_script(script, args=()):
+async def run_script(script, args=(), reports=None):
     cmd = [sys.executable, "-m", script.dotted, *args]
     start = time.monotonic()
     try:
@@ -187,7 +203,7 @@ async def run_script(script, args=()):
         return Result(script.name, "failed", note=f"could not start: {e}")
 
     say(script.name, "started" + (f" ({' '.join(args)})" if args else ""))
-    pump_task = asyncio.create_task(pump(proc.stdout, script.name))
+    pump_task = asyncio.create_task(pump(proc.stdout, script.name, reports))
     try:
         code = await proc.wait()
     except asyncio.CancelledError:
@@ -215,6 +231,36 @@ async def run_script(script, args=()):
         return Result(script.name, "ok", elapsed)
     say(script.name, f"FAILED with exit code {code} after {fmt_secs(elapsed)}")
     return Result(script.name, "failed", elapsed, f"exit code {code}")
+
+
+# ---- database write -----------------------------------------------------------------------
+def write_posts(reports):
+    """Write the scripts' reports ({platform: report}) to social_posts as one batch.
+    Blocking (database I/O); run_all calls it in a worker thread."""
+    # Imported here so the scraping still runs if the DB dependencies are missing.
+    from src.db.session import make_engine
+    from src.services.credibility.job import WINDOW_DAYS
+    from src.services.credibility.social import run_social
+
+    start = time.monotonic()
+    engine = make_engine(workload="pipeline")
+    try:
+        result = run_social(
+            engine, datetime.now(timezone.utc), reports, window_days=WINDOW_DAYS
+        )
+    except Exception as e:
+        say(DB_WRITE, f"FAILED: {type(e).__name__}")
+        return Result(DB_WRITE, "failed", time.monotonic() - start, type(e).__name__)
+    finally:
+        engine.dispose()
+    elapsed = time.monotonic() - start
+    if not result.succeeded:
+        note = f"{result.error_code}: {result.error_summary or ''}".rstrip(": ")
+        say(DB_WRITE, f"FAILED: {note}")
+        return Result(DB_WRITE, "failed", elapsed, note)
+    note = f"{result.accepted_count} posts, batch {result.batch_id}"
+    say(DB_WRITE, f"wrote {note}")
+    return Result(DB_WRITE, "ok", elapsed, note)
 
 
 # ---- whole pipeline -----------------------------------------------------------------------
@@ -264,9 +310,12 @@ async def run_all(days, minutes):
         args += ["--days", fmt_num(days)]
     if minutes is not None:
         args += ["--time", fmt_num(minutes)]
-    tasks = [asyncio.create_task(run_script(s, args)) for s in sources]
+    reports = {}  # {platform: report}, filled from each script's results line
+    tasks = [asyncio.create_task(run_script(s, args, reports)) for s in sources]
+    interrupted = True
     try:
         await asyncio.gather(*tasks, return_exceptions=True)
+        interrupted = False
     finally:
         # runs after every script has exited, also after Ctrl+C
         for s, t in zip(sources, tasks):
@@ -276,15 +325,21 @@ async def run_all(days, minutes):
                 results.append(
                     Result(s.name, "failed", note=f"runner error: {t.result()!r}")
                 )
-        print_summary(results, time.monotonic() - run_start)
+        if interrupted:
+            print_summary(results, time.monotonic() - run_start)
 
+    # 3. write the posts to the database. Not after Ctrl+C: a partial run is not stored.
     if any(r.status == "stopped" for r in results):
+        results.append(Result(DB_WRITE, "skipped", note="interrupted"))
+        print_summary(results, time.monotonic() - run_start)
         return 130
+    results.append(await asyncio.to_thread(write_posts, reports))
+    print_summary(results, time.monotonic() - run_start)
     return 0 if all(r.status == "ok" for r in results) else 1
 
 
 def print_summary(results, total):
-    order = [CRAWLER.name] + [s.name for s in SOURCES]
+    order = [CRAWLER.name] + [s.name for s in SOURCES] + [DB_WRITE]
     results = sorted(results, key=lambda r: order.index(r.name))
     _out.info(f"\nSummary ({fmt_secs(total)} total)")
     for r in results:

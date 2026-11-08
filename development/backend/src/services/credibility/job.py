@@ -3,8 +3,10 @@
     python -m src.pipeline.scheduler --once --job sentiment
 
 The job runs, in order: news ingestion (S1-03, A), article scoring (S1-04, B,
-plugged in through score_articles), the publisher lookup, the social import,
-and the weighting (C). One step failing never stops the next.
+plugged in through score_articles), the publisher lookup and the weighting (C).
+One step failing never stops the next. Social posts are not imported here:
+the sentiment pipeline (sentiment/sentiment_manager.py) writes them to
+social_posts itself when it runs.
 
 The weighting is a derived run (ticker_sentiment). For every security in the
 current production watchlist publication it takes, over the last WINDOW_DAYS:
@@ -14,14 +16,16 @@ current production watchlist publication it takes, over the last WINDOW_DAYS:
   of the newest article score), weighted by its publisher's entry in
   source_weights.json;
 * each social post of the latest social batch, if that batch is inside the
-  window: its 1-10 score mapped to [-1, 1] by (score - 5.5) / 4.5, weighted by
-  its platform's entry.
+  window: its score (already in [-1, 1]), weighted by its platform's entry.
 
 Each weight then fades with the item's age at the time of the run, halving every
 half_life_days. A news article's age runs from its publication; a social post's
 from the end of its file's day, since posts carry no dates.
 
-value is the weighted average, plain_average the unweighted one (AC 1). The
+value is the weighted average, plain_average the unweighted one (AC 1).
+social_sentiment is the social posts alone: the average of the three platforms'
+average scores weighted by their post counts, which is the plain average of
+every counted post. It is 0 when no post was counted. The
 weighted average starts with prior_weight of a neutral 0, so a ticker with one
 fresh Reuters article at +0.8 gets +0.4, and with ten of them +0.73. Every
 security gets a row with the counts, the date range and the weights version
@@ -48,7 +52,6 @@ from src.ingestion.identity import resolve_tickers
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
 from src.services.credibility.publishers import PublisherResolver, resolve_publishers
-from src.services.credibility.social import run_social
 from src.services.credibility.weights import WeightTable, load_weights
 from src.services.fundamentals.job import current_universe
 from src.services.news.finnhub import FinnhubNewsClient
@@ -59,11 +62,6 @@ logger = logging.getLogger(__name__)
 
 SOURCE = "ticker_sentiment"
 WINDOW_DAYS = 7
-
-
-def social_to_unit(score: float) -> float:
-    """The social pipeline's 1-10 scale mapped onto S1-04's [-1, 1]."""
-    return (score - 5.5) / 4.5
 
 
 def decay(at: datetime, now: datetime, half_life_days: float) -> float:
@@ -113,6 +111,11 @@ def weigh(
             first_at=min(i.first_at for i in items),
             last_at=max(i.last_at for i in items),
         )
+    # Post-count weighted average of the platforms' averages = mean of all posts;
+    # 0 when the ticker had no social posts.
+    social = [i.score for i in items if i.social]
+    mean = sum(social) / len(social) if social else 0.0
+    record["social_sentiment"] = Decimal(f"{mean:.4f}")
     return record
 
 
@@ -196,7 +199,7 @@ def social_items(
     for row in rows:
         out.setdefault(row["symbol"], []).append(
             Item(
-                social_to_unit(float(row["score"])),
+                float(row["score"]),
                 table.weight_for(row["platform"]) * fade,
                 first,
                 last,
@@ -313,7 +316,7 @@ class SentimentRun:
 
     @property
     def succeeded(self) -> bool:
-        """The weighting stored its batch; a missing social file is not a failure."""
+        """The weighting stored its batch; a missing social batch is not a failure."""
         result = self.results.get(SOURCE)
         return result is not None and result.succeeded
 
@@ -326,7 +329,7 @@ def run_sentiment(
     score_articles: Callable[[Engine], ImportResult | None] | None = None,
     now: datetime | None = None,
 ) -> SentimentRun:
-    """A, B, the publisher lookup, the social import and C, timed (AC 4)."""
+    """A, B, the publisher lookup and C, timed (AC 4)."""
     now = now or datetime.now(timezone.utc)
     run = SentimentRun()
     steps: list[tuple[str, Callable[[], Any]]] = [
@@ -339,7 +342,6 @@ def run_sentiment(
             "news_publishers",
             lambda: resolve_publishers(engine, resolver, now, window_days=WINDOW_DAYS),
         ),
-        ("social_posts", lambda: run_social(engine, now, window_days=WINDOW_DAYS)),
         (SOURCE, lambda: derive_sentiment(engine, now=now)),
     ]
     for name, step in steps:

@@ -886,13 +886,13 @@ def _between(v: Optional[Decimal], lo: int, hi: int) -> Optional[Decimal]:
 
 
 class SocialPost(SourceRecord):
-    """One scored social post or comment about one security (1-10 scale)."""
+    """One scored social post or comment about one security, in [-1, 1]."""
 
     DB_COLUMNS = ("platform", "post_id", "score")
 
     platform: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
     post_id: Annotated[str, BeforeValidator(_text_validator(500, required=True))]
-    score: Annotated[Decimal, BeforeValidator(_required_signed(2, 4))]
+    score: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
 
     @field_validator("platform")
     @classmethod
@@ -904,7 +904,7 @@ class SocialPost(SourceRecord):
     @field_validator("score")
     @classmethod
     def _score(cls, v: Decimal) -> Decimal:
-        _between(v, 1, 10)
+        _between(v, -1, 1)
         return v
 
 
@@ -1048,8 +1048,8 @@ class TickerSentiment(SourceRecord):
                 raise ValueError("first_at must not be after last_at")
         if (self.news_count == 0) != (self.model_version is None):
             raise ValueError("model_version is present exactly when news is counted")
-        if self.social_sentiment is not None and self.social_count == 0:
-            raise ValueError("social_sentiment needs social posts counted")
+        if self.social_sentiment and self.social_count == 0:
+            raise ValueError("social_sentiment without social posts must be 0")
         return self
 
 

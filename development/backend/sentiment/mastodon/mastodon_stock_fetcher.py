@@ -18,13 +18,14 @@ Flow:
                                    as one batch (temporary file, deleted right after)
     6. aggregate_batch()        -> combine post and comment sentiment, equal weight;
                                    the combined score is the post's item score
-    7. write_results()          -> JSON results file (written once, at the end)
+    7. write_results()          -> results line for sentiment_manager (once, at the end)
 
-Results file (default: mastodon_sentiments.json next to this script, override
-with --output; overwritten each run, also written if the run is interrupted or
-fails part-way). Format: a list with one object per queried ticker:
-    [{"ticker": "NVDA", "average_sentiment": 6.12, "post_count": 2,
-      "posts": {"https://mastodon.social/users/x/statuses/1": 7.4, ...}}, ...]
+Results: printed as one results line for sentiment_manager (see
+sentiment/results.py), also if the run is interrupted or fails part-way; the
+manager writes them to the database and no results file is written. Format: a
+list with one object per queried ticker (scores in [-1, 1]):
+    [{"ticker": "NVDA", "average_sentiment": 0.1378, "post_count": 2,
+      "posts": {"https://mastodon.social/users/x/statuses/1": 0.4222, ...}}, ...]
 Item ids are the post's canonical ActivityPub URI (globally unique; Mastodon's
 numeric ids are local to each server). A post that mentions several tickers
 appears under each of them. Tickers with no posts have average_sentiment null.
@@ -39,12 +40,12 @@ a rotating log file (default: mastodon.log next to this script, override with
 Usage (run from the backend/ directory, as a module, so `src.*` resolves):
     python -m sentiment.mastodon.mastodon_stock_fetcher
     python -m sentiment.mastodon.mastodon_stock_fetcher --workers 10
-    python -m sentiment.mastodon.mastodon_stock_fetcher --output out.json --log-file run.log
+    python -m sentiment.mastodon.mastodon_stock_fetcher --log-file run.log
     python -m sentiment.mastodon.mastodon_stock_fetcher --days 3 --time 30
 
 --days N  only keeps posts from the last N days (default: DAYS).
 --time T  stops making requests (timelines and comments) after T minutes; what
-          was fetched by then is still scored and the results file is written.
+          was fetched by then is still scored and the results are handed over.
 
 Ticker file format (read by src/utils/fetch_tickers.py) -- company name: ticker:
     {"NVIDIA": "NVDA", "Apple": "AAPL", "Berkshire Hathaway": "BRK.B"}
@@ -98,6 +99,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 import requests  # noqa: E402
+from sentiment.results import emit_results  # noqa: E402
 from src.utils.console import stdout_logger  # noqa: E402
 from src.utils.fetch_tickers import fetch_ticker_map  # noqa: E402
 
@@ -105,9 +107,6 @@ _out = stdout_logger()  # console lines (print() is banned in src/)
 
 # ---- Settings (edit here) ----
 SERVERS_FILE = "mastodon_servers.json"  # Mastodon server list JSON
-OUTPUT_FILE = Path(__file__).with_name(
-    "mastodon_sentiments.json"
-)  # results, overwritten each run
 LOG_FILE = Path(__file__).with_name("mastodon.log")
 LOG_MAX_BYTES = 5_000_000  # rotate at ~5 MB, keep 3 old files
 LOG_BACKUPS = 3
@@ -470,7 +469,7 @@ def load_domains(path, open_only=False, mastodon_only=False):
     return list(dict.fromkeys(domains))
 
 
-# --------------------------------------------------------- results file ---
+# -------------------------------------------------------------- results ---
 def build_report(results, tickers):
     """List of {ticker, average_sentiment, post_count, posts} for every queried ticker.
 
@@ -479,7 +478,7 @@ def build_report(results, tickers):
     report = []
     for ticker in sorted(tickers):
         posts = results.get(ticker, {})
-        average = round(sum(posts.values()) / len(posts), 2) if posts else None
+        average = round(sum(posts.values()) / len(posts), 4) if posts else None
         report.append(
             {
                 "ticker": ticker,
@@ -491,31 +490,20 @@ def build_report(results, tickers):
     return report
 
 
-def write_results(path, results, tickers):
-    """Write the report as JSON. The file is replaced atomically, so a crash
-    mid-write never leaves a half-written file. Never raises."""
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
+def write_results(results, tickers):
+    """Hand the report to sentiment_manager (one marker line on stdout; see
+    sentiment/results.py). Nothing is written to disk. Never raises."""
     try:
         report = build_report(results, tickers)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, path)
+        emit_results(report)
         log.info(
-            "results written path=%s tickers=%d posts=%d",
-            path,
+            "results emitted tickers=%d posts=%d",
             len(report),
             sum(r["post_count"] for r in report),
         )
-        _out.info(f"Results saved to {path}")
     except Exception:
-        log.exception("failed to write results to %s", path)
-        _out.info(f"Failed to write results to {path} (see log).")
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        log.exception("failed to emit results")
+        _out.info("Failed to emit results (see log).")
 
 
 # ------------------------------------------------------------- helpers ---
@@ -1342,7 +1330,7 @@ def aggregate_batch(posts, comments_by_post, records, results):
                 comment_sents.append(_pick(c_rec))
 
         _, combined = combine_sentiment(post_sent, comment_sents)
-        score = round(combined["score"], 2)
+        score = round(combined["score"], 4)
         for sym in p["matched_tickers"]:
             results.setdefault(sym, {})[pkey] = score
         posts_scored += 1
@@ -1514,7 +1502,7 @@ def _pipeline(workers, tickers, index, cutoff, domains, results, progress):
     return True
 
 
-def run(workers, output_path, days=DAYS, time_limit_minutes=None, deadline=None):
+def run(workers, days=DAYS, time_limit_minutes=None, deadline=None):
     """deadline (a time.monotonic() value) wins over time_limit_minutes if both are given."""
     global _deadline
     run_start = time.monotonic()
@@ -1566,7 +1554,7 @@ def run(workers, output_path, days=DAYS, time_limit_minutes=None, deadline=None)
         log.exception("run aborted after %d posts scored", progress["posts_scored"])
         raise
     finally:
-        write_results(output_path, results, symbols)
+        write_results(results, symbols)
 
     log.info(
         "run finished unique_posts=%d comments=%d elapsed=%.1fs",
@@ -1591,12 +1579,6 @@ def main():
         type=int,
         default=DEFAULT_WORKERS,
         help=f"Parallel servers (default: {DEFAULT_WORKERS})",
-    )
-    ap.add_argument(
-        "--output",
-        default=str(OUTPUT_FILE),
-        help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} "
-        "next to this script; overwritten each run)",
     )
     ap.add_argument(
         "--log-file",
@@ -1627,7 +1609,7 @@ def main():
     setup_logging(args.log_file)
 
     try:
-        run(args.workers, args.output, days=args.days, deadline=deadline)
+        run(args.workers, days=args.days, deadline=deadline)
     except KeyboardInterrupt:
         log.info("run stopped by user")
         _out.info("Stopped.")

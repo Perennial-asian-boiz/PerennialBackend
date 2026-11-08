@@ -601,6 +601,11 @@ ACCEPTED = {
         "ticker_sentiment",
         social_sentiment_row(social_sentiment=None),
     ),
+    # 0024: a ticker with no social posts stores social_sentiment 0
+    "sentiment_social_sentiment_zero_without_posts": (
+        "ticker_sentiment",
+        sentiment_row(social_sentiment=Decimal("0")),
+    ),
     "score_ok": ("company_scores", score_row()),
     "score_zero": ("company_scores", score_row(score=Decimal("0.0"))),
     "score_hundred": ("company_scores", score_row(score=Decimal("100.0"))),
