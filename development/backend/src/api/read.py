@@ -12,7 +12,9 @@ Design: docs/work-items/m5-read-api-design-note.md. Schemas: docs/technical-spec
   decision 112 A1 for the market cap). Ranking v5 no longer publishes the
   price; both are stripped at serve time without changing the stored row, and
   the warnings and market_caps_unavailable count still say when a cap was
-  missing. The envelope copies named
+  missing. Ranking v6 publishes no market cap: its records carry SEC's public
+  float (public domain) with public_float_as_of and size_flags, served as
+  stored. The envelope copies named
   fields from immutable data only, and bodies are canonical JSON (sorted keys,
   no insignificant whitespace), so a publication's body never changes (RA-6).
 
@@ -58,6 +60,7 @@ CHANNEL = "production"
 QUALITY_KINDS = ("quality_passed", "quality_override")
 BUCKETS = ("popular_stable", "affordable_growing", "unresolved")
 UNAVAILABLE_WARNING = "market_cap_unavailable"
+UNAVAILABLE_SIZE_FLAG = "size_unavailable"  # ranking v6's, in size_flags
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +116,8 @@ class Publication(BaseModel):
     )
     stale_sources: list[StaleSource] = Field(description="Reused sources, by source")
     market_caps_unavailable: int = Field(
-        description="Records warning market_cap_unavailable, across all buckets"
+        description="Records warning market_cap_unavailable or, from ranking"
+        " watchlist-v6, flagging size_unavailable, across all buckets"
     )
     congress_history_gaps: int
     source_as_of: dict[str, str | None] = Field(
@@ -374,6 +378,12 @@ def _records(output: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
             yield from (r for r in records if isinstance(r, Mapping))
 
 
+def _size_unavailable(record: Mapping[str, Any]) -> bool:
+    """No company size: the v1-v5 warning, or ranking v6's size flag."""
+    warnings, flags = record.get("warnings") or [], record.get("size_flags") or []
+    return UNAVAILABLE_WARNING in warnings or UNAVAILABLE_SIZE_FLAG in flags
+
+
 def _without_unlicensed(output: Any) -> Any:
     """``output`` with each record's market_cap and signals.ark.share_price dropped.
 
@@ -455,9 +465,7 @@ def _envelope(conn: Connection, publication_id: int) -> tuple[dict[str, Any], An
         "degraded": degraded is not None,
         "stale_sources": _stale_sources(degraded),
         # From the immutable output, so it is exact on every collection path.
-        "market_caps_unavailable": sum(
-            UNAVAILABLE_WARNING in (r.get("warnings") or []) for r in _records(output)
-        ),
+        "market_caps_unavailable": sum(_size_unavailable(r) for r in _records(output)),
         "congress_history_gaps": gap_count if isinstance(gap_count, int) else 0,
         "source_as_of": {s: as_of.get(s) for s in m.WATCHLIST_SOURCES},
     }
