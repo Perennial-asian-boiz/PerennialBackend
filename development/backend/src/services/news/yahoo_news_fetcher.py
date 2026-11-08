@@ -38,6 +38,8 @@ except ImportError:
 sys.path.insert(
     0, str(Path(__file__).resolve().parents[2])
 )  # insert src dir in path so utils dir can be accessed
+# backend dir too: utils.fetch_tickers reads the securities table through src.db
+sys.path.insert(1, str(Path(__file__).resolve().parents[3]))
 from utils.console import stderr_logger, stdout_logger  # noqa: E402
 from utils.fetch_tickers import fetch_tickers  # noqa: E402
 

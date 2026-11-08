@@ -61,7 +61,10 @@ CONTEXT_WINDOW = (
     60  # chars either side of an ambiguous match searched for finance words
 )
 MIN_NAME_CHARS = 4  # company names shorter than this are never matched
-BULL_THRESHOLD, BEAR_THRESHOLD = 6.5, 4.5  # on the 1..10 score scale (5.5 = neutral)
+BULL_THRESHOLD, BEAR_THRESHOLD = (
+    0.2222,
+    -0.2222,
+)  # on the -1..1 score scale (0 = neutral)
 
 # Symbols that are English words / jargon: a finance word nearby does NOT prove
 # the author means the company ("AI stocks", "IT is going up"), so they are only
@@ -210,7 +213,7 @@ NEEDS_CONTEXT_NAMES = {
     "southwest",
     "paramount",
 }
-# Hand-made aliases (only used if the ticker is in your tickers.json).
+# Hand-made aliases (only used if the ticker is in the securities table).
 DEFAULT_ALIASES = {
     "google": ["GOOGL", "GOOG"],
     "alphabet": ["GOOGL", "GOOG"],
@@ -469,6 +472,10 @@ class TickerMatcher:
                 else:
                     self._cand[form] = sym
 
+            # Securities without a company name come through as {ticker: ticker};
+            # that is not a name, so the symbol rules above stay in charge.
+            if name.upper().lstrip("$") == sym:
+                name = ""
             short = _short_name(name)
             for nm in {name, short}:
                 self._add_name(nm, sym, amb_names)

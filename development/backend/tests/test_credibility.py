@@ -1,7 +1,5 @@
 """S1-05 source credibility weighting: weights, publishers, social import, ticker sentiment. Synthetic only."""
 
-import json
-import os
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -14,10 +12,10 @@ from src.ingestion.importer import CollectionOutcome, import_collection
 from src.pipeline.lifecycle import begin_run
 from src.services.credibility import job
 from src.services.credibility.job import (
-    Item, about_company, decay, derive_sentiment, run_sentiment, social_to_unit, weigh)
+    Item, about_company, decay, derive_sentiment, run_sentiment, weigh)
 from src.services.credibility.publishers import (
     PublisherResolver, host_of, resolve_publishers)
-from src.services.credibility.social import collect_social, platform_file, run_social
+from src.services.credibility.social import collect_social, run_social
 from src.services.credibility.weights import load_weights, parse_weights
 from src.services.fundamentals.job import Universe
 from src.services.news import job as news_job
@@ -29,7 +27,7 @@ NOW = T0 + timedelta(days=1)
 TIERS = {
     "major": {"weight": 1.0, "sources": ["reuters.com"]},
     "media": {"weight": 0.7, "sources": ["yahoo.com"]},
-    "social": {"weight": 0.2, "sources": ["reddit", "youtube"]},
+    "social": {"weight": 0.2, "sources": ["reddit", "mastodon", "youtube"]},
 }
 TABLE = parse_weights({"version": "test-v1", "half_life_days": 3,
                        "relevance": "headline-match-v1", "prior_weight": 1, "tiers": TIERS})
@@ -120,8 +118,15 @@ def test_a_ticker_with_nothing_scored_has_counts_of_zero_and_no_value():
     assert record["article_count"] == 0 and record["value"] is None and record["first_at"] is None
 
 
-def test_social_scores_map_onto_minus_one_to_one():
-    assert [social_to_unit(s) for s in (1, 5.5, 10)] == [-1.0, 0.0, 1.0]
+def test_social_sentiment_is_the_mean_of_the_social_posts_only():
+    record = weigh("RKLB", [item(0.8, 1.0), item(1.0, 0.2, social=True),
+                            item(-0.5, 0.2, social=True), item(0.2, 0.2, social=True)],
+                   "v", "finbert", 0)
+    # three platforms' posts, one each: post-count weighted mean = plain mean
+    assert record["social_sentiment"] == Decimal("0.2333")
+    # no social posts: 0, also for a ticker with nothing at all
+    assert weigh("RKLB", [item(0.8, 1.0)], "v", "finbert", 0)["social_sentiment"] == 0
+    assert weigh("RKLB", [], "v", None, 0)["social_sentiment"] == 0
 
 
 # ── time decay and relevance (weights-v2) ────────────────
@@ -200,34 +205,29 @@ def test_the_resolver_reads_one_redirect_and_never_follows_it():
 # ── social import ────────────────────────────────────────
 
 
-def write_report(directory, platform, entries, modified=T0):
-    path = platform_file(directory, platform)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(entries))
-    os.utime(path, (modified.timestamp(), modified.timestamp()))
-
-
-def test_fresh_files_are_read_and_stale_or_missing_ones_reported(tmp_path):
-    write_report(tmp_path, "reddit", [
-        {"ticker": "rklb", "posts": {"t3_a": 7.4, "t3_b": "bad", "t3_c": 11}},
-        {"ticker": "ZZZZ", "posts": {"t3_d": 5}},
-        "not an entry",
-    ])
-    write_report(tmp_path, "youtube", [{"ticker": "RKLB", "posts": {"v1": 2}}],
-                 modified=T0 - timedelta(days=9))
-    outcome = collect_social(tmp_path, lambda tickers: {"RKLB"} & set(tickers), NOW, 7)
-    assert outcome.succeeded and outcome.source_as_of == date(2026, 10, 26)
+def test_reports_are_read_and_missing_platforms_reported():
+    reports = {
+        "bluesky": [
+            {"ticker": "rklb", "posts": {"p_a": 0.42221, "p_b": "bad", "p_c": 1.5}},
+            {"ticker": "ZZZZ", "posts": {"p_d": -0.1}},
+            "not an entry",
+        ],
+        "youtube": [{"ticker": "RKLB", "posts": {"v1": -0.7}}],
+        "reddit": [{"ticker": "RKLB", "posts": {"t3_a": 0.5}}],  # not run: ignored
+    }
+    outcome = collect_social(reports, lambda tickers: {"RKLB"} & set(tickers), NOW, 7)
+    assert outcome.succeeded and outcome.source_as_of == NOW.date()
     assert outcome.records == [
-        {"ticker": "RKLB", "platform": "reddit", "post_id": "t3_a", "score": 7.4}]
+        {"ticker": "RKLB", "platform": "bluesky", "post_id": "p_a", "score": 0.4222},
+        {"ticker": "RKLB", "platform": "youtube", "post_id": "v1", "score": -0.7}]
     env = outcome.envelope
-    assert (env["fresh"], env["stale"], env["missing"]) == (
-        ["reddit"], ["youtube"], ["bluesky", "mastodon"])
+    assert (env["fresh"], env["missing"]) == (["bluesky", "youtube"], ["mastodon"])
     assert env["skipped_tickers"] == ["ZZZZ"]
     assert outcome.coverage == {"complete": False, "scope": "recent_window"}
 
 
-def test_no_fresh_file_is_missing_upstream(tmp_path):
-    outcome = collect_social(tmp_path, lambda tickers: set(tickers), NOW, 7)
+def test_no_report_is_missing_upstream():
+    outcome = collect_social({}, lambda tickers: set(tickers), NOW, 7)
     assert not outcome.succeeded and outcome.error_code == "missing_upstream"
 
 
@@ -277,10 +277,9 @@ def seeded(engine, monkeypatch, tmp_path):
     universe = Universe(sorted(NAMES), {}, {})
     monkeypatch.setattr(news_job, "current_universe", lambda conn: universe)
     monkeypatch.setattr(job, "current_universe", lambda conn: universe)
-    write_report(tmp_path, "reddit", [{"ticker": "RKLB", "posts": {"t3_a": 10}}])
-    write_report(tmp_path, "youtube", [{"ticker": "RKLB", "posts": {"v1": 1}}])
-    monkeypatch.setattr("src.services.credibility.social.SOCIAL_DIR", tmp_path)
-    return tmp_path
+    # what the sentiment pipeline hands over: posts collected on T0's day
+    return {"mastodon": [{"ticker": "RKLB", "posts": {"m1": 1.0}}],
+            "youtube": [{"ticker": "RKLB", "posts": {"v1": -1.0}}]}
 
 
 def score_articles(engine, model="finbert", scores=SCORES):
@@ -307,25 +306,28 @@ def stored(engine):
 
 @pytest.mark.db
 def test_the_job_runs_every_step_and_stores_the_weighted_value_per_ticker(engine, seeded):
+    # the sentiment pipeline writes the social batch itself, before the job runs
+    assert run_social(engine, T0, seeded, window_days=7).succeeded
     resolver = Resolver(DOMAINS)
     run = run_sentiment(engine, NewsClient(NEWS), resolver, score_articles=score_articles,
                         now=NOW)
     assert run.succeeded
     assert list(run.seconds) == ["news_articles", "article_sentiment", "news_publishers",
-                                 "social_posts", "ticker_sentiment"]
+                                 "ticker_sentiment"]
     assert all(r.succeeded for r in run.results.values())
 
     rows = stored(engine)
     rklb = rows["RKLB"]
     # reuters 1.0 x 0.8 and an unknown blog 0.2 x -0.5, published a day before the
-    # run, keep 0.5^(1/3) = 0.7937 of their weight; reddit 0.2 x 1.0 and youtube
-    # 0.2 x -1.0, from a file whose day ended 12 hours before, keep 0.8909.
+    # run, keep 0.5^(1/3) = 0.7937 of their weight; mastodon 0.2 x 1.0 and youtube
+    # 0.2 x -1.0, collected on a day that ended 12 hours before, keep 0.8909.
     # with the neutral prior of 1:
     # (0.7 x 0.7937) / (1.2 x 0.7937 + 0.4 x 0.8909 + 1) = 0.5556 / 2.3088
     assert rklb["value"] == Decimal("0.2406")
     assert rklb["plain_average"] == Decimal("0.0750")
     assert (rklb["article_count"], rklb["news_count"], rklb["social_count"]) == (4, 2, 2)
-    # social posts span the 7 days before their file's date; news are dated
+    assert rklb["social_sentiment"] == Decimal("0.0000")  # mastodon +1, youtube -1
+    # social posts span the 7 days before their collection date; news are dated
     assert rklb["first_at"] == datetime(2026, 10, 19, 23, 59, 59, tzinfo=timezone.utc)
     assert rklb["last_at"] == datetime(2026, 10, 26, 23, 59, 59, tzinfo=timezone.utc)
     assert rklb["weights_version"] == "weights-v3"
@@ -337,6 +339,7 @@ def test_the_job_runs_every_step_and_stores_the_weighted_value_per_ticker(engine
     absi = rows["ABSI"]
     assert (absi["article_count"], absi["value"], absi["first_at"]) == (0, None, None)
     assert absi["model_version"] is None
+    assert (absi["social_count"], absi["social_sentiment"]) == (0, Decimal("0.0000"))
 
     with engine.connect() as conn:
         deps = set(conn.execute(select(models.run_dependencies.c.source).where(
@@ -399,7 +402,7 @@ def test_a_failed_lookup_is_retried_and_a_resolved_one_is_not(engine, seeded):
 def test_a_stale_social_batch_is_left_out(engine, seeded):
     run_news(engine, NewsClient(NEWS), T0.date())
     score_articles(engine)
-    assert run_social(engine, NOW, window_days=7, directory=seeded).succeeded
+    assert run_social(engine, T0, seeded, window_days=7).succeeded
     later = NOW + timedelta(days=10)  # the social batch and the articles are now old
     result = derive_sentiment(engine, now=later)
     assert result.succeeded
@@ -427,6 +430,7 @@ def test_a_failing_step_does_not_stop_the_weighting(engine, seeded):
     def exploding(engine):
         raise RuntimeError("boom")
 
+    assert run_social(engine, T0, seeded, window_days=7).succeeded
     run = run_sentiment(engine, Broken(), Resolver({}), score_articles=exploding, now=NOW)
     assert run.succeeded and "article_sentiment" not in run.results
     rklb = stored(engine)["RKLB"]

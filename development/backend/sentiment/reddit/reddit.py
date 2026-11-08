@@ -17,7 +17,7 @@ Design
   Daily / very large threads get their comments fetched under two sorts.
 * Scoring: each fetched thread (the post plus its comments) is one batch. The
   items in it are filtered and attributed to tickers (reddit_processing.py) and
-  passed to the shared sentiment scorer (score_texts, 1..10). score_texts only
+  passed to the shared sentiment scorer (score_texts, -1..1). score_texts only
   reports through a file, so a temporary directory is used and always deleted.
   A short reply is scored together with the text it answers (parent comment /
   post title, kept short) so "yes, get out now" is read in context.
@@ -33,8 +33,8 @@ going, so a hard kill loses at most that much work. If the run fails before any
 scraping starts (missing credentials, no tickers, login failure) the existing
 file is left untouched.
 Format: a list with one object per ticker, sorted by ticker:
-    [{"ticker": "NVDA", "average_sentiment": 6.12, "post_count": 2,
-      "posts": {"t3_abc123": 7.4, "t1_def456": 4.84}}, ...]
+    [{"ticker": "NVDA", "average_sentiment": 0.1378, "post_count": 2,
+      "posts": {"t3_abc123": 0.4222, "t1_def456": -0.1467}}, ...]
 "posts" / "post_count" hold every scored item (posts AND comments), keyed by
 Reddit's own fullname (t3_ = post, t1_ = comment). An item that mentions several
 tickers appears under each of them. A ticker with no items has
@@ -2016,7 +2016,7 @@ def build_report(results, tickers):
     report = []
     for ticker in sorted(tickers):
         items = results.get(ticker, {})
-        average = round(sum(items.values()) / len(items), 2) if items else None
+        average = round(sum(items.values()) / len(items), 4) if items else None
         report.append(
             {
                 "ticker": ticker,
@@ -2107,9 +2107,9 @@ async def load_ticker_map():
         raise RuntimeError(f"ticker fetch failed: {type(e).__name__}: {e}") from e
     if not companies:
         raise RuntimeError(
-            "the ticker file is missing, unreadable or has no usable entries"
+            "the ticker source (securities table) is unavailable or has no usable entries"
         )
-    log.info("tickers loaded source=file count=%d", len(set(companies.values())))
+    log.info("tickers loaded source=database count=%d", len(set(companies.values())))
     return dict(companies)
 
 

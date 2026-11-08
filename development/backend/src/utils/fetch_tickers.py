@@ -1,78 +1,109 @@
-import json
-from pathlib import Path
+"""
+Tickers to track, read from the database (perennial.securities).
 
-SRC_DIR = Path(__file__).resolve().parent.parent
-TICKER_FILE = SRC_DIR / "services" / "sentiment" / "tickers.json"
+Every active security is one ticker. The map form is {company name: ticker},
+taken from securities.name and securities.symbol. When a row has no usable
+name (NULL, empty or whitespace), the ticker itself is used as the key, so the
+entry becomes {ticker: ticker}. If two securities share a name (e.g. GOOG and
+GOOGL are both "Alphabet Inc."), the first symbol in alphabetical order keeps
+the name and the others fall back to {ticker: ticker}, so no ticker is lost.
+
+The database URL comes from src.db.config (DATABASE_URL, or the local .env when
+PERENNIAL_ENV=local). Every public function returns None when the database is
+not configured, unreachable, or has no active securities, so callers can keep
+their current set or use their own fallback instead of crashing.
+"""
+
+import asyncio
+import logging
+
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+
+from src.db.config import DatabaseConfigError
+from src.db.models import securities
+
+log = logging.getLogger(__name__)
 
 
 def _clean(entry) -> str | None:
     """Normalise one entry to an UPPERCASE ticker without '$', or None if unusable."""
-    if isinstance(entry, dict):
-        entry = entry.get("ticker") or entry.get("symbol")
     if not isinstance(entry, str):
         return None
     ticker = entry.strip().upper().lstrip("$")
     return ticker or None
 
 
-def _read_ticker_list() -> list[str] | None:
-    """
-    Read the ticker source. Accepted shapes:
-      ["AAPL", "MSFT"]
-      {"tickers": ["AAPL", "MSFT"]}
-      {"AAPL": {...}, "MSFT": {...}}              (keys are used as tickers)
-      [{"ticker": "AAPL"}, {"symbol": "MSFT"}]
+def _query_rows(engine: Engine | None = None) -> list[tuple[str, str | None]]:
+    """(symbol, name) of every active security, ordered by symbol.
 
-    Returns tickers in file order with duplicates removed, or None if the source
-    is missing, unreadable, malformed or contains no tickers.
+    Raises DatabaseConfigError / SQLAlchemyError / OSError on failure. Pass an
+    engine to reuse one; otherwise a short-lived engine is created and disposed.
     """
-    # ---- JSON file implementation (current) ----
+    owned = engine is None
+    if owned:
+        from src.db.session import make_engine
+
+        engine = make_engine(workload="pipeline")
     try:
-        raw = json.loads(TICKER_FILE.read_text(encoding="utf-8"))
-        if isinstance(raw, dict):
-            raw = raw["tickers"] if "tickers" in raw else list(raw.keys())
-        if not isinstance(raw, list):
-            return None
-        cleaned = (_clean(entry) for e in raw for entry in (e,))
-        tickers = list(dict.fromkeys(t for t in cleaned if t))
-    except (OSError, ValueError, KeyError, TypeError):
-        # OSError: missing/unreadable file; ValueError: bad JSON or bad encoding
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(securities.c.symbol, securities.c.name)
+                .where(securities.c.is_active.is_(True))
+                .order_by(securities.c.symbol)
+            ).all()
+    finally:
+        if owned:
+            engine.dispose()
+    return [(r.symbol, r.name) for r in rows]
+
+
+def _read_rows(engine: Engine | None = None) -> list[tuple[str, str | None]] | None:
+    """Like _query_rows, but returns None instead of raising."""
+    try:
+        return _query_rows(engine)
+    except DatabaseConfigError as e:
+        log.warning("cannot read tickers: %s", e)  # message is credential-free
+    except (SQLAlchemyError, OSError) as e:
+        # Only the type: SQLAlchemy messages can include connection details.
+        log.warning("cannot read tickers from securities: %s", type(e).__name__)
+    return None
+
+
+def _read_ticker_list(engine: Engine | None = None) -> list[str] | None:
+    """Active tickers in symbol order, de-duplicated, or None if unavailable/empty."""
+    rows = _read_rows(engine)
+    if rows is None:
         return None
+    tickers = list(dict.fromkeys(t for t in (_clean(s) for s, _ in rows) if t))
     return tickers or None
 
-    # ---- Supabase implementation (later) ----
-    # Needs a client created once at startup (e.g. a module-level `sb`).
-    # rows = (await sb.table("ticker_config").select("tickers").eq("id", 1).execute()).data
-    # if not rows:
-    #     return None
-    # return _normalise(rows[0]["tickers"])
 
+def build_ticker_map(rows) -> dict[str, str]:
+    """{company name: ticker} from (symbol, name) rows.
 
-def _read_ticker_map() -> dict[str, str] | None:
+    A row without a usable name becomes {ticker: ticker}. A name already taken by
+    an earlier row also falls back to {ticker: ticker}. Rows without a usable
+    symbol are skipped.
     """
-    Read the ticker file as {company name: UPPERCASE ticker}.
-
-    Expected file shape:
-      {"NVIDIA": "NVDA", "Apple": "AAPL", ...}   (key = company name, value = ticker)
-
-    Company names keep their original casing; tickers are uppercased and have any
-    leading '$' removed. Entries whose name or ticker is unusable are skipped.
-    Returns None if the file is missing, unreadable, not a JSON object, or has no
-    usable entries.
-    """
-    try:
-        raw = json.loads(TICKER_FILE.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-
-    mapping = {}
-    for name, symbol in raw.items():
+    mapping: dict[str, str] = {}
+    for symbol, name in rows:
         ticker = _clean(symbol)
-        if isinstance(name, str) and name.strip() and ticker:
-            mapping[name.strip()] = ticker
-    return mapping or None
+        if not ticker:
+            continue
+        key = name.strip() if isinstance(name, str) else ""
+        if not key or (key in mapping and mapping[key] != ticker):
+            key = ticker
+        mapping.setdefault(key, ticker)
+    return mapping
+
+
+def _read_ticker_map(engine: Engine | None = None) -> dict[str, str] | None:
+    rows = _read_rows(engine)
+    if rows is None:
+        return None
+    return build_ticker_map(rows) or None
 
 
 async def fetch_ticker_list() -> list[str] | None:
@@ -80,7 +111,7 @@ async def fetch_ticker_list() -> list[str] | None:
     Ordered, de-duplicated list of tickers (for callers that care about order,
     e.g. round-robin processing). None if the source is unavailable right now.
     """
-    return _read_ticker_list()
+    return await asyncio.to_thread(_read_ticker_list)
 
 
 async def fetch_tickers() -> set[str] | None:
@@ -91,14 +122,14 @@ async def fetch_tickers() -> set[str] | None:
 
     Returns a set of UPPERCASE tickers without "$", or None.
     """
-    tickers = _read_ticker_list()
+    tickers = await asyncio.to_thread(_read_ticker_list)
     return set(tickers) if tickers is not None else None
 
 
 async def fetch_ticker_map() -> dict[str, str] | None:
     """
-    Return the ticker file as {company name: UPPERCASE ticker}, e.g.
-    {"NVIDIA": "NVDA", "Apple": "AAPL"}. None if the source is unavailable or
-    has no usable entries.
+    Return the active securities as {company name: UPPERCASE ticker}, e.g.
+    {"NVIDIA Corp": "NVDA", "AAPL": "AAPL"} (the second had no name). None if
+    the source is unavailable or has no usable entries.
     """
-    return _read_ticker_map()
+    return await asyncio.to_thread(_read_ticker_map)

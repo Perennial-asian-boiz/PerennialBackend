@@ -80,6 +80,7 @@ SHAPES = {
         "last_at": ("timestamp with time zone", False),
         "weights_version": ("character varying(32)", True),
         "model_version": ("character varying(64)", False),
+        "social_sentiment": ("numeric(5,4)", False),  # 0023
     },
     "company_scores": {
         **BATCH_AND_SECURITY,
@@ -585,6 +586,26 @@ ACCEPTED = {
         sentiment_row(article_count=12, news_count=9, social_count=3),
     ),
     "sentiment_one_instant": ("ticker_sentiment", sentiment_row(first_at=LAST_AT)),
+    # 0023: social_sentiment, NULL or in [-1, 1], only with social posts counted
+    "sentiment_social_sentiment": (
+        "ticker_sentiment",
+        social_sentiment_row(social_sentiment=Decimal("0.4200")),
+    ),
+    "sentiment_social_sentiment_bounds": (
+        "ticker_sentiment",
+        sentiment_row(
+            article_count=12, news_count=9, social_count=3, social_sentiment=Decimal("-1")
+        ),
+    ),
+    "sentiment_social_sentiment_null_with_posts": (
+        "ticker_sentiment",
+        social_sentiment_row(social_sentiment=None),
+    ),
+    # 0024: a ticker with no social posts stores social_sentiment 0
+    "sentiment_social_sentiment_zero_without_posts": (
+        "ticker_sentiment",
+        sentiment_row(social_sentiment=Decimal("0")),
+    ),
     "score_ok": ("company_scores", score_row()),
     "score_zero": ("company_scores", score_row(score=Decimal("0.0"))),
     "score_hundred": ("company_scores", score_row(score=Decimal("100.0"))),
@@ -674,6 +695,18 @@ REFUSED = {
         social_sentiment_row(model_version="ProsusAI/finbert@synthetic0001"),
     ),
     "sentiment_row_number_zero": ("ticker_sentiment", sentiment_row(row_number=0)),
+    "sentiment_social_sentiment_above_one": (
+        "ticker_sentiment",
+        social_sentiment_row(social_sentiment=Decimal("1.0001")),
+    ),
+    "sentiment_social_sentiment_below_minus_one": (
+        "ticker_sentiment",
+        social_sentiment_row(social_sentiment=Decimal("-1.0001")),
+    ),
+    "sentiment_social_sentiment_without_posts": (
+        "ticker_sentiment",
+        sentiment_row(social_sentiment=Decimal("0.1000")),
+    ),
     # company_scores: score 0-100, weights 0..1, status, missing
     "score_below_zero": ("company_scores", score_row(score=Decimal("-0.1"))),
     "score_above_hundred": ("company_scores", score_row(score=Decimal("100.1"))),

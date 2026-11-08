@@ -7,11 +7,11 @@ to the sentiment scorer. Post text is not written to disk (the scorer needs a
 file for its output, so a temporary one is used and deleted right after).
 
 At the end of the run (or if it is interrupted or fails part-way) the scores are
-written to a JSON file (default: sentiment_results.json next to this script,
-override with --output; it is overwritten each run). Format: a list with one
-object per ticker:
-    [{"ticker": "NVDA", "average_sentiment": 6.12, "post_count": 2,
-      "posts": {"did:plc:xxx/rkey1": 7.4, "did:plc:yyy/rkey2": 4.84}}, ...]
+printed as one results line for sentiment_manager (see sentiment/results.py),
+which writes them to the database; no results file is written. Format: a list
+with one object per ticker (scores in [-1, 1]):
+    [{"ticker": "NVDA", "average_sentiment": 0.1378, "post_count": 2,
+      "posts": {"did:plc:xxx/rkey1": 0.4222, "did:plc:yyy/rkey2": -0.1467}}, ...]
 A post that mentions several tickers appears under each of them.
 
 Only cashtags ($NVDA) count as a hit; company names alone do not.
@@ -34,15 +34,14 @@ Run from the backend/ directory, as a module (so `src.utils` resolves):
 
 --days N  looks back N days from --until (ignored when --since is given).
 --time T  stops making API requests after T minutes; posts already fetched are
-          still scored and the results file is written as usual.
+          still scored and the results are handed over as usual.
 
 --tickers accepts ticker symbols or company names (case-insensitive); names are
-resolved to their symbol using the ticker file.
+resolved to their symbol using the securities table.
 """
 
 import argparse
 import asyncio
-import json
 import logging
 import logging.handlers
 import os
@@ -63,6 +62,7 @@ import httpx  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
 # NOTE: adjust this import path to wherever sentiment_scorer.py lives in your project.
+from sentiment.results import emit_results  # noqa: E402
 from sentiment.sentiment_scorer import (  # noqa: E402
     load_scores,
     score_texts,
@@ -78,20 +78,11 @@ load_dotenv()  # reads BSKY_HANDLE / BSKY_APP_PASSWORD from a .env file next to 
 PDS_URL = (
     "https://bsky.social/xrpc"  # authenticated; proxies searchPosts to the AppView
 )
-# symbol -> company name (same pairs as the ticker file, which is name -> symbol)
-FALLBACK_COMPANIES = {
-    "NVDA": "NVIDIA",
-    "AAPL": "Apple",
-    "MSFT": "Microsoft",
-    "AMZN": "Amazon",
-    "GOOGL": "Alphabet",
-}
 ENGLISH_ONLY = True
 PAGE_LIMIT = 100  # API max per page
 DEFAULT_LOOKBACK_DAYS = 7  # used when --since is not given
 DEFAULT_WINDOW_HOURS = 24  # slice big ranges so deep pagination never caps out
 
-OUTPUT_FILE = Path(__file__).with_name("bluesky_sentiments.json")
 
 LOG_FILE = Path(__file__).with_name("bluesky_query.log")
 LOG_MAX_BYTES = 5_000_000  # rotate at ~5 MB, keep 3 old files
@@ -204,7 +195,7 @@ async def score_batch(posts, results):
     return len(posts)
 
 
-# ---------- Results file ----------
+# ---------- Results ----------
 def build_report(results, tickers):
     """List of {ticker, average_sentiment, post_count, posts} for every queried ticker.
 
@@ -213,7 +204,7 @@ def build_report(results, tickers):
     report = []
     for ticker in sorted(tickers):
         posts = results.get(ticker, {})
-        average = round(sum(posts.values()) / len(posts), 2) if posts else None
+        average = round(sum(posts.values()) / len(posts), 4) if posts else None
         report.append(
             {
                 "ticker": ticker,
@@ -225,31 +216,20 @@ def build_report(results, tickers):
     return report
 
 
-def write_results(path, results, tickers):
-    """Write the report as JSON. The file is replaced atomically, so a crash
-    mid-write never leaves a half-written file. Never raises."""
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
+def write_results(results, tickers):
+    """Hand the report to sentiment_manager (one marker line on stdout; see
+    sentiment/results.py). Nothing is written to disk. Never raises."""
     try:
         report = build_report(results, tickers)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, path)
+        emit_results(report)
         log.info(
-            "results written path=%s tickers=%d posts=%d",
-            path,
+            "results emitted tickers=%d posts=%d",
             len(report),
             sum(r["post_count"] for r in report),
         )
-        _out.info(f"Results saved to {path}")
     except Exception:
-        log.exception("failed to write results to %s", path)
-        _out.info(f"Failed to write results to {path} (see log).")
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        log.exception("failed to emit results")
+        _out.info("Failed to emit results (see log).")
 
 
 # ---------- Pipeline ----------
@@ -261,7 +241,7 @@ async def handle_post(post):
         "text": "...",
         "created_at": "2026-09-29T12:00:00.000Z",
         "ingested_at": 1234567890.0,
-        "score": 7.42,              # 1 (most negative) .. 10 (most positive)
+        "score": 0.4267,            # -1 (most negative) .. 1 (most positive)
     }
     TODO: write to your database.
     """
@@ -424,7 +404,7 @@ class BlueskyClient:
 
 
 # ---------- Query runner ----------
-async def run_query(tickers, since, until, window_hours, output_path, deadline=None):
+async def run_query(tickers, since, until, window_hours, deadline=None):
     """tickers: iterable of ticker symbols, e.g. {"NVDA", "AAPL"}
 
     deadline: time.monotonic() value after which no more API requests are made
@@ -442,7 +422,7 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
         set()
     )  # a post mentioning $TSLA and $NVDA shows up in both searches; handle once
     count = 0
-    results = {}  # {ticker: {post_id: score}}, written to the JSON file at the end
+    results = {}  # {ticker: {post_id: score}}, handed to sentiment_manager at the end
     run_start = time.monotonic()
 
     log.info(
@@ -512,7 +492,7 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
         raise
     finally:
         await client.close()
-        write_results(output_path, results, allowed)
+        write_results(results, allowed)
 
     log.info(
         "run finished unique_posts=%d elapsed=%.1fs",
@@ -524,7 +504,6 @@ async def run_query(tickers, since, until, window_hours, output_path, deadline=N
 
 # ---------- Ticker loading ----------
 SYMBOL_RE = re.compile(r"^[A-Z]{1,5}$")  # what CASHTAG_RE can actually match
-NAME_TO_SYMBOL = {n.lower(): s for s, n in FALLBACK_COMPANIES.items()}
 
 
 def parse_companies(raw):
@@ -561,23 +540,23 @@ def parse_companies(raw):
 async def load_tickers(cli_tickers):
     """Return the set of ticker symbols to query.
 
-    The ticker file is always loaded so --tickers can be given as either a
+    The ticker map (securities table) is always loaded so --tickers can be given as either a
     symbol (NVDA) or a company name (Nvidia). Unknown values are treated as
     plain symbols.
     """
-    companies = {}
-    source = "file"
     try:
         fetched = await fetch_ticker_map()
-        if fetched:
-            companies = parse_companies(fetched)
     except Exception as e:
-        log.warning("ticker fetch failed, using fallback: %s: %s", type(e).__name__, e)
-        _out.info(f"Ticker fetch failed, using fallback: {e}")
+        log.error("ticker fetch failed: %s: %s", type(e).__name__, e)
+        raise SystemExit(f"Could not load tickers from the database: {e}") from e
+    companies = parse_companies(fetched) if fetched else {}
     if not companies:
-        companies = dict(FALLBACK_COMPANIES)
-        source = "fallback"
-    log.info("tickers loaded source=%s count=%d", source, len(companies))
+        log.error("no tickers loaded from the securities table; stopping")
+        raise SystemExit(
+            "Could not load tickers from the database (securities table "
+            "unreachable or has no usable active securities); stopping."
+        )
+    log.info("tickers loaded source=database count=%d", len(companies))
 
     if not cli_tickers:
         return set(companies)
@@ -603,7 +582,7 @@ def main():
     ap.add_argument(
         "--tickers",
         nargs="+",
-        help="Tickers or company names to query (default: everything in the ticker file, else fallback list)",
+        help="Tickers or company names to query (default: every active security)",
     )
     ap.add_argument(
         "--since",
@@ -632,11 +611,6 @@ def main():
         help="Slice the range into windows of this size",
     )
     ap.add_argument(
-        "--output",
-        default=str(OUTPUT_FILE),
-        help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} next to this script; overwritten each run)",
-    )
-    ap.add_argument(
         "--log-file",
         default=str(LOG_FILE),
         help=f"Where to write the log (default: {LOG_FILE.name} next to this script)",
@@ -656,7 +630,7 @@ def main():
     async def go():
         tickers = await load_tickers(args.tickers)
         _out.info(f"Querying {sorted(tickers)} from {iso(since)} to {iso(until)}")
-        await run_query(tickers, since, until, args.window_hours, args.output, deadline)
+        await run_query(tickers, since, until, args.window_hours, deadline)
 
     try:
         asyncio.run(go())

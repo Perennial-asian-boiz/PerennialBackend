@@ -7,20 +7,21 @@ Items are videos. A video's id is its native YouTube video id. Its score is the 
 its chunk scores, weighted by chunk length in words. Videos that were transcribed are scored
 in batches of SCORE_BATCH_VIDEOS videos (all their chunks go to ONE score_texts call).
 
-Transcripts, metadata and scores are kept in memory only. Besides the results file and the
-log file, the only thing kept on disk is status.json, which maps a video id to "done" (it was
+Transcripts, metadata and scores are kept in memory only. Besides the log file, the only
+thing kept on disk is status.json, which maps a video id to "done" (it was
 scored) or "skipped" (it can never be transcribed: private, removed, not English, no speech),
-so a later run does not process the same video again. The results file only covers the videos
+so a later run does not process the same video again. The results only cover the videos
 processed in the current run. The scorer needs a file for its output, so a temporary one is
 used and deleted right after. yt_dlp needs scratch files for subtitles/audio and its cookie
 jar; they live in a temporary directory that is deleted at the end of the run (also after a
 crash or Ctrl+C).
 
-At the end of the run (or if it is interrupted or fails part-way) the scores are written
-to a JSON file (default: youtube_sentiment_results.json next to this script, override with
---output; it is overwritten each run). Format: a list with one object per ticker:
-    [{"ticker": "NVDA", "average_sentiment": 6.12, "post_count": 2,
-      "posts": {"<video id>": 7.4, "<video id>": 4.84}}, ...]
+At the end of the run (or if it is interrupted or fails part-way) the scores are printed
+as one results line for sentiment_manager (see sentiment/results.py), which writes them to
+the database; no results file is written. Format: a list with one object per ticker
+(scores in [-1, 1]):
+    [{"ticker": "NVDA", "average_sentiment": 0.1378, "post_count": 2,
+      "posts": {"<video id>": 0.4222, "<video id>": -0.1467}}, ...]
 ("posts"/"post_count" hold videos here, so every source script has the same schema.)
 A video that matches several tickers appears under each of them.
 
@@ -66,7 +67,6 @@ DATA_DIR = BACKEND_DIR / "data"
 STATUS_FILE = (
     DATA_DIR / "status.json"
 )  # {video id: "done" | "skipped"}, kept across runs
-OUTPUT_FILE = Path(__file__).with_name("youtube_sentiments.json")
 LOG_FILE = Path(__file__).with_name("youtube.log")
 LOG_MAX_BYTES = 5_000_000  # rotate at ~5 MB, keep 3 old files
 LOG_BACKUPS = 3
@@ -96,6 +96,7 @@ if str(UTILS_DIR) not in sys.path:
 from src.utils.console import stdout_logger  # noqa: E402
 from src.utils.fetch_tickers import fetch_ticker_map  # noqa: E402
 
+from ..results import emit_results  # noqa: E402
 from ..sentiment_scorer import load_scores, score_texts  # noqa: E402
 
 _out = stdout_logger()  # console lines (print() is banned in src/)
@@ -705,7 +706,7 @@ class Context:
     )  # round-robin line of tickers waiting for their next search page
     ready_queue: asyncio.Queue  # round-robin line of tickers with videos to transcribe
     score_queue: asyncio.Queue  # ids of transcribed videos waiting to be scored
-    results: dict  # {ticker: {video_id: score}}, written to the JSON file at the end
+    results: dict  # {ticker: {video_id: score}}, handed to sentiment_manager at the end
     video_scores: dict = field(
         default_factory=dict
     )  # video id -> score, for every scored video
@@ -1309,7 +1310,7 @@ def video_score(chunks, scores):
         n += 1
     if n == 0:
         return None, 0
-    return round(total / weight, 2), n
+    return round(total / weight, 4), n
 
 
 # Runs next to the transcript workers. Finished videos are collected, and every
@@ -1367,7 +1368,7 @@ async def scoring_worker(ctx):
             await flush()
 
 
-# ---- results file -----------------------------------------------------------------------
+# ---- results ----------------------------------------------------------------------------
 def build_report(results, tickers):
     """List of {ticker, average_sentiment, post_count, posts} for every queried ticker.
 
@@ -1377,7 +1378,7 @@ def build_report(results, tickers):
     report = []
     for ticker in sorted(set(tickers)):
         posts = results.get(ticker, {})
-        average = round(sum(posts.values()) / len(posts), 2) if posts else None
+        average = round(sum(posts.values()) / len(posts), 4) if posts else None
         report.append(
             {
                 "ticker": ticker,
@@ -1389,31 +1390,20 @@ def build_report(results, tickers):
     return report
 
 
-def write_results(path, results, tickers):
-    """Write the report as JSON. The file is replaced atomically, so a crash
-    mid-write never leaves a half-written file. Never raises."""
-    path = Path(path)
-    tmp = path.with_name(path.name + ".tmp")
+def write_results(results, tickers):
+    """Hand the report to sentiment_manager (one marker line on stdout; see
+    sentiment/results.py). Nothing is written to disk. Never raises."""
     try:
         report = build_report(results, tickers)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, path)
+        emit_results(report)
         log.info(
-            "results written path=%s tickers=%d videos=%d",
-            path,
+            "results emitted tickers=%d videos=%d",
             len(report),
             sum(r["post_count"] for r in report),
         )
-        _out.info(f"Results saved to {path}")
     except Exception:
-        log.exception("failed to write results to %s", path)
-        _out.info(f"Failed to write results to {path} (see log).")
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
+        log.exception("failed to emit results")
+        _out.info("Failed to emit results (see log).")
 
 
 # sets stop_event after the time limit. Everything else reacts to the event.
@@ -1444,14 +1434,12 @@ def print_summary(states, stopped_early, quota_hit):
         )
 
 
-async def async_main(
-    time_limit_minutes=None, days=7, output_path=OUTPUT_FILE, status_file=STATUS_FILE
-):
+async def async_main(time_limit_minutes=None, days=7, status_file=STATUS_FILE):
     """
     Discovers videos (round robin over the tickers), transcribes them, and scores the
     transcripts in batches while the run is still going. At the end (also after an error or
-    Ctrl+C) the per-ticker results are written to `output_path`. Returns that path, or None if
-    no video could be scored.
+    Ctrl+C) the per-ticker results are handed to sentiment_manager. Returns True, or None
+    if no video could be scored.
     """
     if not os.getenv("YOUTUBE_API_KEY"):
         log.error("missing YOUTUBE_API_KEY, cannot start")
@@ -1463,20 +1451,20 @@ async def async_main(
     tickers = list(dict.fromkeys(ticker_map.values())) if ticker_map else []
     if not tickers:
         log.error(
-            "no tickers loaded: the ticker file is missing, unreadable, not a "
-            "{company name: ticker} object, or empty"
+            "no tickers loaded: the securities table is unavailable or has no "
+            "active securities"
         )
         raise SystemExit(
             "Could not find, read, or parse any tickers from the ticker source"
         )
-    log.info("tickers loaded source=file count=%d", len(tickers))
+    log.info("tickers loaded source=database count=%d", len(tickers))
     log.info("auth: YouTube API key and cookies file are present (values not logged)")
     _out.info(
         f"Searching for {len(tickers)} tickers: {', '.join(tickers)} "
         f"(videos from the last {days:g} day(s))"
     )
 
-    results = {}  # {ticker: {video_id: score}}, written to the JSON file at the end
+    results = {}  # {ticker: {video_id: score}}, handed to sentiment_manager at the end
     video_scores = {}  # video id -> score, one entry per unique scored video
     run_start = time.monotonic()
     published_after = get_published_after(days)
@@ -1574,7 +1562,7 @@ async def async_main(
         raise
     finally:
         # results first, so a problem in the cleanup below can never cost us the scores
-        write_results(output_path, results, tickers)
+        write_results(results, tickers)
         if timer_task is not None:
             timer_task.cancel()
         for s in states:
@@ -1596,32 +1584,31 @@ async def async_main(
     for ticker in sorted(results):
         scores = results[ticker]
         _out.info(
-            f"  {ticker}: {round(sum(scores.values()) / len(scores), 2)} "
+            f"  {ticker}: {round(sum(scores.values()) / len(scores), 4)} "
             f"(avg of {len(scores)} video(s))"
         )
 
-    return str(output_path)
+    return True
 
 
 def run(
     time_limit_minutes=None,
     days=7,
-    output_path=OUTPUT_FILE,
     log_file=LOG_FILE,
     status_file=STATUS_FILE,
 ):
     """
     Synchronous entry point for other scripts: fetch YouTube transcripts for every ticker
-    in tickers.json, score them, write the results JSON to `output_path` and return that
-    path (None if no video could be scored).
+    in the securities table, score them and hand the results to sentiment_manager. Returns
+    True (None if no video could be scored).
     """
     setup_logging(log_file)
-    return asyncio.run(async_main(time_limit_minutes, days, output_path, status_file))
+    return asyncio.run(async_main(time_limit_minutes, days, status_file))
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download YouTube transcripts for every ticker in tickers.json and score their sentiment."
+        description="Download YouTube transcripts for every active security and score their sentiment."
     )
     parser.add_argument(
         "--time",
@@ -1636,13 +1623,6 @@ def main():
         type=float,
         default=7,
         help="Only consider videos published within this many days (default: 7)",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=str(OUTPUT_FILE),
-        help=f"JSON file for the sentiment results (default: {OUTPUT_FILE.name} next to this script; "
-        f"overwritten each run)",
     )
     parser.add_argument(
         "--status-file",
@@ -1671,7 +1651,7 @@ def main():
         raise SystemExit(f"Cookies file not found: {COOKIES_FILE}")
 
     try:
-        return run(args.time, args.days, args.output, args.log_file, args.status_file)
+        return run(args.time, args.days, args.log_file, args.status_file)
     except KeyboardInterrupt:
         log.info("run stopped by user")
         _out.info("Stopped.")

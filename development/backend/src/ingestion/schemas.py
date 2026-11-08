@@ -886,13 +886,13 @@ def _between(v: Optional[Decimal], lo: int, hi: int) -> Optional[Decimal]:
 
 
 class SocialPost(SourceRecord):
-    """One scored social post or comment about one security (1-10 scale)."""
+    """One scored social post or comment about one security, in [-1, 1]."""
 
     DB_COLUMNS = ("platform", "post_id", "score")
 
     platform: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
     post_id: Annotated[str, BeforeValidator(_text_validator(500, required=True))]
-    score: Annotated[Decimal, BeforeValidator(_required_signed(2, 4))]
+    score: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
 
     @field_validator("platform")
     @classmethod
@@ -904,7 +904,7 @@ class SocialPost(SourceRecord):
     @field_validator("score")
     @classmethod
     def _score(cls, v: Decimal) -> Decimal:
-        _between(v, 1, 10)
+        _between(v, -1, 1)
         return v
 
 
@@ -994,7 +994,9 @@ def _known(value: Optional[str], allowed: frozenset[str], what: str) -> Optional
 
 class TickerSentiment(SourceRecord):
     """One security's credibility-weighted sentiment over the window: PR #85's record
-    plus model_version (decision 108). Nothing counted means no value and no dates."""
+    plus model_version (decision 108). Nothing counted means no value and no dates.
+    social_sentiment (0023) is the social-posts-only sentiment, optional, and only
+    present when social posts were counted."""
 
     DB_COLUMNS = (
         "value",
@@ -1006,6 +1008,7 @@ class TickerSentiment(SourceRecord):
         "last_at",
         "weights_version",
         "model_version",
+        "social_sentiment",
     )
 
     value: Annotated[Optional[Decimal], BeforeValidator(_signed_decimal(4, 5))] = None
@@ -1019,8 +1022,11 @@ class TickerSentiment(SourceRecord):
     last_at: Optional[datetime] = None
     weights_version: Version
     model_version: Annotated[Optional[str], BeforeValidator(_text_validator(64))] = None
+    social_sentiment: Annotated[
+        Optional[Decimal], BeforeValidator(_signed_decimal(4, 5))
+    ] = None
 
-    @field_validator("value", "plain_average")
+    @field_validator("value", "plain_average", "social_sentiment")
     @classmethod
     def _unit_range(cls, v: Optional[Decimal]) -> Optional[Decimal]:
         if v is not None and not Decimal(-1) <= v <= Decimal(1):
@@ -1042,6 +1048,8 @@ class TickerSentiment(SourceRecord):
                 raise ValueError("first_at must not be after last_at")
         if (self.news_count == 0) != (self.model_version is None):
             raise ValueError("model_version is present exactly when news is counted")
+        if self.social_sentiment and self.social_count == 0:
+            raise ValueError("social_sentiment without social posts must be 0")
         return self
 
 
