@@ -37,7 +37,7 @@ Run from the backend/ directory, as a module (so `src.utils` resolves):
           still scored and the results file is written as usual.
 
 --tickers accepts ticker symbols or company names (case-insensitive); names are
-resolved to their symbol using the ticker file.
+resolved to their symbol using the securities table.
 """
 
 import argparse
@@ -78,7 +78,7 @@ load_dotenv()  # reads BSKY_HANDLE / BSKY_APP_PASSWORD from a .env file next to 
 PDS_URL = (
     "https://bsky.social/xrpc"  # authenticated; proxies searchPosts to the AppView
 )
-# symbol -> company name (same pairs as the ticker file, which is name -> symbol)
+# symbol -> company name (fallback when the securities table is unavailable)
 FALLBACK_COMPANIES = {
     "NVDA": "NVIDIA",
     "AAPL": "Apple",
@@ -561,12 +561,12 @@ def parse_companies(raw):
 async def load_tickers(cli_tickers):
     """Return the set of ticker symbols to query.
 
-    The ticker file is always loaded so --tickers can be given as either a
+    The ticker map (securities table) is always loaded so --tickers can be given as either a
     symbol (NVDA) or a company name (Nvidia). Unknown values are treated as
     plain symbols.
     """
     companies = {}
-    source = "file"
+    source = "database"
     try:
         fetched = await fetch_ticker_map()
         if fetched:
@@ -603,7 +603,7 @@ def main():
     ap.add_argument(
         "--tickers",
         nargs="+",
-        help="Tickers or company names to query (default: everything in the ticker file, else fallback list)",
+        help="Tickers or company names to query (default: every active security, else fallback list)",
     )
     ap.add_argument(
         "--since",

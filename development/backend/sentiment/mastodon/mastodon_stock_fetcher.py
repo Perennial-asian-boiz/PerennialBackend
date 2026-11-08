@@ -3,9 +3,9 @@ Fetch Mastodon posts (and their comments) from the last N days that mention
 stock tickers, score the sentiment of each, and save the per-ticker sentiment.
 
 Flow:
-    1. load_tickers()           -> tickers to look for, from the shared ticker file
+    1. load_tickers()           -> tickers to look for, from perennial.securities
                                    (src/utils/fetch_tickers.py); a small fallback
-                                   list is used if that file is unavailable
+                                   list is used if the database is unavailable
     2. Read the server list     -> Mastodon server domains (JSON file)
     3. For every server, query the hashtag timeline for each ticker (#AAPL, ...)
        in batches, AND crawl the broad finance "discovery" hashtags (#stocks,
@@ -57,7 +57,7 @@ How a post counts as mentioning a ticker:
       #investing or a keyword like "earnings"). This keeps tickers that are also
       normal words or other things (#ALL, #IT, #ON, #A, #NVDA the screen reader)
       from matching unrelated posts.
-    * company name ("Nvidia" for NVDA, taken from the name in the ticker file)
+    * company name ("Nvidia" for NVDA, taken from securities.name)
       or bare uppercase symbol ("NVDA" in the text, unambiguous tickers only)
                                                        -> counts, but only when the
       post also has a finance clue (this is how discovery-tag posts are matched).
@@ -113,7 +113,7 @@ LOG_MAX_BYTES = 5_000_000  # rotate at ~5 MB, keep 3 old files
 LOG_BACKUPS = 3
 BODY_SNIPPET = 200  # max chars of an error response body to log
 
-# Used when the ticker file is missing/unreadable. Same shape as the file:
+# Used when the securities table is unavailable. Same shape as fetch_ticker_map():
 # company name -> ticker.
 FALLBACK_TICKERS = {
     "NVIDIA": "NVDA",
@@ -167,7 +167,7 @@ DISCOVERY_TAGS = [
     "earnings",
 ]
 DISCOVERY_MAX_PAGES = 50  # max pages (40 posts each) per request batch per server
-MATCH_COMPANY_NAMES = True  # match "Nvidia" etc. (name from the ticker file)
+MATCH_COMPANY_NAMES = True  # match "Nvidia" etc. (name from securities.name)
 MATCH_BARE_SYMBOLS = True  # match bare uppercase "NVDA" (non-ambiguous tickers only)
 
 # ---- Author exclusion (we want opinions from people, not feeds/bots/spam) ----
@@ -419,6 +419,10 @@ def parse_tickers(data):
         if symbol in seen:
             continue
         seen.add(symbol)
+        # Securities without a company name come through as {ticker: ticker};
+        # matching that "name" case-insensitively would skip the ambiguity rules.
+        if isinstance(name, str) and name.strip().upper().lstrip("$") == symbol:
+            name = None
 
         tickers.append(
             {
@@ -431,14 +435,14 @@ def parse_tickers(data):
 
 
 def load_tickers():
-    """Tickers from the shared ticker file, or FALLBACK_TICKERS if it is unavailable."""
-    tickers, source = [], "file"
+    """Tickers from the securities table (fetch_ticker_map), or FALLBACK_TICKERS if it is unavailable."""
+    tickers, source = [], "database"
     try:
         raw = asyncio.run(fetch_ticker_map())
         if raw:
             tickers = parse_tickers(raw)
         else:
-            log.warning("ticker file missing, unreadable or empty; using fallback")
+            log.warning("ticker source unavailable or empty; using fallback")
     except Exception as e:
         log.warning("ticker fetch failed, using fallback: %s: %s", type(e).__name__, e)
         _out.info(f"Ticker fetch failed, using fallback: {e}")

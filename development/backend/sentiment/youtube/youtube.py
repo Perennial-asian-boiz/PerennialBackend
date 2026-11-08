@@ -1463,13 +1463,13 @@ async def async_main(
     tickers = list(dict.fromkeys(ticker_map.values())) if ticker_map else []
     if not tickers:
         log.error(
-            "no tickers loaded: the ticker file is missing, unreadable, not a "
-            "{company name: ticker} object, or empty"
+            "no tickers loaded: the securities table is unavailable or has no "
+            "active securities"
         )
         raise SystemExit(
             "Could not find, read, or parse any tickers from the ticker source"
         )
-    log.info("tickers loaded source=file count=%d", len(tickers))
+    log.info("tickers loaded source=database count=%d", len(tickers))
     log.info("auth: YouTube API key and cookies file are present (values not logged)")
     _out.info(
         f"Searching for {len(tickers)} tickers: {', '.join(tickers)} "
@@ -1612,7 +1612,7 @@ def run(
 ):
     """
     Synchronous entry point for other scripts: fetch YouTube transcripts for every ticker
-    in tickers.json, score them, write the results JSON to `output_path` and return that
+    in the securities table, score them, write the results JSON to `output_path` and return that
     path (None if no video could be scored).
     """
     setup_logging(log_file)
@@ -1621,7 +1621,7 @@ def run(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Download YouTube transcripts for every ticker in tickers.json and score their sentiment."
+        description="Download YouTube transcripts for every active security and score their sentiment."
     )
     parser.add_argument(
         "--time",

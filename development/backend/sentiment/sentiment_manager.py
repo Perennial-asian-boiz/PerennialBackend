@@ -33,7 +33,7 @@ Run (from backend/):
     python -m sentiment.sentiment_manager --days 2 --time 7 (quick test)
 
 NOTE:
- - make sure tickers.json is in the sentiment directory
+ - tickers come from perennial.securities, so DATABASE_URL must be set
  - before running ensure fresh reddit_cookies and youtube_cookies
 """
 

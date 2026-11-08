@@ -210,7 +210,7 @@ NEEDS_CONTEXT_NAMES = {
     "southwest",
     "paramount",
 }
-# Hand-made aliases (only used if the ticker is in your tickers.json).
+# Hand-made aliases (only used if the ticker is in the securities table).
 DEFAULT_ALIASES = {
     "google": ["GOOGL", "GOOG"],
     "alphabet": ["GOOGL", "GOOG"],
@@ -469,6 +469,10 @@ class TickerMatcher:
                 else:
                     self._cand[form] = sym
 
+            # Securities without a company name come through as {ticker: ticker};
+            # that is not a name, so the symbol rules above stay in charge.
+            if name.upper().lstrip("$") == sym:
+                name = ""
             short = _short_name(name)
             for nm in {name, short}:
                 self._add_name(nm, sym, amb_names)

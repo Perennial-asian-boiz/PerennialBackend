@@ -2107,9 +2107,9 @@ async def load_ticker_map():
         raise RuntimeError(f"ticker fetch failed: {type(e).__name__}: {e}") from e
     if not companies:
         raise RuntimeError(
-            "the ticker file is missing, unreadable or has no usable entries"
+            "the ticker source (securities table) is unavailable or has no usable entries"
         )
-    log.info("tickers loaded source=file count=%d", len(set(companies.values())))
+    log.info("tickers loaded source=database count=%d", len(set(companies.values())))
     return dict(companies)
 
 
