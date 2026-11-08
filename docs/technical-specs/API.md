@@ -26,12 +26,27 @@ The current production publication.
 - **Conditional request:** `If-None-Match` with the current tag returns `304` with no body.
 - **`404 no_current_publication`:** when nothing is current.
 
-`watchlist` is `publications.output`, verbatim: `{schema_version, ranking_version, generated_at, popular_stable, affordable_growing, unresolved, errors}`. Each served record has `ticker`, `bucket`, `rank`, `signals`, `source_dates` and `warnings`. The API never recomputes or reshapes it; it equals `replay()` of the publication, with two exceptions, both because no source has a licence to display the value (decision 95):
+`watchlist` is `publications.output`, verbatim: `{schema_version, ranking_version, generated_at, popular_stable, affordable_growing, unresolved, errors}`, plus `size_basis` from `watchlist-v6`. Each served record has `ticker`, `bucket`, `rank`, `signals`, `source_dates` and `warnings`. The API never recomputes or reshapes it; it equals `replay()` of the publication, with two exceptions, both because no source has a licence to display the value (decision 95):
 
-- **The market cap is never served** (decision 112 A1). Every stored record has a `market_cap`, and the API drops it from every record in every bucket, whatever its value, in `/v1/watchlist` and in `/v1/securities/{symbol}`'s `entry`. The bucket a record is in, its `market_cap_unavailable` warning and the envelope's `market_caps_unavailable` count are still served as stored.
+- **The market cap is never served** (decision 112 A1). Every record stored before `watchlist-v6` has a `market_cap`, and the API drops it from every record in every bucket, whatever its value, in `/v1/watchlist` and in `/v1/securities/{symbol}`'s `entry`. The bucket a record is in, its `market_cap_unavailable` warning and the envelope's `market_caps_unavailable` count are still served as stored.
 - **ARK's share price is never served** (L5 a). Ranking `watchlist-v5` doesn't publish it, and for an older publication that stores it, the API drops `signals.ark.share_price` from every record, on the same two routes.
 
 The stored publication is unchanged, and the `ETag` still names the publication.
+
+### Company size from `watchlist-v6`
+
+Ranking `watchlist-v6` (decision 112) is used when the pipeline's market-cap adapter is `sec_public_float`. Its records have no `market_cap`. SEC's public float is public domain, so these fields are served as stored:
+
+| field | type | meaning |
+|---|---|---|
+| `size_basis` | string | on the output: `sec_public_float` |
+| `public_float` | number or null | SEC's public float in USD, company-wide. It isn't a market cap: it leaves out shares held by insiders and affiliates. `null` on an `unresolved` record |
+| `public_float_as_of` | string or null | ISO date the float was measured (the end of the company's second fiscal quarter), so it is months old by design. The label is "Public float (as of <date>)" |
+| `size_flags` | array | `size_estimate_stale` when `public_float_as_of` is more than 548 days before `generated_at`; `size_unavailable` on an `unresolved` record. These are never `warnings`, so they don't make a dashboard row "Watch" |
+
+Buckets and order are `watchlist-v5`'s, with the public float in place of the market cap.
+
+The dashboard's `GET /api/watchlist` rows carry the same size as `public_float` and `public_float_as_of`, plus `size_caution`: true when the record has any `size_flags`. A row's "Watch" still comes from `warnings` alone. Before `watchlist-v6` the three are `null`, `null` and `false`.
 
 ### The `publication` object
 
@@ -45,7 +60,7 @@ Every field comes from immutable data: the `publications` row, its quality event
 | `demo` | boolean | true only when the quality event marks a demo publication |
 | `degraded` | boolean | true when the publication has a `degraded` event: a reused source, Congress history gaps or a market-cap fallback. `stale_sources` can be `[]` while this is true |
 | `stale_sources` | array | the reused sources, sorted by `source`: `{source, collected_at, age_seconds}`. `[]` when not degraded |
-| `market_caps_unavailable` | integer | records in `watchlist`, across all buckets, whose `warnings` contain `market_cap_unavailable`. This doesn't imply `degraded` |
+| `market_caps_unavailable` | integer | records in `watchlist`, across all buckets, whose `warnings` contain `market_cap_unavailable` or, from `watchlist-v6`, whose `size_flags` contain `size_unavailable`. This doesn't imply `degraded` |
 | `congress_history_gaps` | integer | the degraded event's Congress gap count, else `0` |
 | `source_as_of` | object | observation date per watchlist source (`congress_trades`, `ark_holdings`, `insider_trades`, `short_interest`), or `null` |
 
@@ -219,7 +234,7 @@ Nothing stored:
 
 A computed field is `null` when either input is missing, the two units differ, or the divisor is zero or negative (negative equity, revenue, or the prior year's revenue). `revenue_growth` is also `null` for the oldest year, and when the next-older year in the batch didn't end about a year earlier (365 ± 20 days), so a missing year never turns two years' change into one.
 
-The route reads only `fundamentals`' granted columns, never `concept` or `row_number`. `market_cap` is not served on `/v1` (#100), so the table's company size stays "coming soon" until the SEC public float is served.
+The route reads only `fundamentals`' granted columns, never `concept` or `row_number`. `market_cap` is not served on `/v1` (#100). From `watchlist-v6`, the company size is the `public_float` and `public_float_as_of` of the security's `entry` in `/v1/securities/{symbol}`.
 
 ## `GET /v1/market-status`
 

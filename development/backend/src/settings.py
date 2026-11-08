@@ -143,9 +143,14 @@ class Settings(ProviderSettings):
         if value is None:
             return None
         from src.ingestion.market_caps import ADAPTERS  # the registry imports Settings
+        from src.pipeline.ranking import SIZE_BASIS
 
         if value not in ADAPTERS:
             raise ValueError("unknown market-cap adapter")
+        # #98 F1/R1: a public float is not a market cap, so it is refused until a
+        # ranking version labels it (decision 112: watchlist-v6).
+        if value == "sec_public_float" and value not in SIZE_BASIS.values():
+            raise ValueError("sec_public_float needs a ranking version that labels it")
         return value
 
     @field_validator("source_policies")

@@ -66,6 +66,12 @@ class DashboardCompanyResponse(BaseModel):
     confidence_score: float | None
     sentiment: DashboardSentiment
     reason: str | None
+    # Decision 112 (d), from ranking v6: SEC's public float, shown as
+    # "Public float (as of <date>)". size_caution marks a weak value (size_flags);
+    # it never makes the row "Watch". All empty before v6.
+    public_float: float | None = None
+    public_float_as_of: str | None = None
+    size_caution: bool = False
 
 
 class DashboardResponse(BaseModel):
@@ -129,6 +135,8 @@ def company_from_record(
     warnings = record.get("warnings")
     if not isinstance(warnings, list):
         warnings = []
+    size_flags = record.get("size_flags")
+    as_of = record.get("public_float_as_of")
 
     has_warning = bool(warnings)
     has_signal = any(value is not None for value in signals.values())
@@ -143,6 +151,9 @@ def company_from_record(
         confidence_score=_number(record.get("confidence_score")),
         sentiment="Watch" if has_warning else ("Positive" if has_signal else "Neutral"),
         reason=_reason(bucket, signals, warnings),
+        public_float=_number(record.get("public_float")),
+        public_float_as_of=as_of if isinstance(as_of, str) else None,
+        size_caution=isinstance(size_flags, list) and bool(size_flags),
     )
 
 

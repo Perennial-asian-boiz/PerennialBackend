@@ -25,7 +25,14 @@ from src.pipeline.demo_guard import (
     LIVE_MODES,
     check_demo_database,
 )
-from src.pipeline.ranking import DEFAULT_CONFIG, VERSION, calculate, candidate_symbols
+from src.pipeline.ranking import (
+    DEFAULT_CONFIG,
+    SIZE_BASIS,
+    VERSION,
+    calculate,
+    candidate_symbols,
+    version_for,
+)
 from src.settings import (
     MARKET_CAP_MAX_REUSE_AGE,
     QualityThreshold,
@@ -42,7 +49,7 @@ MAX_AGE = {
 DOWNSTREAM = ("insider_trades", "short_interest")
 MARKET_CAP_OBSERVED_AGE = timedelta(days=3)
 # Providers whose values are measured less often than daily get their own
-# limit (#90, pending Bryan's approval of the D7 exception). SEC's public
+# limit (#90, decision 111's exception to D7). SEC's public
 # float is measured at the end of fiscal Q2 and replaced by the next 10-K, so
 # a current value is up to about 20 months old.
 MARKET_CAP_OBSERVED_AGE_BY_PROVIDER = {
@@ -526,6 +533,8 @@ def _select_market_caps(
             caps.c.id.label("market_cap_id"),
             caps.c.value,
             caps.c.currency,
+            caps.c.provider,
+            caps.c.observed_at,
             runs.c.collected_at,
         )
         .select_from(caps.join(runs, runs.c.batch_id == caps.c.batch_id))
@@ -567,11 +576,28 @@ def _select_market_caps(
             "batch_id": row.batch_id if row else None,
             "market_cap_id": row.market_cap_id if row else None,
             "value": row.value if row else None,
+            "provider": row.provider if row else None,
+            "observed_at": row.observed_at if row else None,
             "collected_at": row.collected_at if row else None,
         }
     if symbols and all(p["value"] is None for p in selected.values()):
         raise PublicationError("all market-cap values are unavailable")
     return selected
+
+
+def _check_size_basis(pinned: Mapping[str, dict[str, Any]], version: str) -> None:
+    """Decision 112's gate: a labelled version ranks only its own provider's
+    rows, and no other version ranks that provider's rows as market caps."""
+    basis = SIZE_BASIS.get(version)
+    labelled = set(SIZE_BASIS.values())
+    for pin in pinned.values():
+        provider = pin["provider"]
+        if provider is None:  # an all-NULL pin: no row, nothing to label
+            continue
+        if provider != basis if basis else provider in labelled:
+            raise PublicationError("market-cap provider does not match ranking version")
+        if basis and pin["value"] is not None and pin["observed_at"] is None:
+            raise PublicationError("public float has no as-of date")
 
 
 def _pinned_market_caps_summary(
@@ -691,7 +717,8 @@ def publish(
     market_caps="pinned" (M4 MC-B) selects each candidate's row from stored
     market_caps runs instead of taking observations (which must be None).
     market_cap_run_id is this pipeline call's collection, counted as refreshed;
-    market_cap_adapter names the adapter in the recorded policy.
+    market_cap_adapter names the adapter in the recorded policy and picks the
+    ranking version that labels its values (ranking.version_for, decision 112).
     """
     if market_caps == "pinned":
         if observations is not None or market_cap_fallback is not None:
@@ -811,7 +838,8 @@ def publish(
             "congress_trades": congress_history.ranking_rows(conn, through, now),
         }
         history = congress_history.summary(conn, through, now)
-        symbols = candidate_symbols(ranked)
+        version = version_for(market_cap_adapter) if observations is None else VERSION
+        symbols = candidate_symbols(ranked, version=version)
         security_ids = dict(
             conn.execute(
                 select(m.securities.c.symbol, m.securities.c.id).where(
@@ -822,11 +850,14 @@ def publish(
             .all()
         )
         policy: dict[str, Any] = {}
+        size_as_of = None
         if observations is None:
             pinned = _select_market_caps(
                 conn, symbols, security_ids, now, market_cap_max_age, modes
             )
+            _check_size_basis(pinned, version)
             cap_values = {s: p["value"] for s, p in pinned.items()}
+            size_as_of = {s: p["observed_at"] for s, p in pinned.items()}
             policy["market_caps"] = {
                 "max_age_seconds": int(market_cap_max_age.total_seconds()),
                 "adapter": market_cap_adapter,
@@ -861,12 +892,14 @@ def publish(
                 s: int(age.total_seconds()) for s, age in max_age.items()
             },
         }
-        output = calculate(ranked, cap_values, now, config)
+        output = calculate(
+            ranked, cap_values, now, config, version=version, size_as_of=size_as_of
+        )
         pub_id = conn.execute(
             insert(m.publications)
             .values(
                 created_at=now,
-                ranking_version=VERSION,
+                ranking_version=version,
                 ranking_config=config,
                 output=output,
             )
@@ -1075,9 +1108,13 @@ def replay(engine: Engine, publication_id: int) -> dict[str, Any]:
                 pub["ranking_config"]["congress_window_years"],
             )
         # New-path pins (M4 MC-B); an all-NULL pin means unavailable.
-        caps = dict(
+        pins = (
             conn.execute(
-                select(m.securities.c.symbol, m.market_caps.c.value)
+                select(
+                    m.securities.c.symbol,
+                    m.market_caps.c.value,
+                    m.market_caps.c.observed_at,
+                )
                 .select_from(
                     m.publication_market_cap_rows.join(
                         m.securities,
@@ -1094,6 +1131,8 @@ def replay(engine: Engine, publication_id: int) -> dict[str, Any]:
             .tuples()
             .all()
         )
+        caps = {symbol: value for symbol, value, _ in pins}
+        size_as_of = {symbol: observed for symbol, _, observed in pins}
         caps = caps or dict(
             conn.execute(
                 select(m.securities.c.symbol, m.market_cap_observations.c.value)
@@ -1118,4 +1157,5 @@ def replay(engine: Engine, publication_id: int) -> dict[str, Any]:
             pub["created_at"],
             pub["ranking_config"],
             version=pub["ranking_version"],
+            size_as_of=size_as_of,
         )
