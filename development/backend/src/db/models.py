@@ -1190,7 +1190,8 @@ ticker_sentiment = Table(
     Column("last_at", DateTime(timezone=True)),
     Column("weights_version", String(32), nullable=False),
     Column("model_version", String(64)),  # the news model; NULL when no news counted
-    Column("social_sentiment", Numeric(5, 4)),  # 0023: social posts only; NULL when none counted
+    # 0023: social posts only; NULL when none counted
+    Column("social_sentiment", Numeric(5, 4)),
     UniqueConstraint("batch_id", "row_number"),
     UniqueConstraint("batch_id", "security_id"),
     CheckConstraint("row_number >= 1", name="row_number"),
@@ -1216,7 +1217,9 @@ ticker_sentiment = Table(
         "social_sentiment IS NULL OR social_sentiment BETWEEN -1 AND 1",
         name="social_sentiment_range",
     ),
-    CheckConstraint("social_sentiment IS NULL OR social_count > 0", name="social_sentiment_counted"),
+    CheckConstraint(
+        "social_sentiment IS NULL OR social_count > 0", name="social_sentiment_counted"
+    ),
 )
 Index("ix_ticker_sentiment_security_id", ticker_sentiment.c.security_id)
 
