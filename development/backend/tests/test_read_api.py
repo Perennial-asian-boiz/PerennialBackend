@@ -1090,6 +1090,7 @@ def test_v1_routes_are_exactly_the_r1_reads_and_market_status():
     routes = v1_routes(_router_app())
     assert routes == {
         "/v1/watchlist": ["GET"],
+        "/v1/securities": ["GET"],  # Global company search
         "/v1/securities/{symbol}": ["GET"],
         "/v1/market-status": ["GET"],  # S1-11
         "/v1/securities/{symbol}/score": ["GET"],  # Sprint 2 (S2-01..03)

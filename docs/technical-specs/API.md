@@ -64,6 +64,26 @@ Every field comes from immutable data: the `publications` row, its quality event
 | `congress_history_gaps` | integer | the degraded event's Congress gap count, else `0` |
 | `source_as_of` | object | observation date per watchlist source (`congress_trades`, `ark_holdings`, `insider_trades`, `short_interest`), or `null` |
 
+## `GET /v1/securities?q={query}&limit=50&offset=0`
+
+Global company search across stored securities, independent of user sector
+preferences, ranking buckets, score availability and the current publication.
+Matches the beginning of company names, ticker symbols and ticker aliases,
+case-insensitively. `N` returns names/tickers starting with N; `NV` narrows that
+list. A match only in the middle of a name or ticker is not included.
+One character is sufficient; `%` and `_` are literal, not wildcards.
+
+- **Parameters:** `q` (1–100 characters, not blank after trimming), `limit`
+  (1–100, default 50), `offset` (0–100000, default 0).
+- **200:** `{api_version: "v1", query, results: [{symbol, name, sector}], limit,
+  offset, has_more}`. Name and sector may be null. No match returns `results: []`.
+- **Order:** exact canonical ticker, ticker prefix, company-name prefix, then
+  alias-only matches; ties use the canonical ticker. Aliases never duplicate rows.
+- Fetch the next page with `offset + limit` when `has_more` is true.
+- **Headers:** `Cache-Control: no-cache`. Existing read rate limits and read-only
+  API transactions apply. No new database grants or migrations are required.
+- **Errors:** `422 invalid_request` for invalid parameters, `429 rate_limited`.
+
 ## `GET /v1/securities/{symbol}`
 
 A security by ticker or alias, with its entry in the current publication.

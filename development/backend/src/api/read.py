@@ -34,10 +34,10 @@ from contextlib import asynccontextmanager, contextmanager
 from datetime import timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field, ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -174,6 +174,21 @@ class SecurityResponse(BaseModel):
     api_version: str = Field(examples=[API_VERSION])
     security: Security
     current: SecurityCurrent
+
+
+class SecuritySearchResult(BaseModel):
+    symbol: str
+    name: str | None
+    sector: str | None
+
+
+class SecuritySearchResponse(BaseModel):
+    api_version: str = Field(examples=[API_VERSION])
+    query: str
+    results: list[SecuritySearchResult]
+    limit: int
+    offset: int
+    has_more: bool
 
 
 # Sprint 2 (S2-01..03): GET /v1/securities/{symbol}/score.
@@ -830,6 +845,77 @@ def get_watchlist(request: Request) -> Response:
         meta, output = _envelope(conn, publication_id)
     body = {"api_version": API_VERSION, "publication": meta, "watchlist": output}
     return CanonicalJSONResponse(body, headers=headers)
+
+
+def _search_securities(
+    conn: Connection, query: str, limit: int, offset: int
+) -> list[Any]:
+    """Search the catalog, not a publication or a user's sector preferences.
+
+    Escape LIKE wildcards so '%' and '_' remain literal search characters.
+    EXISTS matches ticker aliases without duplicating share-class results.
+    Read only columns already granted to perennial_api.
+    """
+    s, ids, p = m.securities, m.security_identifiers, m.company_profiles
+    alias_match = (
+        select(ids.c.security_id)
+        .where(
+            ids.c.security_id == s.c.id,
+            ids.c.scheme == "ticker",
+            ids.c.value.istartswith(query, autoescape=True),
+        )
+        .exists()
+    )
+    priority = case(
+        (func.lower(s.c.symbol) == query.lower(), 0),
+        (s.c.symbol.istartswith(query, autoescape=True), 1),
+        (s.c.name.istartswith(query, autoescape=True), 2),
+        else_=3,
+    )
+    return list(
+        conn.execute(
+            select(s.c.symbol, s.c.name, p.c.sector)
+            .select_from(s.outerjoin(p, p.c.id == s.c.company_profile_id))
+            .where(
+                or_(
+                    s.c.symbol.istartswith(query, autoescape=True),
+                    s.c.name.istartswith(query, autoescape=True),
+                    alias_match,
+                )
+            )
+            .order_by(priority, s.c.symbol)
+            .offset(offset)
+            .limit(limit + 1)
+        ).mappings()
+    )
+
+
+@router.get(
+    "/securities",
+    response_model=SecuritySearchResponse,
+    responses={422: {"model": ErrorBody, "description": "invalid_request"}},
+)
+def search_securities(
+    request: Request,
+    q: str = Query(min_length=1, max_length=100),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100_000),
+) -> Response:
+    """Case-insensitive name/ticker prefix search, including unpublished companies."""
+    query = q.strip()
+    if not query:
+        raise APIError(422, "invalid_request", "query must not be blank")
+    with read_transaction(_engine(request)) as conn:
+        rows = _search_securities(conn, query, limit, offset)
+    body = {
+        "api_version": API_VERSION,
+        "query": query,
+        "results": [dict(row) for row in rows[:limit]],
+        "limit": limit,
+        "offset": offset,
+        "has_more": len(rows) > limit,
+    }
+    return CanonicalJSONResponse(body, headers={"Cache-Control": "no-cache"})
 
 
 @router.get("/securities/{symbol}", response_model=SecurityResponse, responses=ERRORS)

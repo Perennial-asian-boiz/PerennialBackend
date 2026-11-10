@@ -125,6 +125,11 @@ async def api_error(_request: Request, error: Exception) -> Response:
 
 async def invalid_input(_request: Request, error: Exception) -> Response:
     assert isinstance(error, RequestValidationError)
+    if _request.url.path == "/v1/securities":
+        return read.CanonicalJSONResponse(
+            {"detail": "search parameters are invalid", "code": "invalid_request"},
+            status_code=422,
+        )
     # Pydantic's default details include rejected input (including passwords).
     # Inspect only location/type and return our own messages, never input/msg/ctx.
     fields = {}
