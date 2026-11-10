@@ -1006,6 +1006,7 @@ def test_every_v1_route_uses_the_helper_exactly_once(engine, fixture_path, group
             routes = sorted(v1_routes(app))
             assert routes == [
                 "/v1/market-status",
+                "/v1/securities",
                 "/v1/securities/{symbol}",
                 "/v1/securities/{symbol}/financials",  # S2-04
                 "/v1/securities/{symbol}/score",  # Sprint 2 (S2-01..03)
@@ -1013,7 +1014,10 @@ def test_every_v1_route_uses_the_helper_exactly_once(engine, fixture_path, group
             ]
             for path in routes:
                 calls.clear()
-                response = c.get(path.replace("{symbol}", "ZZAA"))
+                response = c.get(
+                    path.replace("{symbol}", "ZZAA"),
+                    params={"q": "ZZ"} if path == "/v1/securities" else None,
+                )
                 assert response.status_code == 200, path
                 # S1-11 MS-7: market status touches no database, so it never uses the helper.
                 assert len(calls) == (0 if path == "/v1/market-status" else 1), path
@@ -1090,6 +1094,7 @@ def test_v1_routes_are_exactly_the_r1_reads_and_market_status():
     routes = v1_routes(_router_app())
     assert routes == {
         "/v1/watchlist": ["GET"],
+        "/v1/securities": ["GET"],  # Global company search
         "/v1/securities/{symbol}": ["GET"],
         "/v1/market-status": ["GET"],  # S1-11
         "/v1/securities/{symbol}/score": ["GET"],  # Sprint 2 (S2-01..03)

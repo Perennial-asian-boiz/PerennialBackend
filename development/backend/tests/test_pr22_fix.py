@@ -326,7 +326,7 @@ def test_r1_reads_are_identical_in_both_apps(engine, fixture_path, pr22_roles, m
     from test_read_api import feed, login, publish_run
 
     publish_run(engine, feed(fixture_path))
-    paths = ("/v1/watchlist", "/v1/securities/ZZAA", "/v1/securities/ZZNONE",
+    paths = ("/v1/watchlist", "/v1/securities?q=ZZ", "/v1/securities/ZZAA", "/v1/securities/ZZNONE",
              "/v1/securities/BR$K")
     with login(engine, pr22_roles) as (r1_engine, _, _), \
             TestClient(read_app(r1_engine, api_role=pr22_roles["api"])) as r1:
@@ -358,12 +358,16 @@ def test_read_routes_use_the_read_only_helper_once_in_the_integrated_app(
         monkeypatch.setattr(read, "read_transaction", recording)
         read_paths = [p for p in v1_routes(app) if not p.startswith(("/v1/auth", "/v1/me"))]
         assert sorted(read_paths) == [
-            "/v1/market-status", "/v1/securities/{symbol}",
+            "/v1/market-status", "/v1/securities", "/v1/securities/{symbol}",
             "/v1/securities/{symbol}/financials", "/v1/securities/{symbol}/score",
             "/v1/watchlist"]
         for path in read_paths:
             calls.clear()
-            assert c.get(path.replace("{symbol}", "ZZAA")).status_code == 200
+            response = c.get(
+                path.replace("{symbol}", "ZZAA"),
+                params={"q": "ZZ"} if path == "/v1/securities" else None,
+            )
+            assert response.status_code == 200
             # Every database read uses the helper once; S1-11's market status uses no database.
             assert len(calls) == (0 if path == "/v1/market-status" else 1), path
 
