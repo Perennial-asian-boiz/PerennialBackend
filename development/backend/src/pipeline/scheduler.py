@@ -7,6 +7,7 @@ Production (roadmap M3): a platform scheduler runs one job per invocation,
     python -m src.pipeline.scheduler --once --job fundamentals
     python -m src.pipeline.scheduler --once --job news
     python -m src.pipeline.scheduler --once --job sentiment
+    python -m src.pipeline.scheduler --once --job prices
 
 at 09:00 America/Los_Angeles (pipeline) and 09:30 (GDELT) on trading days. The
 exit code is the success signal: 0 when the job completed, 1 otherwise,
@@ -106,6 +107,10 @@ def run_once(job: str = "pipeline", settings: Settings | None = None) -> int:
         from src.services.credibility.job import run_once as run_sentiment_once
 
         return run_sentiment_once(settings)
+    if job == "prices":  # S3-01: a price snapshot per company, after the US close
+        from src.services.prices.job import run_once as run_prices_once
+
+        return run_prices_once(settings)
     raise ValueError("unknown scheduled job")
 
 
@@ -194,6 +199,7 @@ if __name__ == "__main__":
                 "news",
                 "scores",
                 "sentiment",
+                "prices",
             ),
             default="pipeline",
         )

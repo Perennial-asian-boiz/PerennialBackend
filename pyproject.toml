@@ -104,6 +104,7 @@ files = [
     "development/backend/src/services/news/matching.py",
     "development/backend/src/services/news/job.py",
     "development/backend/src/services/credibility",
+    "development/backend/src/services/prices",
     # Decision 29: the read API, the dashboard adapters and the integrated app;
     # #22's accounts, supabase_auth and account_models get typed in a follow-up.
     "development/backend/src/api/__init__.py",
