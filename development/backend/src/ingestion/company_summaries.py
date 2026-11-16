@@ -2,14 +2,16 @@
 Company summaries at ingestion (S1-12; ADR 0005: made here, never per request,
 with no model of any kind).
 
-For each consensus-list member (Q11) the job fetches a description through a
-provider-neutral DescriptionAdapter and stores, on the member's company
-profile, the first window of 2–4 consecutive sentences that reads at
-Flesch–Kincaid grade 16 or below (decision 72: verbatim sentence selection,
-falling back to "Summary not available"; decision 88 raised the limit from 8
-to 13, and decision 89 to 16 with SEC EDGAR as the source). Only the excerpt
-is stored, with the source's name and https link; the description itself
-never is. The CLI's adapter is sec_descriptions.SecTenKDescriptions.
+For every active security with a company profile (Bryan, 2026-11-16; before,
+only the current publication's consensus members, Q11) the job fetches a
+description through a provider-neutral DescriptionAdapter and stores, on that
+company profile, the first window of 2–4 consecutive sentences (decision 72: verbatim
+sentence selection, falling back to "Summary not available"). There is no
+reading-level limit: Bryan removed it on 2026-11-16 so more companies get a
+summary (it was grade 8, then 13 and 16, decisions 88 and 89). The excerpt's
+Flesch–Kincaid grade is still recorded, never served and never a filter. Only
+the excerpt is stored, with the source's name and https link; the description
+itself never is. The CLI's adapter is sec_descriptions.SecTenKDescriptions.
 
 Policy:
   * Sentences come from split_sentences, our fixed splitter (textstat's splits
@@ -28,16 +30,16 @@ Policy:
     any summary is written, and a DescriptionAdapterError fails the run with
     no summary written (stale-good). Other exceptions propagate, also before
     any summary write.
-  * No description, an empty one, no passing window, an oversized description
+  * No description, an empty one, no storable window, an oversized description
     or a link that isn't https is a per-security "unavailable" outcome. The run
-    still succeeds. A member without a company profile has nowhere to store a
-    summary: it isn't fetched and counts as unavailable.
+    still succeeds. A symbol passed in without a company profile has nowhere to
+    store a summary: it isn't fetched and counts as unavailable.
   * Skip key: description_digest is the SHA-256 of the description as fetched
-    together with its link, the source's name, SELECTOR_VERSION and MAX_GRADE.
-    A profile whose digest is unchanged and that already has an outcome isn't
-    rewritten, so bumping SELECTOR_VERSION or changing MAX_GRADE reprocesses
-    every row (checker N1), including rows stored "unavailable". A changed
-    description is processed again; when it has no passing window the stored
+    together with its link, the source's name and SELECTOR_VERSION. A profile
+    whose digest is unchanged and that already has an outcome isn't rewritten,
+    so bumping SELECTOR_VERSION reprocesses every row (checker N1), including
+    rows stored "unavailable". A changed
+    description is processed again; when it has no storable window the stored
     summary is cleared, because it no longer matches its source.
   * Each run logs one coverage line (CS-7): counts only, never company text or
     links.
@@ -57,20 +59,15 @@ import textstat
 from sqlalchemy import and_, select, update
 from sqlalchemy.engine import Engine
 
-from src.db.models import (
-    company_profiles,
-    current_publication,
-    publications,
-    securities,
-)
+from src.db.models import company_profiles, securities
 from src.ingestion.collectors import FMP_MAX_402_SHARE
 from src.ingestion.diagnostics import failure_code
 
 logger = logging.getLogger(__name__)
 
 # Part of every description_digest: change it whenever selection changes.
-SELECTOR_VERSION = "s1-12-v2"
-MAX_GRADE = 16.0  # decision 89 (13.0 from decision 88, 8.0 before); in every digest
+# v3 (2026-11-16): no reading-level limit, and no max_grade in the digest.
+SELECTOR_VERSION = "s1-12-v3"
 WINDOW_SIZES = (4, 3, 2)
 MAX_SUMMARY_CHARS = 4000  # ck_company_profiles_summary_not_blank
 MAX_SOURCE_NAME_CHARS = 128  # company_profiles.summary_source_name
@@ -78,8 +75,6 @@ MAX_DESCRIPTION_CHARS = 100_000  # bounds the grading work per description
 MAX_URL_CHARS = 2048
 # The same rule as ck_company_profiles_summary_source_url_https.
 _HTTPS_URL = re.compile(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?([/?#][^\s]*)?")
-CHANNEL = "production"
-BUCKETS = ("popular_stable", "affordable_growing", "unresolved")
 
 # ── sentences and windows ────────────────────────────────
 
@@ -126,7 +121,8 @@ def split_sentences(text: str) -> list[str]:
 @dataclass(frozen=True)
 class Excerpt:
     text: str
-    grade: float  # textstat.flesch_kincaid_grade(text); stored rounded to cents
+    # textstat.flesch_kincaid_grade(text); stored rounded to cents, never a filter
+    grade: float
 
 
 def printable(text: str) -> bool:
@@ -136,7 +132,7 @@ def printable(text: str) -> bool:
 
 
 def select_excerpt(description: str | None) -> Excerpt | None:
-    """The first passing window of 2–4 consecutive sentences, verbatim; else None."""
+    """The first storable window of 2–4 consecutive sentences, verbatim; else None."""
     if not isinstance(description, str) or len(description) > MAX_DESCRIPTION_CHARS:
         return None
     sentences = [" ".join(s.split()) for s in split_sentences(description)]
@@ -148,9 +144,7 @@ def select_excerpt(description: str | None) -> Excerpt | None:
             text = " ".join(window)
             if len(text) > MAX_SUMMARY_CHARS or not printable(text):
                 continue
-            grade = float(textstat.flesch_kincaid_grade(text))
-            if grade <= MAX_GRADE:
-                return Excerpt(text=text, grade=grade)
+            return Excerpt(text=text, grade=float(textstat.flesch_kincaid_grade(text)))
     return None
 
 
@@ -205,28 +199,23 @@ class SummaryResult:
     skipped_402: int = 0  # members the source withheld (DescriptionNotEntitled)
 
 
-def consensus_members(engine: Engine) -> list[str]:
-    """The current production publication's entry tickers, sorted and unique (Q11)."""
+def profiled_securities(engine: Engine) -> list[str]:
+    """Every active security that has a company profile, sorted by symbol.
+
+    Not limited to a publication, so a company is summarized before it is
+    ever listed. A security without a profile has nowhere to store a summary.
+    """
     with engine.connect() as conn:
-        output = conn.execute(
-            select(publications.c.output)
-            .join(
-                current_publication,
-                current_publication.c.publication_id == publications.c.id,
-            )
-            .where(current_publication.c.channel == CHANNEL)
-        ).scalar_one_or_none()
-    if not isinstance(output, dict):
-        return []
-    tickers = {
-        record["ticker"]
-        for bucket in BUCKETS
-        for record in output.get(bucket) or ()
-        if isinstance(record, dict)
-        and isinstance(record.get("ticker"), str)
-        and record["ticker"]
-    }
-    return sorted(tickers)
+        return list(
+            conn.execute(
+                select(securities.c.symbol)
+                .where(
+                    securities.c.company_profile_id.is_not(None),
+                    securities.c.is_active,
+                )
+                .order_by(securities.c.symbol)
+            ).scalars()
+        )
 
 
 # ── the job ──────────────────────────────────────────────
@@ -248,7 +237,6 @@ def _https(url: str) -> bool:
 def _digest(source_name: str, description: Description | None) -> str:
     key = {
         "selector_version": SELECTOR_VERSION,
-        "max_grade": MAX_GRADE,
         "source_name": source_name,
         "url": description.url if description else None,
         "text": description.text if description else None,
@@ -276,7 +264,8 @@ def _outcome(
     assert description is not None
     return {
         "summary": excerpt.text,
-        "summary_grade": round(excerpt.grade, 2),
+        # Unbounded now that nothing filters on it: keep it inside Numeric(5, 2).
+        "summary_grade": max(-999.99, min(999.99, round(excerpt.grade, 2))),
         "summary_status": "ok",
         "summary_source_name": source_name,
         "summary_source_url": description.url,
@@ -317,12 +306,15 @@ def summarize(
     *,
     symbols: Sequence[str] | None = None,
 ) -> SummaryResult:
-    """Fetch, select and store summaries for `symbols` (default: the consensus list)."""
+    """Fetch, select and store summaries for `symbols`.
+
+    The default is profiled_securities: every active security with a profile.
+    """
     source_name = _source_name(adapter)
     if source_name is None:
         logger.warning("company summaries failed: invalid source name; nothing written")
         return _failed("invalid_source_name")
-    members = sorted(set(consensus_members(engine) if symbols is None else symbols))
+    members = sorted(set(profiled_securities(engine) if symbols is None else symbols))
     cleared = _clear_other_sources(engine, source_name)
     with engine.connect() as conn:  # after the clear: it resets digests and statuses
         rows = conn.execute(

@@ -103,7 +103,7 @@ def _parser() -> argparse.ArgumentParser:
     recover.add_argument("--minutes", type=int, default=10)
     sub.add_parser(
         "summaries",
-        help="S1-12: store company summaries for the consensus list (manual, staging)",
+        help="S1-12: store company summaries for every profiled security (manual, staging)",
     )
     return parser
 

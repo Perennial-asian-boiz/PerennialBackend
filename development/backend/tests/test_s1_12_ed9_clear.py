@@ -359,7 +359,7 @@ def importer_url(engine, groups):  # noqa: F811
 def cli_main(monkeypatch, symbols, argv=("summaries",)):
     from src.ingestion import cli
 
-    monkeypatch.setattr(cs(), "consensus_members", lambda engine: list(symbols))
+    monkeypatch.setattr(cs(), "profiled_securities", lambda engine: list(symbols))
     return cli.main(list(argv))
 
 

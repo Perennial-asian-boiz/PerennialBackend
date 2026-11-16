@@ -996,10 +996,8 @@ def test_share_classes_on_one_profile_cost_one_submissions_request(engine):
 
 @pytest.mark.db
 def test_a_stored_fmp_row_is_re_decided_by_the_first_edgar_run(engine):
-    """No SELECTOR_VERSION bump: the source name and URL already change the digest."""
-    from src.ingestion.company_summaries import SELECTOR_VERSION, Description, summarize
-
-    assert SELECTOR_VERSION == "s1-12-v2"
+    """The source name and URL are in the digest, so no selector bump is needed."""
+    from src.ingestion.company_summaries import Description, summarize
 
     class FmpLike:
         source_name = "Financial Modeling Prep"
