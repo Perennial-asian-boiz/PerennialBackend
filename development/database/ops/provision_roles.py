@@ -44,6 +44,7 @@ IMMUTABLE += ("news_articles", "news_coverage")  # S1-03 news ingestion
 IMMUTABLE += ("ticker_sentiment", "company_scores", "score_explanations")
 MUTABLE += ("current_scores",)
 IMMUTABLE += ("social_posts", "article_sentiment", "news_publishers")  # S1-05
+IMMUTABLE += ("daily_prices",)  # S3-01 price snapshots
 # JOB-7 / AC 4 article-scoring retry state: the scorer bumps attempts on each failure
 # and deletes the row once the article is scored, so the importer also needs DELETE.
 MUTABLE += ("article_scoring_attempts",)

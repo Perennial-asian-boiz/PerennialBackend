@@ -203,3 +203,18 @@ ENVELOPE_KEYS.update(
         "carried_forward_count",
     ),
 )
+
+# S3-01 prices. Lists keep the first MAX_LIST_ITEMS; counts are exact.
+ENVELOPE_KEYS.update(
+    daily_prices=(
+        "source",
+        "universe",
+        "priced",
+        "no_quote",
+        "no_quote_count",
+        "no_range",
+        "no_range_count",
+        "errors",
+        "errors_count",
+    ),
+)
