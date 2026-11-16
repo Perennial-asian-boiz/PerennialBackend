@@ -262,19 +262,25 @@ cd development/backend
 python -m src.ingestion.cli summaries
 ```
 
-It summarizes the current production publication's consensus members. SEC
+It summarizes every active security that has a company profile, whether or not
+it is in a publication (since 2026-11-16; before, only the current production
+publication's consensus members). The output's `members` is that count. SEC
 requests, all with only the `User-Agent` header:
-- 1 to `www.sec.gov/files/company_tickers.json`, only if some member's
+- 1 to `www.sec.gov/files/company_tickers.json`, only if some security's
   company profile has no seeded CIK;
 - 1 to `data.sec.gov/submissions/CIK##########.json` per company profile with
   a CIK (share classes such as GOOG and GOOGL share one);
 - 1 to the 10-K's primary document under `www.sec.gov/Archives/edgar/data/`
   when that company has a usable 10-K.
 
-So about 2 per member at most: roughly 341 for 170 members. Requests are spaced
-at least 0.12 s apart (under 8.4 a second; SEC allows 10), so a full run takes
-at least about 41 s plus download time. Every run downloads each 10-K again;
-skipping unchanged filings is a possible follow-up.
+So about 2 per company at most: roughly 341 for 170 companies, and more in
+proportion now that the run covers every profiled security. Requests are
+spaced at least 0.12 s apart (under 8.4 a second; SEC allows 10), so 170
+companies take at least about 41 s plus download time. Every run downloads
+each 10-K again; skipping unchanged filings is a possible follow-up. A run is
+still all-or-nothing and requests aren't retried, so one failed SEC request
+fails the whole run with no summary written: the more companies, the likelier
+a rerun is needed.
 
 Which filing: the newest `10-K` (by filing date) in the company's recent
 filings, filed within the last 550 days. Amendments (`10-K/A`), `10-KT`,
@@ -285,13 +291,15 @@ have no Item 1 heading and are unavailable too.
 
 Output on stdout:
 - Success, exit 0: `{"members": N, "with_summary": A, "unavailable": B}`. `A`
-  members now have a stored 2–4 sentence excerpt at Flesch–Kincaid grade 16
-  or below (decision 89; 13 from decision 88, 8 before). `B` show "Summary
-  not available" (no CIK, no recent 10-K, no Item 1 prose, no readable window,
-  or no company profile). A rerun with unchanged filings rewrites nothing. The
-  grade limit, the selector version, the source name and the link are part of
-  each row's description digest, so the first run after any of them changes
-  re-checks every stored row once, including those stored "unavailable".
+  members now have a stored 2–4 sentence excerpt: the first 2–4 sentences of
+  Item 1, with no reading-level limit (removed 2026-11-16; it was grade 16,
+  decision 89). `B` show "Summary not available" (no CIK, no recent 10-K, no
+  Item 1 prose, fewer than two sentences, or no company profile). A rerun with
+  unchanged filings rewrites nothing. The selector version, the source name
+  and the link are part of each row's description digest, so the first run
+  after any of them changes re-checks every stored row once, including those
+  stored "unavailable". The selector version changed with the limit's removal
+  (`s1-12-v3`), so the next run re-checks every row.
 - Every run, before its first SEC request, clears every stored summary that
   came from another source (FMP), members or not, in its own committed step
   (packet ED-9, decision 93 E1 (b)). Those companies show "Summary not
