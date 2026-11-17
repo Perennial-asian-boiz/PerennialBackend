@@ -5,11 +5,14 @@ fake scorer everywhere, so nothing is downloaded and torch is never imported.
 Pinned interface, src/services/credibility/article_scorer.py (my proposal):
 
 * MODEL_NAME = "ProsusAI/finbert"; MODEL_REVISION, a pinned 40-hex commit;
-  MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}+text2" since decision 114,
-  stored as article_sentiment.model.
+  MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}+text3" (per-company text;
+  "+text2" was decision 114's), stored as article_sentiment.model.
 * article_text(article) -> str: the text the model reads, stripped and capped at
   MAX_TEXT_CHARS (at most 512). Decision 114 adds the stored summary after the
   headline (test_d114_article_summary); an article without one reads as before.
+  article_text(article, company, others) is the per-company text ("+text3"):
+  without the sentences that name one of others (the story's other companies)
+  but not company; score_articles passes each article's own and other companies.
 * polarity(probabilities) -> Decimal: P(positive) - P(negative), to 4 places.
 * label_for(score) -> "negative" for [-1, -0.2], "neutral" for (-0.2, 0.2),
   "positive" for [0.2, 1]; confidence(probabilities, label) -> Decimal: the
@@ -224,8 +227,10 @@ def test_the_model_is_finbert_at_a_pinned_revision():
     assert len(mod.MODEL_REVISION) == 40 and set(mod.MODEL_REVISION) <= set(
         "0123456789abcdef"
     )
-    # Decision 114: "+text2" names the headline + summary text (test_d114_article_summary).
-    assert mod.MODEL_VERSION == f"ProsusAI/finbert@{mod.MODEL_REVISION}+text2"
+    # "+text3" names the per-company text (headline + summary less the sentences
+    # naming only another company the story is stored for); "+text2" was decision
+    # 114's headline + summary (test_d114_article_summary).
+    assert mod.MODEL_VERSION == f"ProsusAI/finbert@{mod.MODEL_REVISION}+text3"
     assert (
         len(mod.MODEL_VERSION) <= 64
     )  # article_sentiment.model, ticker_sentiment.model_version
@@ -284,6 +289,55 @@ def test_the_text_is_the_headline_only_stripped_and_capped():
     assert mod.article_text(article) == "Rocket Lab wins"
     long = {"headline": "Rocket Lab " + "x" * 2000}
     assert mod.article_text(long) == long["headline"][: mod.MAX_TEXT_CHARS]
+
+
+AMD = ("AMD", frozenset({"advanced micro devices"}))
+INTC = ("INTC", frozenset({"intel"}))
+SHARED = {
+    "headline": "AMD gains share from Intel",
+    "summary": "Intel shares fell 5% after the report. Analysts raised AMD to buy. "
+    "The market rose 0.5% on Friday.",
+}
+
+
+def test_a_story_stored_for_one_company_reads_whole():
+    mod = scorer_module()
+    amd = mod.Company(*AMD)
+    assert mod.article_text(SHARED, amd) == mod.article_text(SHARED)
+    assert mod.article_text(SHARED, amd, ()) == (
+        SHARED["headline"] + "\n" + SHARED["summary"]
+    )
+
+
+def test_each_company_reads_the_story_without_the_sentences_only_about_the_other():
+    mod = scorer_module()
+    amd, intc = mod.Company(*AMD), mod.Company(*INTC)
+    assert mod.article_text(SHARED, amd, [intc]) == (
+        "AMD gains share from Intel\n"
+        "Analysts raised AMD to buy. The market rose 0.5% on Friday."
+    )
+    assert mod.article_text(SHARED, intc, [amd]) == (
+        "AMD gains share from Intel\n"
+        "Intel shares fell 5% after the report. The market rose 0.5% on Friday."
+    )
+
+
+def test_with_nothing_left_the_company_reads_the_headline():
+    mod = scorer_module()
+    article = {"headline": "Intel cuts guidance", "summary": "Intel Corp. slipped."}
+    assert (
+        mod.article_text(article, mod.Company(*AMD), [mod.Company(*INTC)])
+        == "Intel cuts guidance"
+    )
+
+
+def test_sentences_split_at_a_stop_before_a_capital_only():
+    mod = scorer_module()
+    assert mod.sentences("Apple Inc. reported 3.5% growth.  It rose.\n") == [
+        "Apple Inc. reported 3.5% growth.",
+        "It rose.",
+    ]
+    assert mod.sentences("  ") == []
 
 
 # ── the module: no network, no torch at import, no default database ──
@@ -415,6 +469,49 @@ def test_every_article_in_the_window_gets_one_row_and_the_run_names_its_input(
         "articles_scored": 3,
     }
     assert run_of(engine, result)["collection_mode"] == "derived"
+
+
+@pytest.mark.db
+def test_a_story_stored_for_two_companies_is_scored_for_each_on_its_own_text(
+    engine,
+    seeded,  # noqa: F811
+):
+    story = RawArticle(
+        61,
+        "Rocket Lab and Nvidia team up",
+        "Rocket Lab shares jumped. Nvidia shares slipped. The deal closes in May.",
+        "Yahoo",
+        "https://finnhub.io/api/news?id=61",
+        NOW - timedelta(days=1),
+    )
+    run_news(engine, NewsClient({"RKLB": [story], "NVDA": [story]}), NOW.date())
+    fake = Fake(
+        {
+            "Rocket Lab and Nvidia team up\n"
+            "Rocket Lab shares jumped. The deal closes in May.": {
+                "positive": 0.8,
+                "negative": 0.1,
+                "neutral": 0.1,
+            },
+            "Rocket Lab and Nvidia team up\n"
+            "Nvidia shares slipped. The deal closes in May.": {
+                "positive": 0.1,
+                "negative": 0.8,
+                "neutral": 0.1,
+            },
+        }
+    )
+    assert score_now(engine, fake).succeeded
+    assert len(fake.texts) == 2 and len(set(fake.texts)) == 2
+    with engine.connect() as conn:
+        by_symbol = dict(
+            conn.execute(
+                select(models.securities.c.symbol, models.article_sentiment.c.score)
+                .select_from(models.article_sentiment)
+                .join(models.securities)
+            ).all()
+        )
+    assert by_symbol == {"RKLB": Decimal("0.7000"), "NVDA": Decimal("-0.7000")}
 
 
 @pytest.mark.db

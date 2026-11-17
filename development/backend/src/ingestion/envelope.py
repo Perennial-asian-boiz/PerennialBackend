@@ -183,6 +183,8 @@ ENVELOPE_KEYS.update(
         "social_batch_fresh",
         "publishers_unknown",
         "news_off_topic",  # S1-05 weights-v2
+        "news_duplicates",  # weights-v4: repeat copies of a counted story
+        "news_summary_only",  # weights-v4: counted at summary-only relevance
         "half_life_days",
     ),
     company_scores=(
