@@ -300,3 +300,21 @@ def test_the_route_is_a_documented_read_route():
     operation = _v1_openapi(_router_app())["paths"]["/v1/securities/{symbol}/price"]["get"]
     assert {"200", "304", "404", "422", "429"} <= set(operation["responses"])
     assert "PriceResponse" in _v1_openapi(_router_app())["schemas"]
+
+
+def test_the_snapshot_includes_the_price_route():
+    """Regenerated in the same PR (UPDATE_API_SNAPSHOT=1)."""
+    assert "/v1/securities/{symbol}/price" in json.loads(SNAPSHOT.read_text())["paths"]
+
+
+def test_api_md_documents_the_price_route():
+    content = (REPO / "docs" / "technical-specs" / "API.md").read_text()
+    for term in (
+        "/v1/securities/{symbol}/price",
+        "licensed_price_providers.json",
+        "change_percent",
+        "high_52w",
+        "stale",
+        '"status": "unavailable"',
+    ):
+        assert term in content, term
