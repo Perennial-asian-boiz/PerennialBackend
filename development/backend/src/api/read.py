@@ -42,8 +42,9 @@ from sqlalchemy.engine import Connection, Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from src.api import financials, market_status
+from src.api import financials, market_status, price
 from src.api.financials import FinancialsResponse
+from src.api.price import PriceResponse
 from src.api.rate_limit import (
     Kind,
     RateLimitConfig,
@@ -998,6 +999,34 @@ def get_financials(symbol: str, request: Request) -> Response:
         if found is None:
             raise APIError(404, "unknown_security", "no security has that ticker")
         served, etag = financials.served(conn, int(found.id))
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    body = {"api_version": API_VERSION, "symbol": found.symbol, **served}
+    return CanonicalJSONResponse(body, headers=headers)
+
+
+@router.get(
+    "/securities/{symbol}/price",
+    response_model=PriceResponse,
+    responses=SCORE_RESPONSES,
+)
+def get_price(symbol: str, request: Request) -> Response:
+    """A security's latest close from a licensed provider, its change and its
+    52-week range (S3-01).
+
+    200 with status "unavailable" when no licensed price is stored for it; 404 only
+    for an unknown ticker.
+    """
+    wanted = symbol.strip().upper()
+    if not _TICKER.fullmatch(wanted):
+        raise APIError(422, "invalid_request", "symbol is not a valid ticker")
+    today = market_status.now().astimezone(market_status.ET).date()
+    with read_transaction(_engine(request)) as conn:
+        found = _security(conn, wanted)
+        if found is None:
+            raise APIError(404, "unknown_security", "no security has that ticker")
+        served, etag = price.served(conn, int(found.id), today)
     headers = {"ETag": etag, "Cache-Control": "no-cache"}
     if _etag_matches(request.headers.get("if-none-match"), etag):
         return Response(status_code=304, headers=headers)

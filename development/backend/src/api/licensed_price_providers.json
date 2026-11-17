@@ -1,0 +1,13 @@
+{
+  "_comment": "S3-01 AC 3: the only providers whose prices GET /v1/securities/{symbol}/price serves. A provider not listed here is never served, even when its rows are stored (as decision 112 drops market caps). Adding one needs its terms link and the approver; removing one stops serving it on the next deploy without touching stored rows.",
+  "providers": [
+    {
+      "provider": "finnhub",
+      "name": "Finnhub",
+      "terms": "https://finnhub.io/terms-of-service",
+      "scope": "Free plan: quote and 52-week high and low",
+      "approved_by": "Bryan Tieu",
+      "approved_on": "2026-11-16"
+    }
+  ]
+}
