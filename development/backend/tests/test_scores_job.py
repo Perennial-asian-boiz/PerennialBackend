@@ -128,6 +128,7 @@ def sentiment_record(
         "last_at": last_at,
         "weights_version": "weights-v1",
         "model_version": "ProsusAI/finbert@synthetic0001" if count else None,
+        "tallied_on": "2026-11-05",
     }
 
 
@@ -144,6 +145,7 @@ def empty_sentiment_record(ticker):
         "last_at": None,
         "weights_version": "weights-v1",
         "model_version": None,
+        "tallied_on": "2026-11-05",
     }
 
 
