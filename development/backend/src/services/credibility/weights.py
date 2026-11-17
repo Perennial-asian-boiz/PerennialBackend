@@ -20,10 +20,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 WEIGHTS_FILE = Path(__file__).with_name("source_weights.json")
-# The relevance rules this code implements. "headline-match-v1": S1-03's match-v1
-# applied to the headline alone, so an article that named the company only in its
-# summary is left out.
-RELEVANCE_RULES = ("headline-match-v1",)
+# The relevance rules this code implements (credibility/job.py relevance()).
+# "headline-match-v1": S1-03's match-v1 applied to the headline alone, so an
+# article that named the company only in its summary is left out.
+# "headline-match-v2": a headline match counts in full, a match in the summary
+# alone counts at SUMMARY_ONLY_RELEVANCE of the article's weight.
+RELEVANCE_RULES = ("headline-match-v1", "headline-match-v2")
+SUMMARY_ONLY_RELEVANCE = 0.5
 
 
 @dataclass(frozen=True)

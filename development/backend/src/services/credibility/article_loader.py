@@ -4,7 +4,11 @@ record of failed scoring attempts (AC 4).
 unscored_articles(conn, start, end, model_version) returns, by news_article_id,
 every news_articles row published in [start, end] that has no article_sentiment
 row from model_version and fewer than MAX_ATTEMPTS failed attempts for it, with
-the fields the scorer needs (id, symbol, headline, summary).
+the fields the scorer needs (id, symbol, finnhub_id, headline, summary).
+
+co_tagged(conn, finnhub_ids) returns, per Finnhub id, every symbol a stored
+news_articles row ties that story to, so the scorer can tell which other
+companies share it.
 
 record_attempts(engine, model_version, scored, failed) runs after a scoring
 run: scored articles lose their attempts row; each failed article gains one
@@ -43,7 +47,13 @@ def unscored_articles(
     )
     return list(
         conn.execute(
-            select(na.c.id, m.securities.c.symbol, na.c.headline, na.c.summary)
+            select(
+                na.c.id,
+                m.securities.c.symbol,
+                na.c.finnhub_id,
+                na.c.headline,
+                na.c.summary,
+            )
             .join(m.securities, m.securities.c.id == na.c.security_id)
             .where(
                 na.c.published_at >= start,
@@ -54,6 +64,22 @@ def unscored_articles(
             .order_by(na.c.id)
         ).all()
     )
+
+
+def co_tagged(conn: Connection, finnhub_ids: Collection[int]) -> dict[int, set[str]]:
+    """{finnhub_id: every symbol a stored row ties that story to}."""
+    na, s = m.news_articles, m.securities
+    out: dict[int, set[str]] = {}
+    if not finnhub_ids:
+        return out
+    rows = conn.execute(
+        select(na.c.finnhub_id, s.c.symbol)
+        .join(s, s.c.id == na.c.security_id)
+        .where(na.c.finnhub_id.in_(sorted(set(finnhub_ids))))
+    ).all()
+    for finnhub_id, symbol in rows:
+        out.setdefault(int(finnhub_id), set()).add(str(symbol))
+    return out
 
 
 def record_attempts(

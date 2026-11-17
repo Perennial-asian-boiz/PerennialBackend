@@ -1,7 +1,7 @@
 {
-  "version": "weights-v3",
+  "version": "weights-v4",
   "half_life_days": 3,
-  "relevance": "headline-match-v1",
+  "relevance": "headline-match-v2",
   "prior_weight": 1,
   "tiers": {
     "wire_and_major": {

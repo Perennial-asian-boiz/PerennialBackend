@@ -1048,6 +1048,8 @@ SENTIMENT_ENVELOPE = {
     "social_batch_fresh": True,
     "publishers_unknown": 0,
     "news_off_topic": 0,
+    "news_duplicates": 0,
+    "news_summary_only": 0,
     "half_life_days": 3.0,
 }
 

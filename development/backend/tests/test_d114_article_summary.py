@@ -63,7 +63,10 @@ from test_read_api import groups  # noqa: F401  (a pytest fixture)
 CAP = 2000
 REVISION = "0bc2ac10dda6929bcb1f77ccc43c7ec5c424f031"  # unchanged by decision 114
 HEADLINE_ONLY_VERSION = f"ProsusAI/finbert@{REVISION}"
-TIER_1_VERSION = f"ProsusAI/finbert@{REVISION}+text2"
+TIER_1_VERSION = f"ProsusAI/finbert@{REVISION}+text2"  # decision 114's recipe
+# The per-company recipe that followed (test_article_scorer); tier 1's text is
+# what it reads for a story stored for one company only.
+CURRENT_VERSION = f"ProsusAI/finbert@{REVISION}+text3"
 MARKER = "Zqxv synthetic summary phrase"  # never in a headline, a code or a name
 
 
@@ -459,7 +462,8 @@ def test_a_nul_character_in_a_summary_never_fails_the_run(
 def test_the_model_version_names_the_tier_1_text_recipe():
     mod = scorer_module()
     assert mod.MODEL_REVISION == REVISION
-    assert mod.MODEL_VERSION == TIER_1_VERSION
+    assert mod.MODEL_VERSION == CURRENT_VERSION
+    assert mod.MODEL_VERSION != TIER_1_VERSION
     assert mod.MODEL_VERSION != HEADLINE_ONLY_VERSION
     assert (
         len(mod.MODEL_VERSION) <= 64
@@ -537,7 +541,7 @@ def test_the_scorer_reads_headline_and_stored_summary_and_stores_the_new_version
     ]
     stored = scores(engine)
     assert {f: str(r.score) for f, r in stored.items()} == {11: "0.7000", 12: "-0.8500"}
-    assert {r.model for r in stored.values()} == {TIER_1_VERSION}
+    assert {r.model for r in stored.values()} == {CURRENT_VERSION}
 
 
 WINDOW_NEWS = {
@@ -608,14 +612,14 @@ def test_the_bump_rescores_the_window_once_and_sentiment_keeps_every_article(
             .join(models.news_articles)
         ).all()
     assert sorted(versions) == sorted(
-        (f, v) for f in (11, 12, 13) for v in (HEADLINE_ONLY_VERSION, TIER_1_VERSION)
+        (f, v) for f in (11, 12, 13) for v in (HEADLINE_ONLY_VERSION, CURRENT_VERSION)
     )  # the old rows stay; one new row per article
     assert credibility_job.derive_sentiment(engine, now=NOW).succeeded
     after = sentiment_counts(engine)
     assert {s: n for s, (n, _) in after.items()} == {
         s: n for s, (n, _) in before.items()
     }
-    assert after["RKLB"][1] == TIER_1_VERSION
+    assert after["RKLB"][1] == CURRENT_VERSION
 
     again = Fake()
     mod.score_articles(engine, scorer=again, now=NOW)

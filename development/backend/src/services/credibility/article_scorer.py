@@ -8,7 +8,17 @@ window that has no score from MODEL_VERSION yet, so an article that wasn't
 scored is caught up by a later run, a new MODEL_VERSION re-scores the window
 once (with fresh retries), and nothing outside the window is read. The
 scorer reads the texts in news_article_id order, in chunks of at most
-BATCH_SIZE. For each article it stores:
+BATCH_SIZE.
+
+Each news_articles row is one (story, company) pair, and Finnhub often ties one
+story to several companies ("AMD gains share from Intel" is stored for both).
+The text the model reads is therefore per company (recipe "+text3"): the
+headline and the summary's sentences, less the ones that name another company
+the same story is stored for but not this one. A story stored for one company
+only reads as before (headline, then summary). If nothing is left, the headline
+alone. Naming follows match-v1 (news/matching.py) sentence by sentence.
+
+For each article it stores:
 
   * score: P(positive) - P(negative), in [-1, 1];
   * label: negative for score <= -0.2, positive for score >= 0.2, else neutral;
@@ -39,7 +49,8 @@ transformers fetches the pinned weights from the Hugging Face hub.
 
 import logging
 import math
-from collections.abc import Callable, Mapping, Sequence
+import re
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
@@ -47,26 +58,31 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import SQLAlchemyError
 from src.db.queries import latest_successful_run
 from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
 from src.services.credibility.article_loader import (
+    co_tagged,
     record_attempts,
     unscored_articles,
 )
 from src.services.credibility.job import WINDOW_DAYS
+from src.services.news.job import company_names
+from src.services.news.matching import match_rule, name_variants
 
 logger = logging.getLogger(__name__)
 
 SOURCE, NEWS = "article_sentiment", "news_articles"
 MODEL_NAME = "ProsusAI/finbert"
 MODEL_REVISION = "0bc2ac10dda6929bcb1f77ccc43c7ec5c424f031"  # main as of 2026-11-01
-# "+text2" is the text recipe, headline + summary (decision 114): scores of the
-# headline alone carry no suffix, so the two never share a version.
-MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}+text2"
+# The suffix names the text recipe, so scores of different recipes never share a
+# version: none is the headline alone, "+text2" headline + summary (decision
+# 114), "+text3" headline + summary less the sentences that name only another
+# company the same story is stored for.
+MODEL_VERSION = f"{MODEL_NAME}@{MODEL_REVISION}+text3"
 MAX_TEXT_CHARS = 512  # BERT reads at most 512 tokens; a headline is far shorter
 BATCH_SIZE = 32
 BATCH_TIMEOUT = 120.0  # seconds one chunk may take before the run stops scoring
@@ -79,13 +95,68 @@ UNIT_KIND = "article batches"
 Scorer = Callable[[Sequence[str]], Sequence[Mapping[str, float]]]
 
 
-def article_text(article: Mapping[str, Any]) -> str:
-    """What the model reads: the headline, then the stored summary on its own
-    line (the news job's content-hash join), capped. Without a summary, the
-    headline alone."""
+# A sentence ends at . ! or ? followed by space and a capital, quote, bracket or
+# $, so "Apple Inc. reported" and "3.5%" stay whole.
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[$])")
+
+
+@dataclass(frozen=True)
+class Company:
+    """A symbol and its match-v1 name variants."""
+
+    symbol: str
+    variants: frozenset[str] = frozenset()
+
+    def named_in(self, text: str) -> bool:
+        return match_rule(text, "", self.symbol, set(self.variants)) is not None
+
+
+def sentences(text: str) -> list[str]:
+    """The non-blank sentences of a text, whitespace normalized."""
+    return [p for p in (" ".join(s.split()) for s in _SENTENCE_END.split(text)) if p]
+
+
+def article_text(
+    article: Mapping[str, Any],
+    company: Company | None = None,
+    others: Collection[Company] = (),
+) -> str:
+    """What the model reads for `company`, capped at MAX_TEXT_CHARS: the headline,
+    then the stored summary on its own line, each without the sentences that name
+    one of `others` (the other companies the story is stored for) but not
+    `company`. With no others, the whole headline and summary; without a summary,
+    the headline alone; with nothing left, the headline."""
     headline = str(article["headline"]).strip()
     summary = (article.get("summary") or "").strip()
+    if company is not None and others:
+
+        def kept(text: str) -> str:
+            return " ".join(
+                s
+                for s in sentences(text)
+                if company.named_in(s) or not any(o.named_in(s) for o in others)
+            )
+
+        focused = "\n".join(t for t in (kept(headline), kept(summary)) if t)
+        return (focused or headline)[:MAX_TEXT_CHARS]
     return (f"{headline}\n{summary}" if summary else headline)[:MAX_TEXT_CHARS]
+
+
+def companies_for(
+    conn: Connection, articles: Sequence[Any]
+) -> dict[int, list[Company]]:
+    """{news_article_id: [its own company, then the story's other companies]}."""
+    tags = co_tagged(conn, [a.finnhub_id for a in articles])
+    symbols = sorted({a.symbol for a in articles}.union(*tags.values()))
+    names = company_names(conn, symbols)
+    company = {
+        s: Company(s, frozenset(name_variants(names.get(s, [])))) for s in symbols
+    }
+    return {
+        a.id: [company[a.symbol]]
+        + [company[s] for s in sorted(tags.get(a.finnhub_id, set()) - {a.symbol})]
+        for a in articles
+    }
 
 
 def polarity(probabilities: Mapping[str, float]) -> Decimal:
@@ -179,14 +250,25 @@ class _Scored:
     not_attempted: int = 0
 
 
-def _score_chunks(articles: Sequence[Any], score: Scorer) -> _Scored:
-    """Score every chunk, skipping one that fails; stop at the first timeout."""
+def _score_chunks(
+    articles: Sequence[Any],
+    score: Scorer,
+    companies: Mapping[int, Sequence[Company]] | None = None,
+) -> _Scored:
+    """Score every chunk, skipping one that fails; stop at the first timeout.
+    companies: per article id, its own company then the story's other ones."""
+    by_id = companies or {}
+
+    def text(a: Any) -> str:
+        own = by_id.get(a.id) or []
+        return article_text(a._mapping, own[0] if own else None, own[1:])
+
     chunks = [articles[i : i + BATCH_SIZE] for i in range(0, len(articles), BATCH_SIZE)]
     out = _Scored(chunks=len(chunks))
     pool = ThreadPoolExecutor(max_workers=1)  # one chunk at a time, with a deadline
     try:
         for n, chunk in enumerate(chunks, start=1):
-            texts = [article_text(a._mapping) for a in chunk]
+            texts = [text(a) for a in chunk]
             try:
                 answers = pool.submit(score, texts).result(timeout=BATCH_TIMEOUT)
                 _checked(answers, len(chunk))
@@ -263,6 +345,7 @@ def score_articles(
                 if news is not None
                 else []
             )
+            companies = companies_for(conn, articles) if articles else {}
         if news is not None and not articles:
             logger.info("article scores: nothing new to score")
             return None
@@ -276,7 +359,7 @@ def score_articles(
                 )
             else:
                 try:
-                    scored = _score_chunks(articles, scorer or finbert())
+                    scored = _score_chunks(articles, scorer or finbert(), companies)
                     outcome = _scores_outcome(scored, news.batch_id)
                 except Exception as exc:  # the class name only: never a headline
                     outcome = CollectionOutcome.failure(
