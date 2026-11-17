@@ -340,6 +340,8 @@ def test_the_job_runs_every_step_and_stores_the_weighted_value_per_ticker(engine
     assert (absi["article_count"], absi["value"], absi["first_at"]) == (0, None, None)
     assert absi["model_version"] is None
     assert (absi["social_count"], absi["social_sentiment"]) == (0, Decimal("0.0000"))
+    # 0025: every row carries the run's UTC date, scored or not
+    assert {r["tallied_on"] for r in rows.values()} == {NOW.date()}
 
     with engine.connect() as conn:
         deps = set(conn.execute(select(models.run_dependencies.c.source).where(

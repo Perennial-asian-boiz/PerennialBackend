@@ -81,6 +81,7 @@ SHAPES = {
         "weights_version": ("character varying(32)", True),
         "model_version": ("character varying(64)", False),
         "social_sentiment": ("numeric(5,4)", False),  # 0023
+        "tallied_on": ("date", True),  # 0025
     },
     "company_scores": {
         **BATCH_AND_SECURITY,
@@ -159,6 +160,7 @@ def sentiment_row(**over):
         "last_at": LAST_AT,
         "weights_version": "weights-v1",
         "model_version": "ProsusAI/finbert@synthetic0001",
+        "tallied_on": date(2026, 11, 5),
         **over,
     }
 

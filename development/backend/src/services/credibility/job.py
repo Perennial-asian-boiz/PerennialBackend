@@ -30,7 +30,8 @@ weighted average starts with prior_weight of a neutral 0, so a ticker with one
 fresh Reuters article at +0.8 gets +0.4, and with ten of them +0.73. Every
 security gets a row with the counts, the date range and the weights version
 (AC 3); one with nothing to score has a count of 0 and no value. model_version
-names the news model, and is NULL when no news was counted.
+names the news model, and is NULL when no news was counted. tallied_on is the
+run's UTC date, the same on every row of the batch.
 """
 
 import logging
@@ -277,14 +278,18 @@ def _sentiment_outcome(
         if social_fresh and social is not None:
             rows = batch_rows(conn, "social_posts", social.batch_id)
             posts = social_items(rows, social.source_as_of, now, table)
+    tallied_on = now.astimezone(timezone.utc).date()
     records = [
-        weigh(
-            symbol,
-            news.items.get(symbol, []) + posts.get(symbol, []),
-            table.version,
-            news.model,
-            table.prior_weight,
-        )
+        {
+            **weigh(
+                symbol,
+                news.items.get(symbol, []) + posts.get(symbol, []),
+                table.version,
+                news.model,
+                table.prior_weight,
+            ),
+            "tallied_on": tallied_on,
+        }
         for symbol in symbols
     ]
     scored = sum(r["article_count"] > 0 for r in records)

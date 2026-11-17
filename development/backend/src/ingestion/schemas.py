@@ -996,7 +996,9 @@ class TickerSentiment(SourceRecord):
     """One security's credibility-weighted sentiment over the window: PR #85's record
     plus model_version (decision 108). Nothing counted means no value and no dates.
     social_sentiment (0023) is the social-posts-only sentiment, optional, and only
-    present when social posts were counted."""
+    present when social posts were counted. tallied_on (0025) is the UTC date the
+    run tallied the scores; it is part of the batch identity, so an identical rerun
+    on the same day reuses the batch and one on a later day stores a new one."""
 
     DB_COLUMNS = (
         "value",
@@ -1009,6 +1011,7 @@ class TickerSentiment(SourceRecord):
         "weights_version",
         "model_version",
         "social_sentiment",
+        "tallied_on",
     )
 
     value: Annotated[Optional[Decimal], BeforeValidator(_signed_decimal(4, 5))] = None
@@ -1025,6 +1028,7 @@ class TickerSentiment(SourceRecord):
     social_sentiment: Annotated[
         Optional[Decimal], BeforeValidator(_signed_decimal(4, 5))
     ] = None
+    tallied_on: date
 
     @field_validator("value", "plain_average", "social_sentiment")
     @classmethod
