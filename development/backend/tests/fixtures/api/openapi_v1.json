@@ -290,6 +290,77 @@
         "summary": "Get Financials"
       }
     },
+    "/v1/securities/{symbol}/price": {
+      "get": {
+        "description": "A security's latest close from a licensed provider, its change and its\n52-week range (S3-01).\n\n200 with status \"unavailable\" when no licensed price is stored for it; 404 only\nfor an unknown ticker.",
+        "operationId": "get_price_v1_securities__symbol__price_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PriceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown_security"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "invalid_request"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Price"
+      }
+    },
     "/v1/securities/{symbol}/score": {
       "get": {
         "description": "A security's current Confidence Score, its breakdown and why it is recommended.\n\n200 with score.status \"unavailable\" when the current scores batch has no row\nfor it; 404 only for an unknown ticker.",
@@ -845,6 +916,179 @@
         "early_close"
       ],
       "title": "MarketStatusResponse",
+      "type": "object"
+    },
+    "PriceResponse": {
+      "properties": {
+        "api_version": {
+          "examples": [
+            "v1"
+          ],
+          "title": "Api Version",
+          "type": "string"
+        },
+        "as_of": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The trading day of the close",
+          "title": "As Of"
+        },
+        "change": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "close - previous_close",
+          "title": "Change"
+        },
+        "change_percent": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "change / previous_close x 100",
+          "title": "Change Percent"
+        },
+        "close": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Close"
+        },
+        "currency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "examples": [
+            "USD"
+          ],
+          "title": "Currency"
+        },
+        "high_52w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "High 52W"
+        },
+        "high_52w_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "High 52W Date"
+        },
+        "low_52w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Low 52W"
+        },
+        "low_52w_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Low 52W Date"
+        },
+        "previous_close": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Previous Close"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The licensed provider, e.g. Finnhub",
+          "title": "Source"
+        },
+        "stale": {
+          "description": "The close is more than 7 days old",
+          "title": "Stale",
+          "type": "boolean"
+        },
+        "status": {
+          "description": "ok, or unavailable when no licensed price is stored",
+          "title": "Status",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "The canonical ticker",
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "symbol",
+        "status",
+        "source",
+        "as_of",
+        "currency",
+        "close",
+        "previous_close",
+        "change",
+        "change_percent",
+        "high_52w",
+        "high_52w_date",
+        "low_52w",
+        "low_52w_date",
+        "stale"
+      ],
+      "title": "PriceResponse",
       "type": "object"
     },
     "Publication": {
