@@ -256,6 +256,49 @@ A computed field is `null` when either input is missing, the two units differ, o
 
 The route reads only `fundamentals`' granted columns, never `concept` or `row_number`. `market_cap` is not served on `/v1` (#100). From `watchlist-v6`, the company size is the `public_float` and `public_float_as_of` of the security's `entry` in `/v1/securities/{symbol}`.
 
+## `GET /v1/securities/{symbol}/sentiment`
+
+A security's Sentiment Pulse breakdown (S3-02 piece 1, `docs/technical-specs/SENTIMENT_PULSE.md`): the share of positive, neutral and negative items behind its current sentiment reading, for news and for social posts. One response holds both channels, so the page switches tabs without another request.
+
+- **Symbol handling and errors:** as `/v1/securities/{symbol}/score`: `404 unknown_security` for an unknown ticker, `422 invalid_request` for an invalid one. `symbol` in the body is the canonical ticker.
+- **Which reading:** the security's row in the newest `ticker_sentiment` batch (only successful tallies store rows), summed from its `ticker_sentiment_items` (0026): every article and post that tally counted, with the label and final weight it used.
+- **`news`** shares are `weighted`: a label's share is the sum of its items' weights (source credibility x age decay x relevance) over the sum of all weights. If every weight faded to 0, the shares fall back to plain counts.
+- **`social`** shares are plain: a label's share is its posts' count over the count. Posts are labeled with the article cutoffs (score <= -0.2 negative, >= 0.2 positive, else neutral).
+- **Coverage:** a channel with fewer than `min_items` (3) items has `"status": "not_enough_coverage"` and `"shares": null`; its `counts` are still served. The other channel is judged on its own.
+- **`200` with `"status": "unavailable"`** and a `reason`: `no_reading` when the newest batch has no row for the security (or nothing is tallied yet), `no_breakdown` when its row was tallied before 0026 and has no items. It's never a `404`.
+- **Headers:** `Cache-Control: no-cache` and an `ETag` that changes with the reading; `If-None-Match` with a matching tag returns `304` with no body. The `read` rate-limit bucket.
+
+```json
+{"api_version": "v1", "symbol": "NVDA", "status": "ok", "tallied_on": "2026-11-17", "min_items": 3,
+ "news": {"status": "ok", "weighted": true, "count": 13,
+          "first_at": "2026-11-10T14:02:00+00:00", "last_at": "2026-11-17T09:30:00+00:00",
+          "counts": {"positive": 8, "neutral": 3, "negative": 2},
+          "shares": {"positive": 0.618, "neutral": 0.251, "negative": 0.131}},
+ "social": {"status": "not_enough_coverage", "weighted": false, "count": 1,
+            "first_at": "2026-11-16T23:59:59+00:00", "last_at": "2026-11-16T23:59:59+00:00",
+            "counts": {"positive": 1, "neutral": 0, "negative": 0}, "shares": null}}
+```
+
+Nothing tallied for the security, or a reading from before 0026:
+
+```json
+{"api_version": "v1", "symbol": "ZZSU", "status": "unavailable", "reason": "no_reading"}
+{"api_version": "v1", "symbol": "ZZSB", "status": "unavailable", "reason": "no_breakdown"}
+```
+
+| field | type | meaning |
+|---|---|---|
+| `tallied_on` | string | the UTC date the reading was tallied |
+| `min_items` | number | items a channel needs for `shares` |
+| `status` (channel) | string | `ok` or `not_enough_coverage` |
+| `weighted` | boolean | `true` for news, `false` for social |
+| `count` | number | the channel's counted items |
+| `first_at`, `last_at` | string or null | the earliest and latest item date, ISO 8601 UTC: an article's publication, a post's collection day end; `null` with no items |
+| `counts` | object | items per label |
+| `shares` | object or null | each label's share, to 4 places (they sum to 1 within rounding) |
+
+The route reads only `ticker_sentiment(id, batch_id, security_id, tallied_on)` and `ticker_sentiment_items(id, ticker_sentiment_id, kind, label, weight, item_at)`, never a headline, URL, post id or score.
+
 ## `GET /v1/market-status`
 
 Whether the US stock market (the NYSE calendar, `XNYS`) is in regular hours, and its next open and close (S1-11). It's public, touches no database and takes no input: query parameters and headers don't change the answer. Unlike the other routes, its body has no `api_version`.
@@ -361,6 +404,7 @@ Each `/v1/auth` and `/v1/me` route has exactly one limit, checked before the bea
   - `company_scores`' 30 served columns, never `watchlist_publication_id`
   - `score_explanations(id, batch_id, security_id, company_score_id, status, reason, template_version, claims)`, never `input_digest`
   - `fundamentals(id, batch_id, security_id, fiscal_year_end, line_item, value, unit, form, filed)` (S2-04, decision 113), never `concept` or `row_number`
+  - `ticker_sentiment(id, batch_id, security_id, tallied_on)` and `ticker_sentiment_items(id, ticker_sentiment_id, kind, label, weight, item_at)` (S3-02 Sentiment Pulse)
 
   That means no operator `actor`/`reason`, no runs, no other raw source table, and no writes. The login is Bryan's to create: `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE perennial_api`, a member of nothing else, with a `CONNECTION LIMIT` sized to the `api` pool.
 - **Startup check:** `create_app()` (or `check_startup` in #22's app) refuses to serve unless the login:

@@ -1072,6 +1072,14 @@ EXPLANATION_MAX_CLAIMS = 3
 # S1-05 source credibility weighting (docs/work-items/source-credibility-design-note.md).
 SOCIAL_PLATFORMS = ("reddit", "bluesky", "mastodon", "youtube")
 
+# The three sentiment labels and the score cutoffs between them, as in
+# src/services/credibility/labels.py (0022 for articles, 0026 for social posts).
+SENTIMENT_LABELS = ("negative", "neutral", "positive")
+LABEL_OF_SCORE = (
+    "CASE WHEN score <= -0.2 THEN 'negative' "
+    "WHEN score >= 0.2 THEN 'positive' ELSE 'neutral' END"
+)
+
 # One row per (platform post, security), written by the social sentiment pipeline.
 # Scores are FinTwitBERT's bullish minus bearish probability, in [-1, 1].
 social_posts = Table(
@@ -1084,15 +1092,19 @@ social_posts = Table(
     Column("platform", String(16), nullable=False),
     Column("post_id", String(500), nullable=False),
     Column("score", Numeric(5, 4), nullable=False),
+    # 0026: the label its score falls in, with the article scorer's cutoffs
+    Column("label", String(8), nullable=False),
     UniqueConstraint("batch_id", "row_number"),
     UniqueConstraint("batch_id", "security_id", "platform", "post_id"),
     CheckConstraint("row_number >= 1", name="row_number"),
     CheckConstraint(_in("platform", SOCIAL_PLATFORMS), name="platform"),
     CheckConstraint("score >= -1 AND score <= 1", name="score"),
+    CheckConstraint(_in("label", SENTIMENT_LABELS), name="label"),
+    CheckConstraint(f"label = {LABEL_OF_SCORE}", name="label_of_score"),
 )
 Index("ix_social_posts_security_id", social_posts.c.security_id)
 
-ARTICLE_SENTIMENT_LABELS = ("negative", "neutral", "positive")
+ARTICLE_SENTIMENT_LABELS = SENTIMENT_LABELS
 
 # S1-04's output, the agreed handoff: one score in [-1, 1] per news article and
 # model. A batch holds only newly scored articles; readers take each article's
@@ -1226,6 +1238,42 @@ ticker_sentiment = Table(
     ),
 )
 Index("ix_ticker_sentiment_security_id", ticker_sentiment.c.security_id)
+
+# 0026 (S3-02): every article or post a ticker_sentiment row counted, with the
+# score, label and final weight (tier x age decay x relevance) the weighting used.
+# Written by the importer with its ticker_sentiment row; the read API sums them
+# into the Sentiment Pulse breakdown. Rows written before 0026 have none.
+SENTIMENT_ITEM_KINDS = ("news", "social")
+
+ticker_sentiment_items = Table(
+    "ticker_sentiment_items",
+    metadata,
+    _id(),
+    Column(
+        "ticker_sentiment_id",
+        BigInteger,
+        ForeignKey(f"{SCHEMA}.ticker_sentiment.id"),
+        nullable=False,
+    ),
+    Column("kind", String(8), nullable=False),
+    Column("news_article_id", BigInteger, ForeignKey(f"{SCHEMA}.news_articles.id")),
+    Column("social_post_id", BigInteger, ForeignKey(f"{SCHEMA}.social_posts.id")),
+    Column("score", Numeric(5, 4), nullable=False),
+    Column("label", String(8), nullable=False),
+    Column("weight", Numeric(12, 10), nullable=False),
+    Column("item_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("ticker_sentiment_id", "news_article_id"),
+    UniqueConstraint("ticker_sentiment_id", "social_post_id"),
+    CheckConstraint(_in("kind", SENTIMENT_ITEM_KINDS), name="kind"),
+    CheckConstraint(
+        "(kind = 'news') = (news_article_id IS NOT NULL) "
+        "AND (kind = 'social') = (social_post_id IS NOT NULL)",
+        name="kind_source",
+    ),
+    CheckConstraint("score >= -1 AND score <= 1", name="score"),
+    CheckConstraint(_in("label", SENTIMENT_LABELS), name="label"),
+    CheckConstraint("weight >= 0", name="weight"),
+)
 
 
 def _score_component(name: str) -> list[Any]:

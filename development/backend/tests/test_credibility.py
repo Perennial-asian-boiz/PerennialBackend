@@ -235,8 +235,10 @@ def test_reports_are_read_and_missing_platforms_reported():
     outcome = collect_social(reports, lambda tickers: {"RKLB"} & set(tickers), NOW, 7)
     assert outcome.succeeded and outcome.source_as_of == NOW.date()
     assert outcome.records == [
-        {"ticker": "RKLB", "platform": "bluesky", "post_id": "p_a", "score": 0.4222},
-        {"ticker": "RKLB", "platform": "youtube", "post_id": "v1", "score": -0.7}]
+        {"ticker": "RKLB", "platform": "bluesky", "post_id": "p_a", "score": 0.4222,
+         "label": "positive"},  # 0026: labeled with the article cutoffs
+        {"ticker": "RKLB", "platform": "youtube", "post_id": "v1", "score": -0.7,
+         "label": "negative"}]
     env = outcome.envelope
     assert (env["fresh"], env["missing"]) == (["bluesky", "youtube"], ["mastodon"])
     assert env["skipped_tickers"] == ["ZZZZ"]
@@ -306,7 +308,7 @@ def score_articles(engine, model="finbert", scores=SCORES):
                                    models.news_articles.c.finnhub_id)
                             .join(models.securities)).all()
     records = [{"ticker": s, "news_article_id": i, "score": scores[f], "model": model,
-                "label": "neutral", "confidence": "0.5000"}  # not read downstream
+                "label": "neutral", "confidence": "0.5000"}  # copied into items, not checked here
                for s, i, f in rows]
     run_id = begin_run(engine, "article_sentiment", "derived")
     return import_collection(engine, CollectionOutcome.success(

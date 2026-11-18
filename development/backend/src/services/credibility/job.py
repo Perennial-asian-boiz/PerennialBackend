@@ -35,6 +35,11 @@ security gets a row with the counts, the date range and the weights version
 (AC 3); one with nothing to score has a count of 0 and no value. model_version
 names the news model, and is NULL when no news was counted. tallied_on is the
 run's UTC date, the same on every row of the batch.
+
+Every counted article and post is stored with its row as a ticker_sentiment_items
+row (0026, S3-02): its score, label and final weight (the weight above, after
+relevance and fading), so the Sentiment Pulse breakdown is built from exactly
+the items behind value.
 """
 
 import logging
@@ -55,6 +60,7 @@ from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.identity import resolve_tickers
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
+from src.services.credibility.labels import label_for
 from src.services.credibility.publishers import PublisherResolver, resolve_publishers
 from src.services.credibility.weights import (
     SUMMARY_ONLY_RELEVANCE,
@@ -107,6 +113,29 @@ class Item:
     first_at: datetime
     last_at: datetime
     social: bool
+    # 0026: what it is, for ticker_sentiment_items (the stored row's id and label)
+    source_id: int | None = None  # news_articles.id or social_posts.id
+    label: str | None = None
+
+
+def item_records(items: list[Item]) -> list[dict[str, Any]]:
+    """The ticker_sentiment_items of one record (0026): each counted item's
+    score, label and final weight, dated by its publication (news) or the end of
+    its collection day (social). Items without a stored id are not stored."""
+    return [
+        {
+            "kind": "social" if i.social else "news",
+            "news_article_id": None if i.social else i.source_id,
+            "social_post_id": i.source_id if i.social else None,
+            "score": Decimal(f"{i.score:.4f}") + 0,
+            # an article scored before 0022 has no stored label: its score's
+            "label": i.label or label_for(Decimal(f"{i.score:.4f}")),
+            "weight": Decimal(f"{i.weight:.10f}"),
+            "item_at": i.last_at,
+        }
+        for i in items
+        if i.source_id is not None
+    ]
 
 
 def weigh(
@@ -174,7 +203,7 @@ def news_items(
     if model is None:
         return News({}, 0, 0, None)
     latest = (
-        select(a.c.news_article_id, a.c.security_id, a.c.score)
+        select(a.c.news_article_id, a.c.security_id, a.c.score, a.c.label)
         .where(a.c.model == model)
         .distinct(a.c.news_article_id)
         .order_by(a.c.news_article_id, a.c.batch_id.desc())
@@ -189,6 +218,8 @@ def news_items(
             na.c.published_at,
             latest.c.score,
             np_.c.domain,
+            na.c.id,
+            latest.c.label,
         )
         .join(s, s.c.id == na.c.security_id)
         .join(
@@ -210,7 +241,9 @@ def news_items(
     out: dict[str, list[Item]] = {}
     seen: set[tuple[str, str]] = set()
     off_topic = unknown = duplicates = summary_only = 0
-    for symbol, headline, summary, digest, published_at, score, domain in rows:
+    for row in rows:
+        symbol, headline, summary, digest, published_at, score, domain = row[:7]
+        article_id, label = row[7], row[8]
         if (symbol, digest) in seen:
             duplicates += 1
             continue
@@ -227,7 +260,15 @@ def news_items(
             * decay(published_at, end, table.half_life_days)
         )
         out.setdefault(symbol, []).append(
-            Item(float(score), weight, published_at, published_at, False)
+            Item(
+                float(score),
+                weight,
+                published_at,
+                published_at,
+                False,
+                article_id,
+                label,
+            )
         )
     return News(out, off_topic, unknown, model, duplicates, summary_only)
 
@@ -248,6 +289,8 @@ def social_items(
                 first,
                 last,
                 True,
+                row.get("id"),
+                row.get("label"),
             )
         )
     return out
@@ -322,16 +365,18 @@ def _sentiment_outcome(
             rows = batch_rows(conn, "social_posts", social.batch_id)
             posts = social_items(rows, social.source_as_of, now, table)
     tallied_on = now.astimezone(timezone.utc).date()
+    counted = {s: news.items.get(s, []) + posts.get(s, []) for s in symbols}
     records = [
         {
             **weigh(
                 symbol,
-                news.items.get(symbol, []) + posts.get(symbol, []),
+                counted[symbol],
                 table.version,
                 news.model,
                 table.prior_weight,
             ),
             "tallied_on": tallied_on,
+            "items": item_records(counted[symbol]),
         }
         for symbol in symbols
     ]

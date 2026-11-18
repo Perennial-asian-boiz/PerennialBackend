@@ -137,7 +137,8 @@ def test_the_api_columns_for_fundamentals_are_exactly_the_nine():
 def test_the_rest_of_the_api_policy_is_unchanged():
     roles = _roles_module()
     assert set(roles.API_TABLES) == API_TABLES_BEFORE
-    assert set(roles.API_COLUMNS) == API_COLUMN_TABLES_BEFORE | {"fundamentals"}
+    assert set(roles.API_COLUMNS) == API_COLUMN_TABLES_BEFORE | {"fundamentals"} | {
+        "ticker_sentiment", "ticker_sentiment_items"}  # S3-02 (test_sentiment_breakdown)
     for table in STILL_REFUSED:
         assert table not in roles.API_TABLES and table not in roles.API_COLUMNS, table
     # test_read_api's exact-readable test compares against its own copy of the policy.
