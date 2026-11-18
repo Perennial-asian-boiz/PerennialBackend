@@ -198,6 +198,7 @@ SOURCE_LOCK_KEYS = {
     "score_explanations": 170023,
     "social_posts": 170024,
     "article_sentiment": 170025,
+    "daily_prices": 170026,
     "pipeline": 170098,
 }
 

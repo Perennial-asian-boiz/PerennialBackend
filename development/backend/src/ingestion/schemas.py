@@ -1228,3 +1228,81 @@ ONE_ROW_PER_SECURITY = ONE_ROW_PER_SECURITY | {
     "company_scores",
     "score_explanations",
 }
+
+
+# ── S3-01 prices (src/services/prices) ───────────────────
+
+_price = _decimal_validator(6, 20, zero_is_unknown=True)  # daily_prices' NUMERIC(20, 6)
+
+
+def _required_price(value: Any) -> Decimal:
+    dec = _price(value)
+    if dec is None:
+        raise ValueError("price must be positive")
+    return dec
+
+
+OptionalPrice = Annotated[Optional[Decimal], BeforeValidator(_price)]
+
+
+class DailyPrice(SourceRecord):
+    """One security's price snapshot after the US close, as the provider reported it.
+
+    `price_currency` is stored in the `currency` column. It is deliberately not
+    SourceRecord.currency, which the importer writes to securities.currency.
+    """
+
+    DB_COLUMNS = (
+        "trading_date",
+        "quoted_at",
+        "close",
+        "previous_close",
+        "high_52w",
+        "high_52w_date",
+        "low_52w",
+        "low_52w_date",
+        "provider",
+    )
+
+    trading_date: RequiredDate
+    quoted_at: datetime
+    close: Annotated[Decimal, BeforeValidator(_required_price)]
+    previous_close: OptionalPrice = None
+    high_52w: OptionalPrice = None
+    high_52w_date: OptionalDate = None
+    low_52w: OptionalPrice = None
+    low_52w_date: OptionalDate = None
+    price_currency: Annotated[str, BeforeValidator(_text_validator(3, required=True))]
+    provider: Annotated[str, BeforeValidator(_provider)]
+
+    @field_validator("quoted_at")
+    @classmethod
+    def _aware(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValueError("quoted_at must be timezone-aware")
+        return v
+
+    @field_validator("price_currency")
+    @classmethod
+    def _price_currency(cls, v: str) -> str:
+        if not re.fullmatch(r"[A-Z]{3}", v):
+            raise ValueError("currency must be a 3-letter code")
+        return v
+
+    @model_validator(mode="after")
+    def _range(self) -> "DailyPrice":
+        high, low = self.high_52w, self.low_52w
+        if (high is None) != (low is None):
+            raise ValueError("the 52-week high and low come as a pair")
+        if high is not None and low is not None and low > high:
+            raise ValueError("the 52-week low is above the high")
+        if (high is None and self.high_52w_date) or (low is None and self.low_52w_date):
+            raise ValueError("a 52-week date needs its value")
+        return self
+
+    def db_values(self) -> Dict[str, Any]:
+        return {**super().db_values(), "currency": self.price_currency}
+
+
+RECORD_MODELS.update(daily_prices=DailyPrice)
+ONE_ROW_PER_SECURITY = ONE_ROW_PER_SECURITY | {"daily_prices"}

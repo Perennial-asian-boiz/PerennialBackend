@@ -256,6 +256,42 @@ A computed field is `null` when either input is missing, the two units differ, o
 
 The route reads only `fundamentals`' granted columns, never `concept` or `row_number`. `market_cap` is not served on `/v1` (#100). From `watchlist-v6`, the company size is the `public_float` and `public_float_as_of` of the security's `entry` in `/v1/securities/{symbol}`.
 
+## `GET /v1/securities/{symbol}/price`
+
+A security's latest close (S3-01), for the Company page's Price Breakdown.
+
+- **Symbol handling and errors:** as `/v1/securities/{symbol}/score`: `404 unknown_security` for an unknown ticker, `422 invalid_request` for an invalid one. `symbol` in the body is the canonical ticker.
+- **What is served:** the security's newest `daily_prices` row from a licensed provider. The prices job (`--job prices`) stores one row per watchlist company after the US close, from Finnhub's quote and 52-week range.
+- **Licensed providers only:** `src/api/licensed_price_providers.json` lists each provider whose prices may be displayed, with a link to its terms, who approved it and when. Today it lists Finnhub, approved by Bryan on 2026-11-16. Rows from any other provider, such as FMP (decision 95), are left out before anything is computed. They never appear in the body, and they can't replace an older licensed row.
+- **`200` with `"status": "unavailable"`** and every value `null` when no licensed price is stored. The body is the same whether nothing is stored or only unlicensed rows are. It's never a `404`.
+- **Headers:** `Cache-Control: no-cache` and an `ETag` that changes with the row, the licensed providers and `stale`; `If-None-Match` with a matching tag returns `304` with no body. The `read` rate-limit bucket.
+
+```json
+{"api_version": "v1", "symbol": "PLTR", "status": "ok", "source": "Finnhub", "as_of": "2026-11-13",
+ "currency": "USD", "close": 182.41, "previous_close": 184.58, "change": -2.17, "change_percent": -1.175642,
+ "high_52w": 207.52, "high_52w_date": "2026-02-18", "low_52w": 63.4, "low_52w_date": "2025-11-21",
+ "stale": false}
+```
+
+No licensed price:
+
+```json
+{"api_version": "v1", "symbol": "CRSP", "status": "unavailable", "source": null, "as_of": null,
+ "currency": null, "close": null, "previous_close": null, "change": null, "change_percent": null,
+ "high_52w": null, "high_52w_date": null, "low_52w": null, "low_52w_date": null, "stale": false}
+```
+
+| field | type | meaning |
+|---|---|---|
+| `source` | string or null | the licensed provider's name |
+| `as_of` | string or null | the trading day of the close, ISO date, New York time |
+| `close`, `previous_close` | number or null | as the provider reported them; `previous_close` is `null` when it didn't report one |
+| `change` | number or null | `close - previous_close`, to 6 places |
+| `change_percent` | number or null | `change / previous_close × 100`, to 6 places |
+| `high_52w`, `low_52w` | number or null | the provider's 52-week high and low; both `null` when it gave no usable range |
+| `high_52w_date`, `low_52w_date` | string or null | the day each was reached, when the provider gave it |
+| `stale` | boolean | `true` once `as_of` is more than 7 calendar days before today in New York (about five trading days) |
+
 ## `GET /v1/market-status`
 
 Whether the US stock market (the NYSE calendar, `XNYS`) is in regular hours, and its next open and close (S1-11). It's public, touches no database and takes no input: query parameters and headers don't change the answer. Unlike the other routes, its body has no `api_version`.
@@ -361,6 +397,7 @@ Each `/v1/auth` and `/v1/me` route has exactly one limit, checked before the bea
   - `company_scores`' 30 served columns, never `watchlist_publication_id`
   - `score_explanations(id, batch_id, security_id, company_score_id, status, reason, template_version, claims)`, never `input_digest`
   - `fundamentals(id, batch_id, security_id, fiscal_year_end, line_item, value, unit, form, filed)` (S2-04, decision 113), never `concept` or `row_number`
+  - `daily_prices(id, batch_id, security_id, trading_date, close, previous_close, high_52w, high_52w_date, low_52w, low_52w_date, currency, provider)` (S3-01, decision 115), never `row_number` or `quoted_at`
 
   That means no operator `actor`/`reason`, no runs, no other raw source table, and no writes. The login is Bryan's to create: `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE perennial_api`, a member of nothing else, with a `CONNECTION LIMIT` sized to the `api` pool.
 - **Startup check:** `create_app()` (or `check_startup` in #22's app) refuses to serve unless the login:

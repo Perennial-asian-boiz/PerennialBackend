@@ -71,6 +71,8 @@ SENTIMENT_SOURCES: tuple[str, ...] = (
     "social_posts",
     "article_sentiment",
 )
+# S3-01 prices (src/services/prices): a daily snapshot per security.
+PRICE_SOURCES: tuple[str, ...] = ("daily_prices",)
 # The closed source vocabulary (CHECKs, CLI, locks). Append only; lifecycle lock
 # keys are explicit per source (SOURCE_LOCK_KEYS).
 SOURCES = (
@@ -81,6 +83,7 @@ SOURCES = (
     + NEWS_SOURCES
     + SCORE_SOURCES
     + SENTIMENT_SOURCES
+    + PRICE_SOURCES
 )
 RUN_STATUSES = ("running", "succeeded", "failed", "abandoned")
 COLLECTION_MODES = ("fixture", "file", "live", "derived")
@@ -1354,3 +1357,45 @@ current_scores = Table(
     ),
     Column("promoted_at", DateTime(timezone=True), nullable=False),
 )
+
+# S3-01: one price snapshot per security, taken after the US close. The API serves
+# a security's newest row, and only from a licensed provider (src/api/price.py).
+daily_prices = Table(
+    "daily_prices",
+    metadata,
+    _id(),
+    _batch_fk(),
+    _security_fk(),
+    Column("row_number", Integer, nullable=False),
+    Column("trading_date", Date, nullable=False),
+    Column("quoted_at", DateTime(timezone=True), nullable=False),
+    Column("close", Numeric(20, 6), nullable=False),
+    Column("previous_close", Numeric(20, 6)),
+    Column("high_52w", Numeric(20, 6)),
+    Column("high_52w_date", Date),
+    Column("low_52w", Numeric(20, 6)),
+    Column("low_52w_date", Date),
+    Column("currency", String(3), nullable=False),
+    Column("provider", String(32), nullable=False),
+    UniqueConstraint("batch_id", "row_number"),
+    UniqueConstraint("batch_id", "security_id"),
+    CheckConstraint("row_number >= 1", name="row_number"),
+    CheckConstraint(
+        "close > 0 AND (previous_close IS NULL OR previous_close > 0)", name="close"
+    ),
+    CheckConstraint(
+        "(high_52w IS NULL) = (low_52w IS NULL)"
+        " AND (low_52w IS NULL OR (low_52w > 0 AND low_52w <= high_52w))",
+        name="range",
+    ),
+    CheckConstraint(
+        "(high_52w IS NOT NULL OR high_52w_date IS NULL)"
+        " AND (low_52w IS NOT NULL OR low_52w_date IS NULL)",
+        name="range_dates",
+    ),
+    CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency"),
+    CheckConstraint("provider ~ '^[a-z0-9_]{1,32}$'", name="provider"),
+)
+Index("ix_daily_prices_security_id", daily_prices.c.security_id)
+
+SOURCE_TABLES.update(daily_prices=daily_prices)
