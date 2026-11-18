@@ -85,6 +85,21 @@ COLUMNS = {
         "form",
         "filed",
     ),
+    # S3-01 (decision 115): the price snapshot; never row_number or quoted_at.
+    "daily_prices": (
+        "id",
+        "batch_id",
+        "security_id",
+        "trading_date",
+        "close",
+        "previous_close",
+        "high_52w",
+        "high_52w_date",
+        "low_52w",
+        "low_52w_date",
+        "currency",
+        "provider",
+    ),
 }
 PUBLICATION_KEYS = {
     "id",

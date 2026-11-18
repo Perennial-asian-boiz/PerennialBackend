@@ -5,7 +5,8 @@ Pinned:
   envelope keys and record model, one row per (batch, security), planned from
   canonical tickers.
 * The importer may only add rows (an immutable batch table) and the reader may
-  read them. The API's access is a separate grant (Bryan's).
+  read them. The API reads twelve columns (decision 115), never row_number or
+  quoted_at, and writes nothing.
 * The record and the table refuse a missing or non-positive close, a lone or
   inverted 52-week range, a range date without its value, and a bad currency or
   provider name.
@@ -81,6 +82,32 @@ def test_policy_lets_the_importer_only_add_rows_and_never_lists_it_for_the_whole
     assert "daily_prices" in roles.IMMUTABLE
     assert "daily_prices" not in roles.MUTABLE + roles.REFERENCE
     assert "daily_prices" not in roles.API_TABLES
+
+
+API_SERVED = (
+    "id", "batch_id", "security_id", "trading_date", "close", "previous_close", "high_52w",
+    "high_52w_date", "low_52w", "low_52w_date", "currency", "provider",
+)
+
+
+def test_the_api_may_read_exactly_the_served_columns():
+    assert provision_roles().API_COLUMNS["daily_prices"] == API_SERVED
+
+
+@pytest.mark.db
+def test_the_api_reads_the_served_columns_and_nothing_else(engine, groups):  # noqa: F811
+    with engine.connect() as conn:
+        columns = conn.execute(
+            text("SELECT column_name FROM information_schema.columns"
+                 " WHERE table_schema = 'perennial' AND table_name = 'daily_prices'")
+        ).scalars().all()
+        readable = {
+            c for c in columns
+            if conn.execute(text("SELECT has_column_privilege(:r, :t, :c, 'SELECT')"),
+                            {"r": groups["api"], "t": TABLE, "c": c}).scalar()
+        }
+    assert readable == set(API_SERVED)
+    assert {"row_number", "quoted_at"} <= set(columns) - readable
 
 
 @pytest.mark.db

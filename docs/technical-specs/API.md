@@ -397,6 +397,7 @@ Each `/v1/auth` and `/v1/me` route has exactly one limit, checked before the bea
   - `company_scores`' 30 served columns, never `watchlist_publication_id`
   - `score_explanations(id, batch_id, security_id, company_score_id, status, reason, template_version, claims)`, never `input_digest`
   - `fundamentals(id, batch_id, security_id, fiscal_year_end, line_item, value, unit, form, filed)` (S2-04, decision 113), never `concept` or `row_number`
+  - `daily_prices(id, batch_id, security_id, trading_date, close, previous_close, high_52w, high_52w_date, low_52w, low_52w_date, currency, provider)` (S3-01, decision 115), never `row_number` or `quoted_at`
 
   That means no operator `actor`/`reason`, no runs, no other raw source table, and no writes. The login is Bryan's to create: `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE perennial_api`, a member of nothing else, with a `CONNECTION LIMIT` sized to the `api` pool.
 - **Startup check:** `create_app()` (or `check_startup` in #22's app) refuses to serve unless the login:
