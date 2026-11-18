@@ -11,10 +11,13 @@ social_posts itself when it runs.
 The weighting is a derived run (ticker_sentiment). For every security in the
 current production watchlist publication it takes, over the last WINDOW_DAYS:
 
-* each scored news article whose headline names the company (the table's
-  relevance rule): S1-04's latest score for it from the current model (the model
+* each scored news article about the company (the table's relevance rule; with
+  headline-match-v2 an article naming the company only in its summary counts at
+  half weight): S1-04's latest score for it from the current model (the model
   of the newest article score), weighted by its publisher's entry in
-  source_weights.json;
+  source_weights.json. A story stored more than once for the company (the same
+  headline and summary under several Finnhub ids, as syndicated copies are)
+  counts once, as its earliest copy;
 * each social post of the latest social batch, if that batch is inside the
   window: its score (already in [-1, 1]), weighted by its platform's entry.
 
@@ -30,7 +33,8 @@ weighted average starts with prior_weight of a neutral 0, so a ticker with one
 fresh Reuters article at +0.8 gets +0.4, and with ten of them +0.73. Every
 security gets a row with the counts, the date range and the weights version
 (AC 3); one with nothing to score has a count of 0 and no value. model_version
-names the news model, and is NULL when no news was counted.
+names the news model, and is NULL when no news was counted. tallied_on is the
+run's UTC date, the same on every row of the batch.
 """
 
 import logging
@@ -52,7 +56,11 @@ from src.ingestion.identity import resolve_tickers
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
 from src.services.credibility.publishers import PublisherResolver, resolve_publishers
-from src.services.credibility.weights import WeightTable, load_weights
+from src.services.credibility.weights import (
+    SUMMARY_ONLY_RELEVANCE,
+    WeightTable,
+    load_weights,
+)
 from src.services.fundamentals.job import current_universe
 from src.services.news.finnhub import FinnhubNewsClient
 from src.services.news.job import company_names, run_news
@@ -73,6 +81,23 @@ def decay(at: datetime, now: datetime, half_life_days: float) -> float:
 def about_company(headline: str, symbol: str, variants: set[str]) -> bool:
     """headline-match-v1: S1-03's match-v1 on the headline alone."""
     return match_rule(headline, "", symbol, variants) is not None
+
+
+def relevance(
+    rule: str, headline: str, summary: str | None, symbol: str, variants: set[str]
+) -> float:
+    """The share of its weight an article keeps under the relevance rule: 1 when
+    the headline names the company; under headline-match-v2, SUMMARY_ONLY_RELEVANCE
+    when only the summary does; else 0 (left out)."""
+    if about_company(headline, symbol, variants):
+        return 1.0
+    if (
+        rule == "headline-match-v2"
+        and summary
+        and match_rule("", summary, symbol, variants) is not None
+    ):
+        return SUMMARY_ONLY_RELEVANCE
+    return 0.0
 
 
 @dataclass(frozen=True)
@@ -122,9 +147,11 @@ def weigh(
 @dataclass(frozen=True)
 class News:
     items: dict[str, list[Item]]
-    off_topic: int  # scored articles left out because the headline names no company
+    off_topic: int  # scored articles left out because they don't name the company
     publishers_unknown: int  # counted articles with no resolved publisher
     model: str | None
+    duplicates: int = 0  # repeat copies of a story already counted for the company
+    summary_only: int = 0  # counted articles naming the company only in the summary
 
 
 def news_items(
@@ -155,7 +182,13 @@ def news_items(
     )
     rows = conn.execute(
         select(
-            s.c.symbol, na.c.headline, na.c.published_at, latest.c.score, np_.c.domain
+            s.c.symbol,
+            na.c.headline,
+            na.c.summary,
+            na.c.content_hash,
+            na.c.published_at,
+            latest.c.score,
+            np_.c.domain,
         )
         .join(s, s.c.id == na.c.security_id)
         .join(
@@ -169,23 +202,34 @@ def news_items(
             na.c.published_at >= start,
             na.c.published_at <= end,
         )
+        # earliest copy first, so it is the one a repeated story counts as
+        .order_by(s.c.symbol, na.c.published_at, na.c.id)
     ).all()
     names = company_names(conn, symbols)
     variants = {symbol: name_variants(names.get(symbol, [])) for symbol in symbols}
     out: dict[str, list[Item]] = {}
-    off_topic = unknown = 0
-    for symbol, headline, published_at, score, domain in rows:
-        if not about_company(headline, symbol, variants[symbol]):
+    seen: set[tuple[str, str]] = set()
+    off_topic = unknown = duplicates = summary_only = 0
+    for symbol, headline, summary, digest, published_at, score, domain in rows:
+        if (symbol, digest) in seen:
+            duplicates += 1
+            continue
+        seen.add((symbol, digest))
+        share = relevance(table.relevance, headline, summary, symbol, variants[symbol])
+        if share == 0:
             off_topic += 1
             continue
+        summary_only += share < 1
         unknown += domain is None
-        weight = table.weight_for(domain) * decay(
-            published_at, end, table.half_life_days
+        weight = (
+            share
+            * table.weight_for(domain)
+            * decay(published_at, end, table.half_life_days)
         )
         out.setdefault(symbol, []).append(
             Item(float(score), weight, published_at, published_at, False)
         )
-    return News(out, off_topic, unknown, model)
+    return News(out, off_topic, unknown, model, duplicates, summary_only)
 
 
 def social_items(
@@ -277,14 +321,18 @@ def _sentiment_outcome(
         if social_fresh and social is not None:
             rows = batch_rows(conn, "social_posts", social.batch_id)
             posts = social_items(rows, social.source_as_of, now, table)
+    tallied_on = now.astimezone(timezone.utc).date()
     records = [
-        weigh(
-            symbol,
-            news.items.get(symbol, []) + posts.get(symbol, []),
-            table.version,
-            news.model,
-            table.prior_weight,
-        )
+        {
+            **weigh(
+                symbol,
+                news.items.get(symbol, []) + posts.get(symbol, []),
+                table.version,
+                news.model,
+                table.prior_weight,
+            ),
+            "tallied_on": tallied_on,
+        }
         for symbol in symbols
     ]
     scored = sum(r["article_count"] > 0 for r in records)
@@ -304,6 +352,8 @@ def _sentiment_outcome(
             "social_batch_fresh": social_fresh,
             "publishers_unknown": news.publishers_unknown,
             "news_off_topic": news.off_topic,
+            "news_duplicates": news.duplicates,
+            "news_summary_only": news.summary_only,
             "half_life_days": table.half_life_days,
         },
     )

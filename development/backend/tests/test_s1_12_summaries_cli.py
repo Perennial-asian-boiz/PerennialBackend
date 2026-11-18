@@ -66,7 +66,7 @@ def members(monkeypatch, *symbols):
     from src.ingestion import company_summaries
 
     monkeypatch.setattr(
-        company_summaries, "consensus_members", lambda engine: list(symbols)
+        company_summaries, "profiled_securities", lambda engine: list(symbols)
     )
 
 

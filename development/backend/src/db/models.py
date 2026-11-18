@@ -1195,6 +1195,9 @@ ticker_sentiment = Table(
     Column("model_version", String(64)),  # the news model; NULL when no news counted
     # 0023: social posts only; NULL when none counted
     Column("social_sentiment", Numeric(5, 4)),
+    # 0025: the UTC date the run tallied these scores (first_at/last_at are the
+    # scored items' window, not the run)
+    Column("tallied_on", Date, nullable=False),
     UniqueConstraint("batch_id", "row_number"),
     UniqueConstraint("batch_id", "security_id"),
     CheckConstraint("row_number >= 1", name="row_number"),

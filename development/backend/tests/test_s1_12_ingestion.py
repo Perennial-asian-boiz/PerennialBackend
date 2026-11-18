@@ -3,8 +3,10 @@ N1, N2 and the ok-status coupling note.
 
 Spec: docs/work-items/s1-stories-plan.md (S1-12) on docs/s1-stories-plan @
 25d2590, with decision 72: verbatim sentence selection, else "Summary not
-available" (Q13 (a) then (e)), no model (Q9 declined), consensus members only
-(Q11), the provider profile through the provider-neutral adapter (Q5). The
+available" (Q13 (a) then (e)), no model (Q9 declined), the provider profile
+through the provider-neutral adapter (Q5). Q11 (consensus members only) ended
+on 2026-11-16 (Bryan): the job now covers every active security with a company
+profile. The
 storage is migration 0012 on feat/s1-12-summary-api @ 01e411c.
 
 The seam (one module, src.ingestion.company_summaries):
@@ -13,15 +15,15 @@ The seam (one module, src.ingestion.company_summaries):
 - Description(text, url) is what an adapter returns; DescriptionAdapterError(code)
   is how it fails. An adapter has .source_name and .fetch(symbol) -> Description
   or None. The tests use a fake adapter only: no provider is ever called.
-- consensus_members(engine) -> the current publication's entry tickers.
+- profiled_securities(engine) -> every active security with a company profile.
 - summarize(engine, adapter, *, symbols=None) -> a result with .succeeded,
   .error_code, .members, .with_summary and .unavailable; symbols defaults to
-  consensus_members(engine).
+  profiled_securities(engine).
 
 The synthetic sentences were graded with textstat 0.7.13 while these tests were
-written: EASY ones are about grade -2 to 0, HARD ones about 38, and every mixed
-window used below is above 19 (above MAX_GRADE 16). A test reads textstat only
-to check the stored grade and the pin.
+written: EASY ones are about grade -2 to 0, HARD ones about 38. Since
+2026-11-16 there is no reading-level limit (Bryan), so a HARD window is taken
+like any other; a test reads textstat only to check the stored grade and the pin.
 """
 
 import ast
@@ -44,8 +46,7 @@ EASY = [
     "It has a small team.",
     "Most of its tools are for gardens.",
 ]
-# Lengthened 2026-10-28 for MAX_GRADE 16: with the shorter originals, a window
-# of three EASY sentences and one HARD graded 15.5-16.0 and would now pass.
+# About grade 38: far above every limit there has been (8, 13, 16).
 HARD = [
     "The corporation manufactures sophisticated semiconductor instrumentation, metrology"
     " equipment, and computational lithography infrastructure for multinational"
@@ -77,17 +78,15 @@ def normalized(value):
 # CS-2's cases: description -> the excerpt (None: summary_unavailable).
 SELECTION = {
     "readable_lead": (joined(EASY), joined(EASY[:4])),
-    "hard_lead_readable_middle": (joined(HARD + EASY[:4]), joined(EASY[:4])),
-    "three_then_hard": (joined(EASY[:3] + [HARD[0]] + EASY[3:4]), joined(EASY[:3])),
-    # Document order: the start moves only after 4, 3 and 2 have failed there, so a
-    # passing 3 at the start beats a passing 4 further on.
-    "three_first_beats_a_later_four": (
-        joined(EASY[:3] + [HARD[0]] + EASY[3:] + ["They last a long time."]),
-        joined(EASY[:3]),
+    # No reading-level limit: the opening window wins however hard it reads.
+    "hard_lead": (joined(HARD + EASY[:4]), joined(HARD + EASY[:2])),
+    "three_then_hard": (
+        joined(EASY[:3] + [HARD[0]] + EASY[3:4]),
+        joined(EASY[:3] + [HARD[0]]),
     ),
-    "hard_then_two": (joined([HARD[1]] + EASY[:2]), joined(EASY[:2])),
+    "hard_then_two": (joined([HARD[1]] + EASY[:2]), joined([HARD[1]] + EASY[:2])),
     "exactly_two": (joined(EASY[:2]), joined(EASY[:2])),
-    "nothing_readable": (joined(HARD), None),
+    "only_hard": (joined(HARD), joined(HARD)),
     "single_sentence": (EASY[0], None),
     "empty": ("", None),
     "whitespace_only": ("  \n\t ", None),
@@ -184,14 +183,13 @@ def test_cs2_the_splitter_is_ours_not_textstats():
 
 
 @pytest.mark.parametrize("case", sorted(SELECTION))
-def test_cs2_the_first_passing_window_is_taken_verbatim(case):
+def test_cs2_the_first_window_is_taken_verbatim(case):
     description, expected = SELECTION[case]
     excerpt = cs().select_excerpt(description)
     if expected is None:
         assert excerpt is None
     else:
         assert excerpt is not None and excerpt.text == expected
-        assert float(excerpt.grade) <= 16.0  # MAX_GRADE: 8, 13 on 10-26, 16 on 10-28
 
 
 def test_cs2_a_none_description_is_unavailable():
@@ -382,8 +380,8 @@ def test_cs1_a_passing_window_is_stored_with_its_source(engine):
 @pytest.mark.db
 @pytest.mark.parametrize(
     "description",
-    [joined(HARD), EASY[0], "", None],
-    ids=["no_passing_window", "single_sentence", "empty", "no_description"],
+    [EASY[0], "", None],
+    ids=["single_sentence", "empty", "no_description"],
 )
 def test_cs1_no_window_or_no_description_is_unavailable_and_counted(
     engine, description
@@ -418,7 +416,7 @@ def test_cs1_a_provider_error_fails_the_run_and_touches_no_row(engine):
 @pytest.mark.db
 def test_cs1_an_unchanged_description_is_skipped_and_no_row_is_rewritten(engine):
     symbols = members(engine, "ZZDA", "ZZDB")
-    descriptions = {"ZZDA": joined(EASY), "ZZDB": joined(HARD)}
+    descriptions = {"ZZDA": joined(EASY), "ZZDB": EASY[0]}  # one sentence: no window
     run(engine, FakeAdapter(descriptions), symbols)
     before = {s: stored(engine, s) for s in symbols}
     again = run(engine, FakeAdapter(descriptions), symbols)
@@ -446,7 +444,7 @@ def test_cs1_stale_good_is_cleared_when_the_new_description_has_no_window(engine
     symbols = members(engine, "ZZGA")
     run(engine, FakeAdapter({"ZZGA": joined(EASY)}), symbols)
     assert stored(engine, "ZZGA")["summary_status"] == "ok"
-    result = run(engine, FakeAdapter({"ZZGA": joined(HARD)}), symbols)
+    result = run(engine, FakeAdapter({"ZZGA": EASY[0]}), symbols)  # one sentence
     assert result.succeeded
     row = stored(engine, "ZZGA")
     assert row["summary_status"] == "unavailable"
@@ -479,32 +477,49 @@ def test_cs1_only_the_given_members_are_touched(engine):
 
 
 @pytest.mark.db
-def test_cs1_members_default_to_the_consensus_list(engine, monkeypatch):
-    members(engine, "ZZQA")
-    seen = []
-
-    def consensus(given):
-        seen.append(given)
-        return ["ZZQA"]
-
-    monkeypatch.setattr(cs(), "consensus_members", consensus)
-    adapter = FakeAdapter({"ZZQA": joined(EASY)})
+def test_the_default_is_every_active_security_with_a_profile(engine, fixture_path):
+    """No publication is needed, and one that exists doesn't narrow the run."""
+    publish_run(engine, feed(fixture_path))
+    with engine.connect() as conn:
+        published = set(
+            conn.execute(
+                text(
+                    "SELECT symbol FROM perennial.securities"
+                    " WHERE company_profile_id IS NOT NULL AND is_active"
+                )
+            ).scalars()
+        )
+    members(engine, "ZZQB", "ZZQA")  # in no publication
+    seed_security(engine, "ZZQC", name="Synthetic ZZQC")  # no profile
+    seed_security(
+        engine, "ZZQD", active=False, profile={"sector": "Industrials"}
+    )  # inactive
+    expected = sorted(published | {"ZZQA", "ZZQB"})
+    assert cs().profiled_securities(engine) == expected
+    adapter = FakeAdapter({symbol: joined(EASY) for symbol in expected})
     result = cs().summarize(engine, adapter)
-    assert seen == [engine] and adapter.calls == ["ZZQA"] and result.members == 1
+    assert result.succeeded and result.members == len(expected)
+    assert {"ZZQA", "ZZQB"} <= set(adapter.calls)
+    assert not {"ZZQC", "ZZQD"} & set(adapter.calls)
+    assert stored(engine, "ZZQA")["summary_status"] == "ok"
+    assert stored(engine, "ZZQD")["summary_status"] is None
 
 
 @pytest.mark.db
-def test_q11_consensus_members_are_the_current_publications_entries(
-    engine, fixture_path
-):
-    from src.api.read import _current_publication_id, _envelope, _records
-
-    publish_run(engine, feed(fixture_path))
-    with engine.connect() as conn:
-        _, output = _envelope(conn, _current_publication_id(conn))
-        expected = sorted({r["ticker"] for r in _records(output) if r.get("ticker")})
-    assert expected, "the fixture publication has no entries"
-    assert list(cs().consensus_members(engine)) == expected
+def test_share_classes_on_one_profile_are_fetched_once_by_default(engine):
+    members(engine, "ZZQE")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO perennial.securities (symbol, company_profile_id)"
+                " SELECT 'ZZQF', company_profile_id FROM perennial.securities"
+                " WHERE symbol = 'ZZQE'"
+            )
+        )
+    adapter = FakeAdapter({"ZZQE": joined(EASY), "ZZQF": joined(EASY)})
+    result = cs().summarize(engine, adapter)
+    assert adapter.calls == ["ZZQE"]
+    assert (result.members, result.with_summary) == (2, 2)
 
 
 @pytest.mark.db
@@ -602,7 +617,7 @@ def test_cs7_each_run_reports_coverage_without_company_text(engine, caplog):
     descriptions = {
         "ZZRA": joined(EASY),
         "ZZRB": joined(HARD + EASY[:4]),
-        "ZZRC": joined(HARD),
+        "ZZRC": HARD[0],  # one sentence: no window
     }
     caplog.set_level(logging.DEBUG)
     caplog.clear()

@@ -139,9 +139,15 @@ row stores.
 - **weights-v2:** only on-topic articles count (`headline-match-v1`: the
   headline must name the company), and each item's weight halves every 3 days
   of age (`half_life_days`).
-- **weights-v3** (current): the weighted average starts with a neutral 0 of
+- **weights-v3:** the weighted average starts with a neutral 0 of
   weight 1 (`prior_weight`), so a value built on little data stays near zero.
   One fresh Reuters article at +0.8 gives +0.4; ten give +0.73.
+- **weights-v4** (current): graded relevance (`headline-match-v2`): an article
+  whose headline names the company counts in full, one that names it only in
+  its summary counts at half weight. A story stored more than once for the same
+  company (same headline and summary under several Finnhub ids, as syndicated
+  copies are) counts once, as its earliest copy. The envelope adds
+  `news_duplicates` and `news_summary_only`.
 
 ### Why
 
@@ -323,6 +329,13 @@ Its output feeds the sentiment component of the Confidence Score.
 - Output is per-sentence, three-class softmax. Collapse to a continuous value
   with `P(positive) − P(negative)`, then aggregate per ticker using the source
   credibility weights.
+- **Per-company text (`+text3`).** Finnhub ties one story to several
+  companies, and each (story, company) pair is its own `news_articles` row. The
+  model reads, per company, the headline and summary less the sentences that
+  name another company the same story is stored for but not this one (match-v1,
+  sentence by sentence), so "AMD gains share from Intel. Intel shares fell."
+  no longer scores the same for both. A story stored for one company reads as
+  before (`+text2`). The version bump re-scores the window once.
 
 ### What FinBERT's confidence is not
 

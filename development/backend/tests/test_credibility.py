@@ -12,7 +12,7 @@ from src.ingestion.importer import CollectionOutcome, import_collection
 from src.pipeline.lifecycle import begin_run
 from src.services.credibility import job
 from src.services.credibility.job import (
-    Item, about_company, decay, derive_sentiment, run_sentiment, weigh)
+    Item, about_company, decay, derive_sentiment, relevance, run_sentiment, weigh)
 from src.services.credibility.publishers import (
     PublisherResolver, host_of, resolve_publishers)
 from src.services.credibility.social import collect_social, run_social
@@ -34,6 +34,9 @@ TABLE = parse_weights({"version": "test-v1", "half_life_days": 3,
 # The same rules without the neutral prior, where a test checks the decay alone.
 NO_PRIOR = parse_weights({"version": "test-v1", "half_life_days": 3,
                           "relevance": "headline-match-v1", "prior_weight": 0, "tiers": TIERS})
+# No prior, graded relevance (headline-match-v2, weights-v4).
+GRADED = parse_weights({"version": "test-v2", "half_life_days": 3,
+                        "relevance": "headline-match-v2", "prior_weight": 0, "tiers": TIERS})
 
 
 # ── weight table (AC 1, AC 2) ────────────────────────────
@@ -41,11 +44,25 @@ NO_PRIOR = parse_weights({"version": "test-v1", "half_life_days": 3,
 
 def test_the_committed_table_loads_with_a_version_four_tiers_and_its_rules():
     table = load_weights()
-    assert table.version == "weights-v3"
+    assert table.version == "weights-v4"
     assert sorted(set(table.weights.values())) == [0.2, 0.4, 0.7, 1.0]
     assert table.weight_for("reuters.com") == 1.0 and table.weight_for("reddit") == 0.2
     assert (table.half_life_days, table.relevance, table.prior_weight) == (
-        3.0, "headline-match-v1", 1.0)
+        3.0, "headline-match-v2", 1.0)
+
+
+@pytest.mark.parametrize("rule,headline,summary,expected", [
+    ("headline-match-v1", "Nvidia slips", "", 1.0),
+    ("headline-match-v1", "Chip stocks fall", "Nvidia led the drop", 0.0),
+    ("headline-match-v2", "Nvidia slips", "Nvidia led the drop", 1.0),
+    ("headline-match-v2", "Chip stocks fall", "Nvidia led the drop", 0.5),
+    ("headline-match-v2", "Chip stocks fall", "AMD led the drop", 0.0),
+    ("headline-match-v2", "Chip stocks fall", None, 0.0),
+])
+def test_relevance_counts_a_summary_only_match_at_half_under_v2(
+        rule, headline, summary, expected):
+    variants = {"nvidia"}
+    assert relevance(rule, headline, summary, "NVDA", variants) == expected
 
 
 def test_subdomains_take_their_parent_weight_and_unknown_sources_the_lowest():
@@ -330,7 +347,7 @@ def test_the_job_runs_every_step_and_stores_the_weighted_value_per_ticker(engine
     # social posts span the 7 days before their collection date; news are dated
     assert rklb["first_at"] == datetime(2026, 10, 19, 23, 59, 59, tzinfo=timezone.utc)
     assert rklb["last_at"] == datetime(2026, 10, 26, 23, 59, 59, tzinfo=timezone.utc)
-    assert rklb["weights_version"] == "weights-v3"
+    assert rklb["weights_version"] == "weights-v4"
     assert rklb["model_version"] == "finbert"
     nvda = rows["NVDA"]
     # yahoo 0.7 x 0.7937 = 0.5556 of weight at -0.2, plus the prior: -0.1111 / 1.5556
@@ -340,6 +357,8 @@ def test_the_job_runs_every_step_and_stores_the_weighted_value_per_ticker(engine
     assert (absi["article_count"], absi["value"], absi["first_at"]) == (0, None, None)
     assert absi["model_version"] is None
     assert (absi["social_count"], absi["social_sentiment"]) == (0, Decimal("0.0000"))
+    # 0025: every row carries the run's UTC date, scored or not
+    assert {r["tallied_on"] for r in rows.values()} == {NOW.date()}
 
     with engine.connect() as conn:
         deps = set(conn.execute(select(models.run_dependencies.c.source).where(
@@ -383,9 +402,46 @@ def test_a_ticker_whose_articles_are_all_off_topic_has_a_count_of_zero(engine, s
                                 url(31), T0)]}
     run_news(engine, NewsClient(news), T0.date())
     score_articles(engine, scores={31: 1.0})
-    assert derive_sentiment(engine, now=NOW).succeeded
+    assert derive_sentiment(engine, table=TABLE, now=NOW).succeeded  # headline-match-v1
     nvda = stored(engine)["NVDA"]
     assert (nvda["article_count"], nvda["value"], nvda["model_version"]) == (0, None, None)
+
+
+@pytest.mark.db
+def test_under_v2_a_summary_only_article_counts_at_half_weight(engine, seeded):
+    news = {"NVDA": [
+        article(41, "NVDA rises"),
+        RawArticle(42, "Chip stocks fall", "Nvidia led the drop", "Yahoo", url(42), T0),
+        RawArticle(43, "Chip stocks fall again", "AMD led the drop", "Yahoo", url(43), T0),
+    ]}
+    run_news(engine, NewsClient(news), T0.date())
+    score_articles(engine, scores={41: 1.0, 42: -1.0, 43: -1.0})
+    result = derive_sentiment(engine, table=GRADED, now=NOW)
+    assert result.succeeded
+    nvda = stored(engine)["NVDA"]
+    # same age and outlet: (1 x 1.0 + 0.5 x -1.0) / 1.5; 43 never names Nvidia
+    assert (nvda["value"], nvda["news_count"]) == (Decimal("0.3333"), 2)
+    env = envelope_of(engine, result)
+    assert (env["news_summary_only"], env["news_off_topic"]) == (1, 0)
+
+
+@pytest.mark.db
+def test_a_story_stored_twice_for_a_company_counts_once(engine, seeded):
+    copy = ("NVDA rises", "Nvidia beat estimates")
+    news = {"NVDA": [
+        RawArticle(51, *copy, "Yahoo", url(51), T0 - timedelta(days=1)),
+        RawArticle(52, *copy, "Yahoo", url(52), T0),  # a syndicated copy, a day later
+        article(53, "NVDA falls"),
+    ]}
+    run_news(engine, NewsClient(news), T0.date())
+    score_articles(engine, scores={51: 1.0, 52: 1.0, 53: -1.0})
+    result = derive_sentiment(engine, table=GRADED, now=NOW)
+    assert result.succeeded
+    nvda = stored(engine)["NVDA"]
+    assert nvda["news_count"] == 2
+    # the earliest copy is the one counted
+    assert nvda["first_at"] == T0 - timedelta(days=1)
+    assert envelope_of(engine, result)["news_duplicates"] == 1
 
 
 @pytest.mark.db
