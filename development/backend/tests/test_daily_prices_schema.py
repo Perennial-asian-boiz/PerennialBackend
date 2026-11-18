@@ -1,4 +1,4 @@
-"""S3-01: the daily_prices source, its table and migration 0025.
+"""S3-01: the daily_prices source, its table and migration 0026.
 
 Pinned:
 * daily_prices is the newest source in the vocabulary, with its own lock key,
@@ -10,7 +10,7 @@ Pinned:
 * The record and the table refuse a missing or non-positive close, a lone or
   inverted 52-week range, a range date without its value, and a bad currency or
   provider name.
-* 0025 follows 0024. Its downgrade drops the table while no price run or batch
+* 0026 follows 0025. Its downgrade drops the table while no price run or batch
   exists, and refuses otherwise.
 """
 
@@ -244,7 +244,7 @@ def test_one_row_per_security_in_a_batch(engine, stored):
         conn.execute(insert(models.daily_prices).values(**_row(*stored, row_number=2)))
 
 
-# ── migration 0025 on a database of its own ──────────────
+# ── migration 0026 on a database of its own ──────────────
 
 
 def _has_table(target):
@@ -254,21 +254,21 @@ def _has_table(target):
 
 @pytest.mark.db
 def test_with_no_price_batch_the_downgrade_drops_the_table(scratch):  # noqa: F811
-    migrate(scratch, "0025")
+    migrate(scratch, "0026")
     assert _has_table(scratch)
-    migrate(scratch, "0024", down=True)
-    assert version(scratch) == "0024" and not _has_table(scratch)
+    migrate(scratch, "0025", down=True)
+    assert version(scratch) == "0025" and not _has_table(scratch)
     with pytest.raises(IntegrityError), scratch.begin() as conn:
         _batch(conn)  # 'daily_prices' has left the vocabulary
-    migrate(scratch, "0025")
-    assert version(scratch) == "0025" and _has_table(scratch)
+    migrate(scratch, "0026")
+    assert version(scratch) == "0026" and _has_table(scratch)
 
 
 @pytest.mark.db
 def test_while_a_price_batch_exists_the_downgrade_refuses(scratch):  # noqa: F811
-    migrate(scratch, "0025")
+    migrate(scratch, "0026")
     with scratch.begin() as conn:
         _batch(conn)
     with pytest.raises(RuntimeError, match="daily_prices state exists"):
-        migrate(scratch, "0024", down=True)
-    assert version(scratch) == "0025" and _has_table(scratch)
+        migrate(scratch, "0025", down=True)
+    assert version(scratch) == "0026" and _has_table(scratch)
