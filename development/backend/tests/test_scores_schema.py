@@ -1268,10 +1268,9 @@ def test_db4_policy_lists_the_new_tables():
         t: set(c) for t, c in SERVED.items()
     }
     for table in (
-        "ticker_sentiment",
         "fundamental_scores",
         "news_articles",
-    ):  # S2-04 grants fundamentals by column (test_s2_04_fundamentals_grant)
+    ):  # S2-04 grants fundamentals by column; S3-02 ticker_sentiment (test_sentiment_breakdown)
         assert table not in roles.API_TABLES and table not in roles.API_COLUMNS, table
 
 
@@ -1313,8 +1312,7 @@ def test_db5_api_reads_only_the_served_columns(engine, groups):  # noqa: F811
             for column in sorted(set(shapes[table]) - set(columns)):
                 _denied(conn, f"SELECT {column} FROM perennial.{table}")
             _denied(conn, f"SELECT * FROM perennial.{table}")
-        for table in (
-            "ticker_sentiment",
+        for table in (  # S3-02 grants ticker_sentiment by column (test_sentiment_breakdown)
             "fundamental_scores",
             "source_batches",
             "run_dependencies",

@@ -70,6 +70,11 @@ from src.services.credibility.article_loader import (
     unscored_articles,
 )
 from src.services.credibility.job import WINDOW_DAYS
+from src.services.credibility.labels import (  # noqa: F401  (re-exported)
+    NEGATIVE_AT_MOST,
+    POSITIVE_AT_LEAST,
+    label_for,
+)
 from src.services.news.job import company_names
 from src.services.news.matching import match_rule, name_variants
 
@@ -87,8 +92,6 @@ MAX_TEXT_CHARS = 512  # BERT reads at most 512 tokens; a headline is far shorter
 BATCH_SIZE = 32
 BATCH_TIMEOUT = 120.0  # seconds one chunk may take before the run stops scoring
 LABELS = ("positive", "negative", "neutral")
-NEGATIVE_AT_MOST = Decimal("-0.2")  # score <= this: negative
-POSITIVE_AT_LEAST = Decimal("0.2")  # score >= this: positive; between: neutral
 UNIT_KIND = "article batches"
 
 # texts -> one {"positive", "negative", "neutral"} probability mapping per text.
@@ -163,15 +166,6 @@ def polarity(probabilities: Mapping[str, float]) -> Decimal:
     """P(positive) - P(negative), to 4 places."""
     value = probabilities["positive"] - probabilities["negative"]
     return Decimal(f"{value:.4f}") + 0  # + 0 turns "-0.0000" into "0.0000"
-
-
-def label_for(score: Decimal) -> str:
-    """negative in [-1, -0.2], neutral in (-0.2, 0.2), positive in [0.2, 1]."""
-    if score <= NEGATIVE_AT_MOST:
-        return "negative"
-    if score >= POSITIVE_AT_LEAST:
-        return "positive"
-    return "neutral"
 
 
 def confidence(probabilities: Mapping[str, float], label: str) -> Decimal:

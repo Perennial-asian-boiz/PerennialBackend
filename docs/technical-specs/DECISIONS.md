@@ -10,6 +10,57 @@ reader can see *why*, not that the decision is final.
 
 ---
 
+## Sentiment Pulse breakdown: stored items and social labels
+
+**Status:** Accepted
+**Date:** 2026-11-18 (decision 115, S3-02 piece 1)
+**Code:** `development/database/migrations/versions/20261118_0026_sentiment_breakdown.py`,
+`development/backend/src/services/credibility/labels.py`, `.../credibility/job.py`,
+`.../credibility/social.py`, `development/backend/src/ingestion/importer.py` (`CHILD_TABLES`),
+`development/backend/src/api/sentiment.py`
+**Spec:** `docs/technical-specs/SENTIMENT_PULSE.md`
+
+### Decision
+
+The Company page's Sentiment Pulse shows, per channel, the share of positive,
+neutral and negative items behind the current `ticker_sentiment` reading. To
+build that from exactly what the tally counted:
+
+1. The weighting run stores every counted article and post as a
+   `ticker_sentiment_items` row with its row: the score, label and **final
+   weight** (tier x age decay x relevance) it used. The importer writes them in
+   the batch's transaction, and they are part of the record, so of the batch's
+   content hash.
+2. News bars are **weighted** shares (sum of a label's weights / sum of weights);
+   social bars are **plain** shares (count / count). A channel with fewer than 3
+   items says "Not enough coverage".
+3. Social posts get a stored `label`, written by the pipeline (`run_social`) with
+   the **article cutoffs** (<= -0.2 negative, >= 0.2 positive), now shared in
+   `labels.py`. Existing rows are backfilled by 0026, and a CHECK keeps each label
+   equal to its score's.
+4. "Current" is the newest `ticker_sentiment` batch, not the one `current_scores`
+   cites, so the pulse shows the freshest tally.
+5. The read API may read `ticker_sentiment(id, batch_id, security_id, tallied_on)`
+   and `ticker_sentiment_items(id, ticker_sentiment_id, kind, label, weight,
+   item_at)`, nothing else of the sentiment sources.
+
+### Why
+
+- Recomputing weights at read time would duplicate the job's weighting and drift
+  from the stored value when `source_weights.json` changes; stored items can't.
+- The same items will serve S3-02's later "top 5 contributing articles" (AC 3).
+- One label rule for both channels makes the two tabs mean the same thing.
+
+### Consequences
+
+- Readings tallied before 0026 have no items: the API reports `no_breakdown`
+  until the pipeline runs once after deploy.
+- Each `ticker_sentiment` batch payload also carries its items (they are part of
+  the records), so payloads grow with the counted items.
+- Downgrading 0026 is refused while any item exists.
+
+---
+
 ## The read API may read fundamentals' line items
 
 **Status:** Accepted
