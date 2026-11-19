@@ -41,6 +41,11 @@ Run (from backend/):
     python -m sentiment.sentiment_manager (default)
     python -m sentiment.sentiment_manager --days 2 --time 7 (quick test)
 
+The scheduled job (python -m src.pipeline.scheduler --once --job sentiment) runs
+steps 0 to 2 through collect_reports() and stores the reports with its own database
+connection, right before the ticker_sentiment weighting; see
+src/services/credibility/job.py. Running this module by hand still works as before.
+
 NOTE:
  - tickers come from, and results go to, the database, so DATABASE_URL must be set
  - before running ensure fresh youtube_cookies
@@ -264,9 +269,20 @@ def write_posts(reports):
 
 
 # ---- whole pipeline -----------------------------------------------------------------------
-async def run_all(days, minutes):
-    run_start = time.monotonic()
-    results = []
+COLLECTED = "ok"  # collect() status: the scripts ran, reports holds what they produced
+NO_TICKERS = "no_tickers"  # the securities table could not be read; nothing ran
+STOPPED = "stopped"  # Ctrl+C; the reports are partial and must not be stored
+
+
+async def collect(days, minutes, results, run_start=None):
+    """Steps 0 to 2: tickers, the crawler, then the source scripts in parallel.
+
+    Appends one Result per script to results and returns (status, reports), where
+    reports is {platform: report} from the scripts that printed one. Nothing is
+    written to the database. Used by run_all and by the scheduled sentiment job
+    (src/services/credibility/job.py), which stores the reports itself.
+    """
+    run_start = time.monotonic() if run_start is None else run_start
 
     # 0. the tickers come from the database; without them there is nothing to run
     if not await fetch_tickers():
@@ -275,14 +291,13 @@ async def run_all(days, minutes):
             "could not load tickers from the database (securities table "
             "unreachable or empty); stopping",
         )
-        return 1
+        return NO_TICKERS, {}
 
     # 1. the crawler, alone
     crawl = await run_script(CRAWLER)
     results.append(crawl)
     if crawl.status == "stopped":
-        print_summary(results, time.monotonic() - run_start)
-        return 130
+        return STOPPED, {}
 
     sources = list(SOURCES)
     if crawl.status != "ok":
@@ -328,8 +343,32 @@ async def run_all(days, minutes):
         if interrupted:
             print_summary(results, time.monotonic() - run_start)
 
-    # 3. write the posts to the database. Not after Ctrl+C: a partial run is not stored.
     if any(r.status == "stopped" for r in results):
+        return STOPPED, reports
+    return COLLECTED, reports
+
+
+def collect_reports(days=None, minutes=None):
+    """Blocking form of collect() for the scheduled sentiment job: runs the
+    crawler and the source scripts, prints the summary and returns
+    (status, reports, results). The caller writes the reports to social_posts."""
+    run_start = time.monotonic()
+    results = []
+    status, reports = asyncio.run(collect(days, minutes, results, run_start))
+    if results:
+        print_summary(results, time.monotonic() - run_start)
+    return status, reports, results
+
+
+async def run_all(days, minutes):
+    run_start = time.monotonic()
+    results = []
+    status, reports = await collect(days, minutes, results, run_start)
+    if status == NO_TICKERS:
+        return 1
+
+    # 3. write the posts to the database. Not after Ctrl+C: a partial run is not stored.
+    if status == STOPPED:
         results.append(Result(DB_WRITE, "skipped", note="interrupted"))
         print_summary(results, time.monotonic() - run_start)
         return 130
