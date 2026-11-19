@@ -133,6 +133,11 @@ class Settings(ProviderSettings):
         default=MARKET_CAP_MAX_REUSE_AGE, gt=timedelta(0)
     )
     trading_holidays: tuple[date, ...] = TRADING_HOLIDAYS
+    # --job sentiment: collect Bluesky, Mastodon and YouTube posts before the
+    # weighting (sentiment/sentiment_manager.py), and how many minutes the scripts
+    # may keep making requests before they score and hand over what they have.
+    social_collection: bool = True
+    social_time_minutes: float = Field(default=30, gt=0, le=24 * 60)
     # A name in src.ingestion.market_caps.ADAPTERS ("sec_public_float" is the
     # live one, #90). None keeps the legacy FMP market-cap path (M4 MC-A).
     market_cap_adapter: str | None = None

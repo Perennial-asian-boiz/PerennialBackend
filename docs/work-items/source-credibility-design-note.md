@@ -56,10 +56,10 @@ We measured whether the same story is counted more than once. The same week's sa
 1. **News ingestion (S1-03, A).** Finnhub company news for the published watchlist.
 2. **Article scoring (S1-04, B).** Cohen's step plugs in at `score_articles` in `src/services/credibility/job.py`.
 3. **Publisher lookup.** Each article in the window without a publisher gets one request to its Finnhub link, reading only the redirect's `Location` header. Requests are spaced 1.1 seconds apart, at most 1,500 per run (about 28 minutes). A failed lookup isn't stored, so the next run retries it.
-4. **Social import.** Reads `development/backend/sentiment/<platform>/<platform>_sentiments.json` without changing Hong's scripts. A file older than 7 days is skipped and listed as stale. Tickers that aren't stored securities are skipped and counted.
-5. **Weighting (C).** A derived run, with lineage to the news, article score and social batches it read.
+4. **Social collection.** Runs the sentiment pipeline's crawler and its Bluesky, Mastodon and YouTube scripts (`sentiment/sentiment_manager.py`, `collect_reports`) and stores their posts as one `social_posts` batch dated the run's day (`run_social`). The scripts stop making requests after `SOCIAL_TIME_MINUTES` (default 30). A platform that fails is left out and listed as missing; tickers that aren't stored securities are skipped and counted. `SOCIAL_COLLECTION=false` turns the step off.
+5. **Weighting (C).** A derived run, with lineage to the news, article score and social batches it read. It uses the newest successful social batch while it is inside the 7-day window.
 
-Hong's social scrape is not part of the timed job. It drives a browser and needs cookies for YouTube and Reddit. Its files are picked up when they're fresh.
+Until 2026-11-18 the social scrape ran only by hand (`python -m sentiment.sentiment_manager`); that still works and writes a batch the next job picks up.
 
 ## Handoff with S1-04 (Cohen)
 
