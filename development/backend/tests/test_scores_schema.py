@@ -1414,7 +1414,9 @@ def test_db5_an_api_login_reads_a_stored_score_and_nothing_behind_it(engine, gro
             ).scalar_one()
             assert [c["order"] for c in claims] == [1, 2, 3]
             for statement in (
-                "SELECT value FROM perennial.ticker_sentiment",
+                # value is granted for the S3-02 trend (decision 116); the rest is not
+                "SELECT plain_average FROM perennial.ticker_sentiment",
+                "SELECT weights_version FROM perennial.ticker_sentiment",
                 "SELECT score FROM perennial.fundamental_scores",
                 "SELECT input_digest FROM perennial.score_explanations",
                 "SELECT watchlist_publication_id FROM perennial.company_scores",

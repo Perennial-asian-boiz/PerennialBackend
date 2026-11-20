@@ -87,7 +87,7 @@ COLUMNS = {
     ),
     # S3-02 Sentiment Pulse (0026): the newest reading and its items' labels and
     # weights; never a headline, URL, post id or score.
-    "ticker_sentiment": ("id", "batch_id", "security_id", "tallied_on"),
+    "ticker_sentiment": ("id", "batch_id", "security_id", "tallied_on", "value"),
     "ticker_sentiment_items": ("id", "ticker_sentiment_id", "kind", "label", "weight", "item_at"),
 }
 PUBLICATION_KEYS = {
@@ -1015,6 +1015,7 @@ def test_every_v1_route_uses_the_helper_exactly_once(engine, fixture_path, group
                 "/v1/securities/{symbol}/financials",  # S2-04
                 "/v1/securities/{symbol}/score",  # Sprint 2 (S2-01..03)
                 "/v1/securities/{symbol}/sentiment",  # S3-02
+                "/v1/securities/{symbol}/sentiment/trend",  # S3-02 AC2
                 "/v1/watchlist",
             ]
             for path in routes:
@@ -1105,6 +1106,7 @@ def test_v1_routes_are_exactly_the_r1_reads_and_market_status():
         "/v1/securities/{symbol}/score": ["GET"],  # Sprint 2 (S2-01..03)
         "/v1/securities/{symbol}/financials": ["GET"],  # S2-04
         "/v1/securities/{symbol}/sentiment": ["GET"],  # S3-02
+        "/v1/securities/{symbol}/sentiment/trend": ["GET"],  # S3-02 AC2
     }
     assert callable(create_app)
 

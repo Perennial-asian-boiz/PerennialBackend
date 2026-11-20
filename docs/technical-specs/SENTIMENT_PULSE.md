@@ -295,3 +295,30 @@ API
 - [ ] A tab with fewer than 3 items says "Not enough coverage".
 - [ ] A company with no reading or no saved items says "No sentiment data for this company yet."
 - [ ] Both gates pass.
+
+## 13. AC 2: 30-day trend (approved 2026-11-19)
+
+**Design (approved from a rendered mock):** a full-width "30-day trend" section at the bottom of
+the Sentiment Pulse card, under a divider. A grey horizontal zero line; one bar per day with a small
+gap between bars; green bars above the line for positive values, red bars below for negative ones,
+height proportional to the value on a fixed −1 to +1 scale. A day without a reading has no bar, only
+a faint dot on the line. Week ticks along the bottom, −1 / 0 / +1 on the left, a legend, and a
+tooltip per bar ("Nov 7: −0.34"). The chart is the company's combined reading, so it is the same on
+both tabs.
+
+**API:** `GET /v1/securities/{symbol}/sentiment/trend` (`src/api/sentiment.py` `trend`, route in
+`read.py`). 30 points, oldest first, ending today (UTC): each the `value` of that day's
+`ticker_sentiment` row (`tallied_on`), the newest batch when a day was tallied twice; `null` for a
+day with no row or a row with `value` NULL. 404 unknown ticker, 422 invalid, 200 with 30 nulls when
+nothing is tallied, ETag/304, `Cache-Control: no-cache`. Grant: `perennial_api` may read
+`ticker_sentiment.value`. Decision 116.
+
+**Frontend:** `src/api/sentimentTrend.ts` (client, shape guard, state), `useSentimentTrend`,
+`SentimentTrend.tsx` (SVG chart), rendered inside `SentimentPulse`. Its own states: skeleton while
+loading, "The 30-day trend couldn't be loaded." with Retry, and "No readings in the last 30 days."
+when every point is null. Tests: `tests/sentiment-trend.test.mjs`.
+
+**Tests (backend, `tests/test_read_api_sentiment_trend.py`):** window and order, gaps for missing
+days and NULL values (and a stored 0 stays 0), newest batch per day, out-of-window and other
+securities ignored, 4-place values, nothing tallied, 404/422, ETag/304 (new tally, new day),
+canonical JSON, OpenAPI, snapshot, API.md.

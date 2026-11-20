@@ -10,6 +10,31 @@ reader can see *why*, not that the decision is final.
 
 ---
 
+## Sentiment Pulse 30-day trend: one stored value per day
+
+**Status:** Accepted
+**Date:** 2026-11-19 (decision 116, S3-02 AC2)
+**Code:** `development/backend/src/api/sentiment.py` (`trend`), `GET /v1/securities/{symbol}/sentiment/trend`
+**Spec:** `docs/technical-specs/SENTIMENT_PULSE.md` §13
+
+### Decision
+
+The trend serves the last 30 UTC days ending today, one point per day: the stored
+`ticker_sentiment.value` of the row tallied that day (`tallied_on`), the newest batch
+when a day was tallied twice. A day with no row, or a row that counted nothing
+(`value` NULL), is `null`, and the page draws no bar. `perennial_api` is granted
+`ticker_sentiment.value` for this.
+
+### Why
+
+AC2 asks for "that day's stored reading" with gaps, never zero, so the API serves
+the stored value as is (no recomputation) and keeps "nothing scored" distinct from a
+real 0. The value is the company's combined reading, so the chart is the same on the
+News and Social tabs. It is a separate route so the breakdown's `unavailable` states
+don't hide a month of history.
+
+---
+
 ## Sentiment Pulse breakdown: stored items and social labels
 
 **Status:** Accepted
