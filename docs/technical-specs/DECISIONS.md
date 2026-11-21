@@ -10,6 +10,33 @@ reader can see *why*, not that the decision is final.
 
 ---
 
+## Sentiment Pulse top articles: the API reads five news_articles columns
+
+**Status:** Accepted
+**Date:** 2026-11-21 (decision 117, S3-02 AC3)
+**Code:** `development/backend/src/api/sentiment.py` (`top_articles`), `GET /v1/securities/{symbol}/sentiment/articles`,
+`development/database/ops/provision_roles.py`
+**Spec:** `docs/technical-specs/SENTIMENT_PULSE.md` §14
+
+### Decision
+
+AC3 lists the top 5 contributing articles of the current reading with headline, source,
+credibility weight and label, each linking to the original. The route ranks the reading's
+stored news items by the final weight the tally used and joins their articles.
+`perennial_api` is granted `news_articles(id, headline, outlet, url, published_at)` and
+`ticker_sentiment_items.news_article_id`. It is still refused `summary`, `finnhub_id`,
+`match_rule` and `content_hash`, and every score.
+
+### Why
+
+Until now the read API never read source tables beyond fundamentals (decision 113). AC3
+needs exactly the headline, publisher, date and link, which are public facts about a
+published article, so the grant is limited to those columns. The weight is shown as a
+share of the reading's total weight, because the raw product (tier x decay x relevance) has
+no meaning on its own. Social posts are not listed: they have no headline or link.
+
+---
+
 ## Sentiment Pulse 30-day trend: one stored value per day
 
 **Status:** Accepted

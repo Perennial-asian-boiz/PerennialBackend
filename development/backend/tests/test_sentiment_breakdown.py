@@ -275,8 +275,10 @@ def test_the_api_may_read_only_the_breakdown_columns():
     assert roles.API_COLUMNS["ticker_sentiment"] == (
         "id", "batch_id", "security_id", "tallied_on", "value")
     assert roles.API_COLUMNS["ticker_sentiment_items"] == (
-        "id", "ticker_sentiment_id", "kind", "label", "weight", "item_at")
-    for table in ("news_articles", "article_sentiment", "social_posts", "ingestion_runs"):
+        "id", "ticker_sentiment_id", "kind", "news_article_id", "label", "weight", "item_at")
+    # AC3 (test_read_api_sentiment_articles): only what the top-articles list shows
+    assert roles.API_COLUMNS["news_articles"] == ("id", "headline", "outlet", "url", "published_at")
+    for table in ("article_sentiment", "social_posts", "ingestion_runs"):
         assert table not in roles.API_TABLES and table not in roles.API_COLUMNS, table
 
 

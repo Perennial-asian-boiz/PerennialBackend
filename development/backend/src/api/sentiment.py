@@ -34,7 +34,18 @@ PLACES = 4
 TREND_DAYS = 30
 # Exactly provision_roles.API_COLUMNS (src can't import ops).
 SENTIMENT_COLUMNS = ("id", "batch_id", "security_id", "tallied_on", "value")
-ITEM_COLUMNS = ("id", "ticker_sentiment_id", "kind", "label", "weight", "item_at")
+ITEM_COLUMNS = (
+    "id",
+    "ticker_sentiment_id",
+    "kind",
+    "news_article_id",
+    "label",
+    "weight",
+    "item_at",
+)
+# S3-02 AC3: what the top-articles list shows of an article; never its summary or content.
+ARTICLE_COLUMNS = ("id", "headline", "outlet", "url", "published_at")
+TOP_ARTICLES = 5
 
 
 class LabelCounts(BaseModel):
@@ -97,6 +108,40 @@ class SentimentTrendResponse(BaseModel):
     points: list[TrendPoint] = Field(description="One point per day, oldest first")
 
 
+class TopArticle(BaseModel):
+    rank: int = Field(description="1 for the heaviest article")
+    headline: str
+    outlet: str = Field(description="The publisher, as Finnhub names it")
+    url: str = Field(description="The article's stored link (http or https)")
+    published_at: str = Field(description="ISO 8601 UTC")
+    label: str = Field(description="positive, neutral or negative")
+    weight: float = Field(
+        description="The final weight the tally gave it (source credibility x age x "
+        "relevance), to 6 places"
+    )
+    share: float = Field(
+        description="Its weight over all counted articles' weight, to 4 places"
+    )
+
+
+class SentimentArticlesResponse(BaseModel):
+    api_version: str = Field(examples=["v1"])
+    symbol: str = Field(description="The canonical ticker")
+    status: str = Field(description="ok, or unavailable")
+    reason: str | None = Field(
+        default=None, description="Only when unavailable: no_reading or no_breakdown"
+    )
+    tallied_on: str | None = Field(
+        default=None, description="The UTC date the reading was tallied"
+    )
+    count: int | None = Field(
+        default=None, description="News articles the reading counted"
+    )
+    articles: list[TopArticle] | None = Field(
+        default=None, description="Up to 5, heaviest first"
+    )
+
+
 def _iso(at: Any) -> str | None:
     return None if at is None else at.astimezone(timezone.utc).isoformat()
 
@@ -137,10 +182,9 @@ def _channel(items: Sequence[Any], weighted: bool) -> dict[str, Any]:
     }
 
 
-def served(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
-    """(body without api_version and symbol, ETag). Stored batches and items never
-    change, so the batch and row ids are the ETag."""
-    ts, ti = m.ticker_sentiment, m.ticker_sentiment_items
+def _current(conn: Connection, security_id: int) -> tuple[Any, Any]:
+    """(the newest ticker_sentiment batch id or None, the security's row in it or None)."""
+    ts = m.ticker_sentiment
     batch = conn.execute(select(func.max(ts.c.batch_id))).scalar()
     row = None
     if batch is not None:
@@ -149,6 +193,14 @@ def served(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
                 ts.c.batch_id == batch, ts.c.security_id == security_id
             )
         ).one_or_none()
+    return batch, row
+
+
+def served(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
+    """(body without api_version and symbol, ETag). Stored batches and items never
+    change, so the batch and row ids are the ETag."""
+    ti = m.ticker_sentiment_items
+    batch, row = _current(conn, security_id)
     if row is None:
         return {"status": "unavailable", "reason": "no_reading"}, (
             f'"v1-sentiment-{batch or 0}-0"'
@@ -211,4 +263,61 @@ def trend(conn: Connection, security_id: int, end: date) -> tuple[dict[str, Any]
         "start": start.isoformat(),
         "end": end.isoformat(),
         "points": points,
+    }, etag
+
+
+def top_articles(conn: Connection, security_id: int) -> tuple[dict[str, Any], str]:
+    """(body without api_version and symbol, ETag): the TOP_ARTICLES news articles with
+    the most weight in the security's current reading (the same reading as served()),
+    heaviest first; ties go to the newer article. Each article's share is its weight
+    over the weight of every counted article."""
+    ti, na = m.ticker_sentiment_items, m.news_articles
+    batch, row = _current(conn, security_id)
+    if row is None:
+        return {"status": "unavailable", "reason": "no_reading"}, (
+            f'"v1-sentiment-articles-{batch or 0}-0"'
+        )
+    etag = f'"v1-sentiment-articles-{batch}-{row.id}"'
+    news = ti.c.ticker_sentiment_id == row.id
+    counted = conn.execute(
+        select(func.count(), func.coalesce(func.sum(ti.c.weight), 0)).where(
+            news, ti.c.kind == "news"
+        )
+    ).one()
+    has_items = conn.execute(select(func.count()).where(news)).scalar_one()
+    if not has_items:
+        return {"status": "unavailable", "reason": "no_breakdown"}, etag
+    count, total = int(counted[0]), Decimal(counted[1])
+    top = conn.execute(
+        select(
+            ti.c.label,
+            ti.c.weight,
+            *(na.c[name] for name in ARTICLE_COLUMNS if name != "id"),
+        )
+        .select_from(ti.join(na, na.c.id == ti.c.news_article_id))
+        .where(news, ti.c.kind == "news")
+        .order_by(ti.c.weight.desc(), na.c.published_at.desc(), ti.c.id)
+        .limit(TOP_ARTICLES)
+    ).all()
+    articles = []
+    for rank, item in enumerate(top, start=1):
+        weight = Decimal(item.weight)
+        share = weight / total if total > 0 else Decimal(1) / count
+        articles.append(
+            {
+                "rank": rank,
+                "headline": item.headline,
+                "outlet": item.outlet,
+                "url": item.url,
+                "published_at": _iso(item.published_at),
+                "label": item.label,
+                "weight": float(round(weight, 6)),
+                "share": _round(share),
+            }
+        )
+    return {
+        "status": "ok",
+        "tallied_on": row.tallied_on.isoformat(),
+        "count": count,
+        "articles": articles,
     }, etag
