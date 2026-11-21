@@ -299,6 +299,23 @@ Nothing tallied for the security, or a reading from before 0026:
 
 The route reads only `ticker_sentiment(id, batch_id, security_id, tallied_on)` and `ticker_sentiment_items(id, ticker_sentiment_id, kind, label, weight, item_at)`, never a headline, URL, post id or score.
 
+## `GET /v1/securities/{symbol}/sentiment/trend`
+
+A security's 30-day Sentiment Pulse trend (S3-02 AC2, `docs/technical-specs/SENTIMENT_PULSE.md` §13): one point per UTC day, the oldest first, ending today (UTC).
+
+- **Symbol handling and errors:** as `/v1/securities/{symbol}/score`: `404 unknown_security` for an unknown ticker, `422 invalid_request` for an invalid one. A known security with nothing tallied is `200` with 30 `null` points.
+- **Each point** is the `value` (−1 to +1, to 4 places) of the security's `ticker_sentiment` row tallied that day (`tallied_on`). A day tallied more than once uses its newest batch.
+- **Gaps:** a day with no row, or whose row counted nothing (`value` NULL), is `"value": null`: a gap, never zero. A stored `0` is a real neutral reading.
+- **Headers:** `Cache-Control: no-cache` and an `ETag` that changes with a new tally or a new day; `If-None-Match` with a matching tag returns `304`. The `read` rate-limit bucket.
+
+```json
+{"api_version": "v1", "symbol": "NVDA", "days": 30, "start": "2026-10-21", "end": "2026-11-19",
+ "points": [{"date": "2026-10-21", "value": 0.12}, {"date": "2026-10-22", "value": null},
+            "... 30 points in all ...", {"date": "2026-11-19", "value": 0.32}]}
+```
+
+The route reads only `ticker_sentiment(batch_id, security_id, tallied_on, value)`.
+
 ## `GET /v1/market-status`
 
 Whether the US stock market (the NYSE calendar, `XNYS`) is in regular hours, and its next open and close (S1-11). It's public, touches no database and takes no input: query parameters and headers don't change the answer. Unlike the other routes, its body has no `api_version`.
@@ -404,7 +421,7 @@ Each `/v1/auth` and `/v1/me` route has exactly one limit, checked before the bea
   - `company_scores`' 30 served columns, never `watchlist_publication_id`
   - `score_explanations(id, batch_id, security_id, company_score_id, status, reason, template_version, claims)`, never `input_digest`
   - `fundamentals(id, batch_id, security_id, fiscal_year_end, line_item, value, unit, form, filed)` (S2-04, decision 113), never `concept` or `row_number`
-  - `ticker_sentiment(id, batch_id, security_id, tallied_on)` and `ticker_sentiment_items(id, ticker_sentiment_id, kind, label, weight, item_at)` (S3-02 Sentiment Pulse)
+  - `ticker_sentiment(id, batch_id, security_id, tallied_on, value)` and `ticker_sentiment_items(id, ticker_sentiment_id, kind, label, weight, item_at)` (S3-02 Sentiment Pulse)
 
   That means no operator `actor`/`reason`, no runs, no other raw source table, and no writes. The login is Bryan's to create: `LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE perennial_api`, a member of nothing else, with a `CONNECTION LIMIT` sized to the `api` pool.
 - **Startup check:** `create_app()` (or `check_startup` in #22's app) refuses to serve unless the login:

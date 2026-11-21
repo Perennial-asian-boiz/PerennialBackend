@@ -272,7 +272,8 @@ def test_the_api_may_read_only_the_breakdown_columns():
 
     roles = _provision_roles()
     assert "ticker_sentiment_items" in roles.IMMUTABLE
-    assert roles.API_COLUMNS["ticker_sentiment"] == ("id", "batch_id", "security_id", "tallied_on")
+    assert roles.API_COLUMNS["ticker_sentiment"] == (
+        "id", "batch_id", "security_id", "tallied_on", "value")
     assert roles.API_COLUMNS["ticker_sentiment_items"] == (
         "id", "ticker_sentiment_id", "kind", "label", "weight", "item_at")
     for table in ("news_articles", "article_sentiment", "social_posts", "ingestion_runs"):

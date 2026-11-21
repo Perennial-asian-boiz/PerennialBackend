@@ -70,9 +70,9 @@ API_COLUMNS = {
     # S2-04: Aalind's financials endpoint (decision 113); never concept or row_number.
     "fundamentals": ("id", "batch_id", "security_id", "fiscal_year_end", "line_item", "value", "unit",
                      "form", "filed"),
-    # S3-02 Sentiment Pulse (0026): the newest reading and its items' labels and weights;
-    # never a headline, URL, post id or score.
-    "ticker_sentiment": ("id", "batch_id", "security_id", "tallied_on"),
+    # S3-02 Sentiment Pulse (0026): the readings (value: the 30-day trend, AC2) and their
+    # items' labels and weights; never a headline, URL, post id or score.
+    "ticker_sentiment": ("id", "batch_id", "security_id", "tallied_on", "value"),
     "ticker_sentiment_items": ("id", "ticker_sentiment_id", "kind", "label", "weight", "item_at"),
 }
 # What the S1-12 summary job (importer) may write on company_profiles.
