@@ -226,7 +226,8 @@ def test_grants_are_unchanged_and_the_api_role_cannot_read_a_summary(
     roles = _provision_roles()
     assert "news_articles" in roles.IMMUTABLE
     assert "news_articles" not in roles.API_TABLES
-    assert "news_articles" not in roles.API_COLUMNS
+    # S3-02 AC3 (decision 117) grants the API a few news_articles columns, never the summary.
+    assert "summary" not in roles.API_COLUMNS["news_articles"]
     allowed = {
         ("importer", "INSERT"): True,
         ("importer", "SELECT"): True,

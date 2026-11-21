@@ -432,6 +432,77 @@
         "summary": "Get Sentiment"
       }
     },
+    "/v1/securities/{symbol}/sentiment/articles": {
+      "get": {
+        "description": "The top 5 news articles behind a security's current Sentiment Pulse reading\n(S3-02 AC3): headline, outlet, link, label and credibility weight, heaviest\nfirst. The same reading as /sentiment; 200 status \"unavailable\" like it, 404 only\nfor an unknown ticker.",
+        "operationId": "get_sentiment_articles_v1_securities__symbol__sentiment_articles_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SentimentArticlesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown_security"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "invalid_request"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Sentiment Articles"
+      }
+    },
     "/v1/securities/{symbol}/sentiment/trend": {
       "get": {
         "description": "A security's 30-day Sentiment Pulse trend (S3-02 AC2): one point per UTC day\nending today, each the value of that day's stored ticker_sentiment reading, or\nnull for a day with no reading (a gap, never zero). 404 only for an unknown\nticker.",
@@ -1649,6 +1720,85 @@
       "title": "SecuritySearchResult",
       "type": "object"
     },
+    "SentimentArticlesResponse": {
+      "properties": {
+        "api_version": {
+          "examples": [
+            "v1"
+          ],
+          "title": "Api Version",
+          "type": "string"
+        },
+        "articles": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/components/schemas/TopArticle"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Up to 5, heaviest first",
+          "title": "Articles"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "News articles the reading counted",
+          "title": "Count"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only when unavailable: no_reading or no_breakdown",
+          "title": "Reason"
+        },
+        "status": {
+          "description": "ok, or unavailable",
+          "title": "Status",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "The canonical ticker",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "tallied_on": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The UTC date the reading was tallied",
+          "title": "Tallied On"
+        }
+      },
+      "required": [
+        "api_version",
+        "symbol",
+        "status"
+      ],
+      "title": "SentimentArticlesResponse",
+      "type": "object"
+    },
     "SentimentResponse": {
       "properties": {
         "api_version": {
@@ -1863,6 +2013,61 @@
         "url"
       ],
       "title": "SummarySource",
+      "type": "object"
+    },
+    "TopArticle": {
+      "properties": {
+        "headline": {
+          "title": "Headline",
+          "type": "string"
+        },
+        "label": {
+          "description": "positive, neutral or negative",
+          "title": "Label",
+          "type": "string"
+        },
+        "outlet": {
+          "description": "The publisher, as Finnhub names it",
+          "title": "Outlet",
+          "type": "string"
+        },
+        "published_at": {
+          "description": "ISO 8601 UTC",
+          "title": "Published At",
+          "type": "string"
+        },
+        "rank": {
+          "description": "1 for the heaviest article",
+          "title": "Rank",
+          "type": "integer"
+        },
+        "share": {
+          "description": "Its weight over all counted articles' weight, to 4 places",
+          "title": "Share",
+          "type": "number"
+        },
+        "url": {
+          "description": "The article's stored link (http or https)",
+          "title": "Url",
+          "type": "string"
+        },
+        "weight": {
+          "description": "The final weight the tally gave it (source credibility x age x relevance), to 6 places",
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "rank",
+        "headline",
+        "outlet",
+        "url",
+        "published_at",
+        "label",
+        "weight",
+        "share"
+      ],
+      "title": "TopArticle",
       "type": "object"
     },
     "TrendPoint": {

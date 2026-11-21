@@ -1269,8 +1269,9 @@ def test_db4_policy_lists_the_new_tables():
     }
     for table in (
         "fundamental_scores",
-        "news_articles",
-    ):  # S2-04 grants fundamentals by column; S3-02 ticker_sentiment (test_sentiment_breakdown)
+        "article_sentiment",
+    ):  # S2-04 grants fundamentals by column; S3-02 ticker_sentiment and news_articles
+        # (test_sentiment_breakdown)
         assert table not in roles.API_TABLES and table not in roles.API_COLUMNS, table
 
 

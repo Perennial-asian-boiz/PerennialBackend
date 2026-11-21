@@ -52,7 +52,7 @@ IMMUTABLE += ("ticker_sentiment_items",)  # S3-02 (0026): each tally's counted i
 TABLES = (*IMMUTABLE, *MUTABLE, *REFERENCE, "securities")
 # M5 read API (perennial_api): published data only, never raw source tables,
 # runs or operator text; the exceptions are fundamentals' reported line items
-# (decision 113) and the Sentiment Pulse's ticker_sentiment columns and items (S3-02). The API_COLUMNS grants are column-level, so code selects columns.
+# (decision 113) and the Sentiment Pulse's ticker_sentiment columns, items and top articles' news_articles columns (S3-02). The API_COLUMNS grants are column-level, so code selects columns.
 API_TABLES = ("publications", "current_publication", "securities", "security_identifiers", "current_scores")
 API_COLUMNS = {
     # S1-12: the stored summary it serves; never summary_grade or description_digest.
@@ -73,7 +73,11 @@ API_COLUMNS = {
     # S3-02 Sentiment Pulse (0026): the readings (value: the 30-day trend, AC2) and their
     # items' labels and weights; never a headline, URL, post id or score.
     "ticker_sentiment": ("id", "batch_id", "security_id", "tallied_on", "value"),
-    "ticker_sentiment_items": ("id", "ticker_sentiment_id", "kind", "label", "weight", "item_at"),
+    "ticker_sentiment_items": ("id", "ticker_sentiment_id", "kind", "news_article_id", "label", "weight",
+                               "item_at"),
+    # S3-02 AC3: the top articles' headline, publisher and link; never summary, content_hash,
+    # finnhub_id or match_rule.
+    "news_articles": ("id", "headline", "outlet", "url", "published_at"),
 }
 # What the S1-12 summary job (importer) may write on company_profiles.
 SUMMARY_COLUMNS = ("summary", "summary_grade", "summary_status", "summary_source_name",

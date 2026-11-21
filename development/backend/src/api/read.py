@@ -51,7 +51,11 @@ from src.api.rate_limit import (
     RateLimiter,
     client_key,
 )
-from src.api.sentiment import SentimentResponse, SentimentTrendResponse
+from src.api.sentiment import (
+    SentimentArticlesResponse,
+    SentimentResponse,
+    SentimentTrendResponse,
+)
 from src.db import models as m
 from src.ingestion.schemas import _TICKER
 from src.services.scores import scoring
@@ -1054,6 +1058,32 @@ def get_sentiment_trend(symbol: str, request: Request) -> Response:
         if found is None:
             raise APIError(404, "unknown_security", "no security has that ticker")
         served, etag = sentiment.trend(conn, int(found.id), sentiment.today())
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    body = {"api_version": API_VERSION, "symbol": found.symbol, **served}
+    return CanonicalJSONResponse(body, headers=headers)
+
+
+@router.get(
+    "/securities/{symbol}/sentiment/articles",
+    response_model=SentimentArticlesResponse,
+    responses=SCORE_RESPONSES,
+)
+def get_sentiment_articles(symbol: str, request: Request) -> Response:
+    """The top 5 news articles behind a security's current Sentiment Pulse reading
+    (S3-02 AC3): headline, outlet, link, label and credibility weight, heaviest
+    first. The same reading as /sentiment; 200 status "unavailable" like it, 404 only
+    for an unknown ticker.
+    """
+    wanted = symbol.strip().upper()
+    if not _TICKER.fullmatch(wanted):
+        raise APIError(422, "invalid_request", "symbol is not a valid ticker")
+    with read_transaction(_engine(request)) as conn:
+        found = _security(conn, wanted)
+        if found is None:
+            raise APIError(404, "unknown_security", "no security has that ticker")
+        served, etag = sentiment.top_articles(conn, int(found.id))
     headers = {"ETag": etag, "Cache-Control": "no-cache"}
     if _etag_matches(request.headers.get("if-none-match"), etag):
         return Response(status_code=304, headers=headers)

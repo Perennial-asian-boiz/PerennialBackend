@@ -322,3 +322,25 @@ when every point is null. Tests: `tests/sentiment-trend.test.mjs`.
 days and NULL values (and a stored 0 stays 0), newest batch per day, out-of-window and other
 securities ignored, 4-place values, nothing tallied, 404/422, ETag/304 (new tally, new day),
 canonical JSON, OpenAPI, snapshot, API.md.
+
+## 14. AC 3: top 5 contributing articles (approved 2026-11-21)
+
+**Design (approved from a rendered mock):** on the News tab only, a "Top contributing articles"
+section between the bars and the 30-day trend, always visible. Rows ranked 1–5: the headline as a
+link opening the original article in a new tab (↗), "Outlet · Nov 17", a label pill in the bar
+colors, and the weight as "21% of weight" with a small meter (the article's share of the reading's
+total weight). A note: "Weight = source credibility × how recent × how much the article is about
+the company. N articles counted in all." Hidden when News is not_enough_coverage or the reading is
+unavailable.
+
+**API:** `GET /v1/securities/{symbol}/sentiment/articles` (`sentiment.top_articles`). The current
+reading's news items by final weight, heaviest first, ties to the newer article, at most 5, joined to
+`news_articles` for headline, outlet, url and published_at; `share` = weight / total news weight.
+Same unavailable states as `/sentiment`. Grants: `news_articles(id, headline, outlet, url,
+published_at)` and `ticker_sentiment_items.news_article_id`. Decision 117.
+
+**Frontend:** `src/api/sentimentArticles.ts`, `useSentimentArticles`, `TopArticles.tsx` inside
+`SentimentPulse`; only http(s) links are rendered as links. Its own error with Retry.
+
+**Tests:** backend `tests/test_read_api_sentiment_articles.py`; frontend
+`tests/sentiment-articles.test.mjs`.
