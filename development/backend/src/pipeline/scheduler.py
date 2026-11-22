@@ -103,7 +103,7 @@ def run_once(job: str = "pipeline", settings: Settings | None = None) -> int:
         from src.services.scores.job import run_once as run_scores_once
 
         return run_scores_once(settings)
-    if job == "sentiment":  # S1-05: news, scoring, publishers, social, weighting
+    if job == "sentiment":  # S1-05: news, scoring, publishers, social posts, weighting
         from src.services.credibility.job import run_once as run_sentiment_once
 
         return run_sentiment_once(settings)

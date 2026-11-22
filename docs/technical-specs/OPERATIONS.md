@@ -185,6 +185,18 @@ python -m src.pipeline.scheduler --once --job sentiment     # needs FINNHUB_API_
 python -m src.pipeline.scheduler --once --job scores
 ```
 
+`--job sentiment` also collects social posts right before the weighting: it runs
+the Mastodon server crawler, then the Bluesky, Mastodon and YouTube scripts in
+`sentiment/` (as `python -m sentiment.sentiment_manager` does), and stores their
+posts as one `social_posts` batch, so the day's `ticker_sentiment` counts them.
+Run it from `development/backend` so `sentiment/` is importable. The scripts
+need their own credentials (`BSKY_HANDLE`, `BSKY_APP_PASSWORD`, `YOUTUBE_API_KEY`, fresh YouTube
+cookies); a platform that fails is left out of the batch and listed as
+`missing`, and the job's exit code still depends only on the weighting.
+`SOCIAL_TIME_MINUTES` (default 30) caps how long the scripts keep making
+requests; `SOCIAL_COLLECTION=false` skips the step, and the weighting then uses
+the newest social batch if it is less than 7 days old.
+
 `--job sentiment` scores new articles with FinBERT (`ProsusAI/finbert`, pinned
 to one commit in `article_scorer.py`) before the weighting. The worker needs
 `torch` and `transformers`; without them, the scoring step fails

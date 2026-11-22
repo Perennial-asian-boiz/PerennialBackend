@@ -361,6 +361,8 @@ def test_read_routes_use_the_read_only_helper_once_in_the_integrated_app(
             "/v1/market-status", "/v1/securities", "/v1/securities/{symbol}",
             "/v1/securities/{symbol}/financials", "/v1/securities/{symbol}/price",
             "/v1/securities/{symbol}/score",
+            "/v1/securities/{symbol}/sentiment", "/v1/securities/{symbol}/sentiment/articles",
+            "/v1/securities/{symbol}/sentiment/trend",
             "/v1/watchlist"]
         for path in read_paths:
             calls.clear()

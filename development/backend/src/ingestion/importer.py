@@ -54,6 +54,7 @@ from src.db.models import (
     securities,
     security_identifiers,
     source_batches,
+    ticker_sentiment_items,
 )
 from src.ingestion.canonical import HASH_VERSION, CanonicalBatch, canonicalize
 from src.ingestion.diagnostics import (
@@ -94,6 +95,10 @@ def safe_coverage(value: Any) -> Optional[Dict[str, Any]]:
 
 
 MAX_RECORDS = 50_000
+# A source whose records carry child rows (ContractRecord.child_rows), stored in
+# the same transaction as the batch: {source: (child table, parent id column)}.
+# 0026: ticker_sentiment's counted items.
+CHILD_TABLES = {"ticker_sentiment": (ticker_sentiment_items, "ticker_sentiment_id")}
 # Sources whose tickers define the collection universe; see _register_roots.
 ROOT_SOURCES = frozenset({"congress_trades", "ark_holdings"})
 _PUNCTUATION = re.compile(r"[./-]")
@@ -423,8 +428,25 @@ def _write_batch(
         if has_row_number:
             values["row_number"] = position
         rows.append(values)
-    if rows:
+    child = CHILD_TABLES.get(batch.source)
+    if rows and child is None:
         conn.execute(insert(table), rows)
+    elif rows and child is not None:
+        child_table, parent_column = child
+        parent_ids = (
+            conn.execute(
+                insert(table).returning(table.c.id, sort_by_parameter_order=True), rows
+            )
+            .scalars()
+            .all()
+        )
+        children = [
+            {**values, parent_column: parent_id}
+            for record, parent_id in zip(batch.records, parent_ids, strict=True)
+            for values in record.child_rows()
+        ]
+        if children:
+            conn.execute(insert(child_table), children)
     return batch_id, False, registered
 
 

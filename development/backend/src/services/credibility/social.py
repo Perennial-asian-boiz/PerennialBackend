@@ -6,12 +6,14 @@ the manager on its output (sentiment/results.py), nothing is written to disk:
       "posts": {"<post id>": 0.4222, ...}}, ...]
 with scores in [-1, 1]. The manager then calls run_social with {platform:
 report}, which stores one social_posts row per (post, ticker) as one batch,
-dated the day of the run. Tickers that are not stored canonical securities are
-skipped and counted.
+dated the day of the run, each with the label its score falls in
+(labels.label_for, the article scorer's cutoffs; 0026). Tickers that are not
+stored canonical securities are skipped and counted.
 """
 
 import logging
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Callable
 
 from sqlalchemy.engine import Engine
@@ -19,6 +21,7 @@ from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.identity import resolve_tickers
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
+from src.services.credibility.labels import label_for
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +70,13 @@ def collect_social(
     usable = known(tickers)
     skipped = [t for t in tickers if t not in usable]
     records: list[dict[str, Any]] = [
-        {"ticker": t, "platform": p, "post_id": pid, "score": round(score, 4)}
+        {
+            "ticker": t,
+            "platform": p,
+            "post_id": pid,
+            "score": round(score, 4),
+            "label": label_for(Decimal(str(round(score, 4)))),
+        }
         for (t, p, pid), score in sorted(found.items())
         if t in usable
     ]

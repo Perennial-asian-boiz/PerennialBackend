@@ -1268,10 +1268,10 @@ def test_db4_policy_lists_the_new_tables():
         t: set(c) for t, c in SERVED.items()
     }
     for table in (
-        "ticker_sentiment",
         "fundamental_scores",
-        "news_articles",
-    ):  # S2-04 grants fundamentals by column (test_s2_04_fundamentals_grant)
+        "article_sentiment",
+    ):  # S2-04 grants fundamentals by column; S3-02 ticker_sentiment and news_articles
+        # (test_sentiment_breakdown)
         assert table not in roles.API_TABLES and table not in roles.API_COLUMNS, table
 
 
@@ -1313,8 +1313,7 @@ def test_db5_api_reads_only_the_served_columns(engine, groups):  # noqa: F811
             for column in sorted(set(shapes[table]) - set(columns)):
                 _denied(conn, f"SELECT {column} FROM perennial.{table}")
             _denied(conn, f"SELECT * FROM perennial.{table}")
-        for table in (
-            "ticker_sentiment",
+        for table in (  # S3-02 grants ticker_sentiment by column (test_sentiment_breakdown)
             "fundamental_scores",
             "source_batches",
             "run_dependencies",
@@ -1416,7 +1415,9 @@ def test_db5_an_api_login_reads_a_stored_score_and_nothing_behind_it(engine, gro
             ).scalar_one()
             assert [c["order"] for c in claims] == [1, 2, 3]
             for statement in (
-                "SELECT value FROM perennial.ticker_sentiment",
+                # value is granted for the S3-02 trend (decision 116); the rest is not
+                "SELECT plain_average FROM perennial.ticker_sentiment",
+                "SELECT weights_version FROM perennial.ticker_sentiment",
                 "SELECT score FROM perennial.fundamental_scores",
                 "SELECT input_digest FROM perennial.score_explanations",
                 "SELECT watchlist_publication_id FROM perennial.company_scores",

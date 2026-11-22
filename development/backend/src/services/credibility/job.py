@@ -3,10 +3,21 @@
     python -m src.pipeline.scheduler --once --job sentiment
 
 The job runs, in order: news ingestion (S1-03, A), article scoring (S1-04, B,
-plugged in through score_articles), the publisher lookup and the weighting (C).
-One step failing never stops the next. Social posts are not imported here:
-the sentiment pipeline (sentiment/sentiment_manager.py) writes them to
-social_posts itself when it runs.
+plugged in through score_articles), the publisher lookup, social collection
+(plugged in through collect_social) and the weighting (C). One step failing
+never stops the next, and the exit code only says whether the weighting stored
+its batch.
+
+Social collection runs the sentiment pipeline's crawler and its Bluesky, Mastodon
+and YouTube scripts (sentiment/sentiment_manager.py, as subprocesses, from
+development/backend/) and stores their posts as one social_posts batch through
+run_social, so the weighting right after it reads today's posts. It is on unless
+SOCIAL_COLLECTION=false; SOCIAL_TIME_MINUTES (default 30) caps how long the
+scripts keep making requests. A platform that fails is left out of the batch and
+listed as missing; if every platform fails the social_posts run is recorded as
+missing_upstream and the weighting uses no social posts (an older batch only
+counts while it is inside the window). Running sentiment_manager by hand still
+writes a batch the next job picks up.
 
 The weighting is a derived run (ticker_sentiment). For every security in the
 current production watchlist publication it takes, over the last WINDOW_DAYS:
@@ -35,8 +46,14 @@ security gets a row with the counts, the date range and the weights version
 (AC 3); one with nothing to score has a count of 0 and no value. model_version
 names the news model, and is NULL when no news was counted. tallied_on is the
 run's UTC date, the same on every row of the batch.
+
+Every counted article and post is stored with its row as a ticker_sentiment_items
+row (0026, S3-02): its score, label and final weight (the weight above, after
+relevance and fading), so the Sentiment Pulse breakdown is built from exactly
+the items behind value.
 """
 
+import importlib
 import logging
 import sys
 import time
@@ -44,6 +61,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from datetime import time as dtime
 from decimal import Decimal
+from functools import partial
 from typing import Any, Callable
 
 import requests
@@ -55,6 +73,7 @@ from src.ingestion.diagnostics import exception_diagnostics
 from src.ingestion.identity import resolve_tickers
 from src.ingestion.importer import CollectionOutcome, ImportResult, import_collection
 from src.pipeline.lifecycle import begin_run, heartbeat_worker, source_lock
+from src.services.credibility.labels import label_for
 from src.services.credibility.publishers import PublisherResolver, resolve_publishers
 from src.services.credibility.weights import (
     SUMMARY_ONLY_RELEVANCE,
@@ -107,6 +126,29 @@ class Item:
     first_at: datetime
     last_at: datetime
     social: bool
+    # 0026: what it is, for ticker_sentiment_items (the stored row's id and label)
+    source_id: int | None = None  # news_articles.id or social_posts.id
+    label: str | None = None
+
+
+def item_records(items: list[Item]) -> list[dict[str, Any]]:
+    """The ticker_sentiment_items of one record (0026): each counted item's
+    score, label and final weight, dated by its publication (news) or the end of
+    its collection day (social). Items without a stored id are not stored."""
+    return [
+        {
+            "kind": "social" if i.social else "news",
+            "news_article_id": None if i.social else i.source_id,
+            "social_post_id": i.source_id if i.social else None,
+            "score": Decimal(f"{i.score:.4f}") + 0,
+            # an article scored before 0022 has no stored label: its score's
+            "label": i.label or label_for(Decimal(f"{i.score:.4f}")),
+            "weight": Decimal(f"{i.weight:.10f}"),
+            "item_at": i.last_at,
+        }
+        for i in items
+        if i.source_id is not None
+    ]
 
 
 def weigh(
@@ -174,7 +216,7 @@ def news_items(
     if model is None:
         return News({}, 0, 0, None)
     latest = (
-        select(a.c.news_article_id, a.c.security_id, a.c.score)
+        select(a.c.news_article_id, a.c.security_id, a.c.score, a.c.label)
         .where(a.c.model == model)
         .distinct(a.c.news_article_id)
         .order_by(a.c.news_article_id, a.c.batch_id.desc())
@@ -189,6 +231,8 @@ def news_items(
             na.c.published_at,
             latest.c.score,
             np_.c.domain,
+            na.c.id,
+            latest.c.label,
         )
         .join(s, s.c.id == na.c.security_id)
         .join(
@@ -210,7 +254,9 @@ def news_items(
     out: dict[str, list[Item]] = {}
     seen: set[tuple[str, str]] = set()
     off_topic = unknown = duplicates = summary_only = 0
-    for symbol, headline, summary, digest, published_at, score, domain in rows:
+    for row in rows:
+        symbol, headline, summary, digest, published_at, score, domain = row[:7]
+        article_id, label = row[7], row[8]
         if (symbol, digest) in seen:
             duplicates += 1
             continue
@@ -227,7 +273,15 @@ def news_items(
             * decay(published_at, end, table.half_life_days)
         )
         out.setdefault(symbol, []).append(
-            Item(float(score), weight, published_at, published_at, False)
+            Item(
+                float(score),
+                weight,
+                published_at,
+                published_at,
+                False,
+                article_id,
+                label,
+            )
         )
     return News(out, off_topic, unknown, model, duplicates, summary_only)
 
@@ -248,6 +302,8 @@ def social_items(
                 first,
                 last,
                 True,
+                row.get("id"),
+                row.get("label"),
             )
         )
     return out
@@ -322,16 +378,18 @@ def _sentiment_outcome(
             rows = batch_rows(conn, "social_posts", social.batch_id)
             posts = social_items(rows, social.source_as_of, now, table)
     tallied_on = now.astimezone(timezone.utc).date()
+    counted = {s: news.items.get(s, []) + posts.get(s, []) for s in symbols}
     records = [
         {
             **weigh(
                 symbol,
-                news.items.get(symbol, []) + posts.get(symbol, []),
+                counted[symbol],
                 table.version,
                 news.model,
                 table.prior_weight,
             ),
             "tallied_on": tallied_on,
+            "items": item_records(counted[symbol]),
         }
         for symbol in symbols
     ]
@@ -371,15 +429,35 @@ class SentimentRun:
         return result is not None and result.succeeded
 
 
+def collect_social_posts(
+    engine: Engine, now: datetime, *, minutes: float | None = None
+) -> ImportResult | None:
+    """Run the sentiment pipeline's scripts and store their posts as one
+    social_posts batch dated now. None when nothing could be collected because
+    the tickers could not be read, or the run was interrupted."""
+    # sentiment/ is a sibling of src/ in development/backend/, on the path when
+    # the scheduler runs from there, as it always does. Loaded by name so the
+    # strictly typed src/ does not pull the untyped scripts into mypy.
+    manager = importlib.import_module("sentiment.sentiment_manager")
+    from src.services.credibility.social import run_social
+
+    status, reports, _results = manager.collect_reports(minutes=minutes)
+    if status != manager.COLLECTED:
+        logger.error("social collection stopped: %s", status)
+        return None
+    return run_social(engine, now, reports, window_days=WINDOW_DAYS)
+
+
 def run_sentiment(
     engine: Engine,
     news_client: FinnhubNewsClient,
     resolver: PublisherResolver,
     *,
     score_articles: Callable[[Engine], ImportResult | None] | None = None,
+    collect_social: Callable[[Engine, datetime], ImportResult | None] | None = None,
     now: datetime | None = None,
 ) -> SentimentRun:
-    """A, B, the publisher lookup and C, timed (AC 4)."""
+    """A, B, the publisher lookup, social collection and C, timed (AC 4)."""
     now = now or datetime.now(timezone.utc)
     run = SentimentRun()
     steps: list[tuple[str, Callable[[], Any]]] = [
@@ -392,8 +470,10 @@ def run_sentiment(
             "news_publishers",
             lambda: resolve_publishers(engine, resolver, now, window_days=WINDOW_DAYS),
         ),
-        (SOURCE, lambda: derive_sentiment(engine, now=now)),
     ]
+    if collect_social is not None:  # last before C, so C reads today's posts
+        steps.append(("social_posts", lambda: collect_social(engine, now)))
+    steps.append((SOURCE, lambda: derive_sentiment(engine, now=now)))
     for name, step in steps:
         began = time.monotonic()
         try:
@@ -411,6 +491,14 @@ def run_sentiment(
         {k: v.status for k, v in run.results.items()},
     )
     return run
+
+
+def _social_step(settings: Any) -> Callable[[Engine, datetime], Any] | None:
+    """collect_social_posts with the configured cap, or None when turned off."""
+    if not getattr(settings, "social_collection", True):
+        return None
+    minutes = getattr(settings, "social_time_minutes", None)
+    return partial(collect_social_posts, minutes=minutes)
 
 
 def run_once(settings: Any = None) -> int:
@@ -434,6 +522,7 @@ def run_once(settings: Any = None) -> int:
                 ),
                 PublisherResolver(lookup_session),
                 score_articles=score_articles,  # S1-04 (B), JOB-7's FinBERT
+                collect_social=_social_step(settings),
             )
         finally:
             news_session.close()

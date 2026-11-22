@@ -85,7 +85,14 @@ COLUMNS = {
         "form",
         "filed",
     ),
-    # S3-01 (decision 115): the price snapshot; never row_number or quoted_at.
+    # S3-02 Sentiment Pulse (0026): the newest reading and its items' labels and
+    # weights; never a headline, URL, post id or score.
+    "ticker_sentiment": ("id", "batch_id", "security_id", "tallied_on", "value"),
+    "ticker_sentiment_items": (
+        "id", "ticker_sentiment_id", "kind", "news_article_id", "label", "weight", "item_at"),
+    # S3-02 AC3: the top articles' headline, publisher and link only.
+    "news_articles": ("id", "headline", "outlet", "url", "published_at"),
+    # S3-01 (decision 118): the price snapshot; never row_number or quoted_at.
     "daily_prices": (
         "id",
         "batch_id",
@@ -1026,6 +1033,9 @@ def test_every_v1_route_uses_the_helper_exactly_once(engine, fixture_path, group
                 "/v1/securities/{symbol}/financials",  # S2-04
                 "/v1/securities/{symbol}/price",  # S3-01
                 "/v1/securities/{symbol}/score",  # Sprint 2 (S2-01..03)
+                "/v1/securities/{symbol}/sentiment",  # S3-02
+                "/v1/securities/{symbol}/sentiment/articles",  # S3-02 AC3
+                "/v1/securities/{symbol}/sentiment/trend",  # S3-02 AC2
                 "/v1/watchlist",
             ]
             for path in routes:
@@ -1115,6 +1125,9 @@ def test_v1_routes_are_exactly_the_r1_reads_and_market_status():
         "/v1/market-status": ["GET"],  # S1-11
         "/v1/securities/{symbol}/score": ["GET"],  # Sprint 2 (S2-01..03)
         "/v1/securities/{symbol}/financials": ["GET"],  # S2-04
+        "/v1/securities/{symbol}/sentiment": ["GET"],  # S3-02
+        "/v1/securities/{symbol}/sentiment/trend": ["GET"],  # S3-02 AC2
+        "/v1/securities/{symbol}/sentiment/articles": ["GET"],  # S3-02 AC3
         "/v1/securities/{symbol}/price": ["GET"],  # S3-01
     }
     assert callable(create_app)

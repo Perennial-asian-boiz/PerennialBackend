@@ -432,6 +432,219 @@
         "summary": "Get Score"
       }
     },
+    "/v1/securities/{symbol}/sentiment": {
+      "get": {
+        "description": "A security's Sentiment Pulse breakdown (S3-02): the share of positive,\nneutral and negative items behind its newest ticker_sentiment reading, for\nnews (weighted by source credibility and age) and social posts (plain).\n\n200 with status \"unavailable\" when the newest tally has no row for it\n(no_reading) or its row has no stored items (no_breakdown); 404 only for an\nunknown ticker.",
+        "operationId": "get_sentiment_v1_securities__symbol__sentiment_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SentimentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown_security"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "invalid_request"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Sentiment"
+      }
+    },
+    "/v1/securities/{symbol}/sentiment/articles": {
+      "get": {
+        "description": "The top 5 news articles behind a security's current Sentiment Pulse reading\n(S3-02 AC3): headline, outlet, link, label and credibility weight, heaviest\nfirst. The same reading as /sentiment; 200 status \"unavailable\" like it, 404 only\nfor an unknown ticker.",
+        "operationId": "get_sentiment_articles_v1_securities__symbol__sentiment_articles_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SentimentArticlesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown_security"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "invalid_request"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Sentiment Articles"
+      }
+    },
+    "/v1/securities/{symbol}/sentiment/trend": {
+      "get": {
+        "description": "A security's 30-day Sentiment Pulse trend (S3-02 AC2): one point per UTC day\nending today, each the value of that day's stored ticker_sentiment reading, or\nnull for a day with no reading (a gap, never zero). 404 only for an unknown\nticker.",
+        "operationId": "get_sentiment_trend_v1_securities__symbol__sentiment_trend_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SentimentTrendResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "Not modified (If-None-Match matched)"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "unknown_security"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "invalid_request"
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "rate_limited: too many requests from this client",
+            "headers": {
+              "Retry-After": {
+                "description": "Whole seconds until the next request is allowed",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Get Sentiment Trend"
+      }
+    },
     "/v1/watchlist": {
       "get": {
         "description": "The current production publication's watchlist and its envelope.",
@@ -501,6 +714,74 @@
         "unit"
       ],
       "title": "Amount",
+      "type": "object"
+    },
+    "Channel": {
+      "properties": {
+        "count": {
+          "description": "Items counted in this channel",
+          "title": "Count",
+          "type": "integer"
+        },
+        "counts": {
+          "$ref": "#/components/schemas/LabelCounts"
+        },
+        "first_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The earliest item's date, ISO 8601 UTC",
+          "title": "First At"
+        },
+        "last_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The latest item's date, ISO 8601 UTC",
+          "title": "Last At"
+        },
+        "shares": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/LabelShares"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Each label's share, to 4 places; null when not_enough_coverage"
+        },
+        "status": {
+          "description": "ok, or not_enough_coverage below min_items",
+          "title": "Status",
+          "type": "string"
+        },
+        "weighted": {
+          "description": "True for news: shares are weighted by source credibility and age",
+          "title": "Weighted",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status",
+        "weighted",
+        "count",
+        "first_at",
+        "last_at",
+        "counts",
+        "shares"
+      ],
+      "title": "Channel",
       "type": "object"
     },
     "Claim": {
@@ -854,6 +1135,52 @@
         "years"
       ],
       "title": "FinancialsResponse",
+      "type": "object"
+    },
+    "LabelCounts": {
+      "properties": {
+        "negative": {
+          "title": "Negative",
+          "type": "integer"
+        },
+        "neutral": {
+          "title": "Neutral",
+          "type": "integer"
+        },
+        "positive": {
+          "title": "Positive",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "positive",
+        "neutral",
+        "negative"
+      ],
+      "title": "LabelCounts",
+      "type": "object"
+    },
+    "LabelShares": {
+      "properties": {
+        "negative": {
+          "title": "Negative",
+          "type": "number"
+        },
+        "neutral": {
+          "title": "Neutral",
+          "type": "number"
+        },
+        "positive": {
+          "title": "Positive",
+          "type": "number"
+        }
+      },
+      "required": [
+        "positive",
+        "neutral",
+        "negative"
+      ],
+      "title": "LabelShares",
       "type": "object"
     },
     "MarketStatusResponse": {
@@ -1637,6 +1964,218 @@
       "title": "SecuritySearchResult",
       "type": "object"
     },
+    "SentimentArticlesResponse": {
+      "properties": {
+        "api_version": {
+          "examples": [
+            "v1"
+          ],
+          "title": "Api Version",
+          "type": "string"
+        },
+        "articles": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/components/schemas/TopArticle"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Up to 5, heaviest first",
+          "title": "Articles"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "News articles the reading counted",
+          "title": "Count"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only when unavailable: no_reading or no_breakdown",
+          "title": "Reason"
+        },
+        "status": {
+          "description": "ok, or unavailable",
+          "title": "Status",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "The canonical ticker",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "tallied_on": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The UTC date the reading was tallied",
+          "title": "Tallied On"
+        }
+      },
+      "required": [
+        "api_version",
+        "symbol",
+        "status"
+      ],
+      "title": "SentimentArticlesResponse",
+      "type": "object"
+    },
+    "SentimentResponse": {
+      "properties": {
+        "api_version": {
+          "examples": [
+            "v1"
+          ],
+          "title": "Api Version",
+          "type": "string"
+        },
+        "min_items": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Items a channel needs for shares",
+          "title": "Min Items"
+        },
+        "news": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Channel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Only when unavailable: no_reading or no_breakdown",
+          "title": "Reason"
+        },
+        "social": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/Channel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "description": "ok, or unavailable",
+          "title": "Status",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "The canonical ticker",
+          "title": "Symbol",
+          "type": "string"
+        },
+        "tallied_on": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The UTC date the reading was tallied",
+          "title": "Tallied On"
+        }
+      },
+      "required": [
+        "api_version",
+        "symbol",
+        "status"
+      ],
+      "title": "SentimentResponse",
+      "type": "object"
+    },
+    "SentimentTrendResponse": {
+      "properties": {
+        "api_version": {
+          "examples": [
+            "v1"
+          ],
+          "title": "Api Version",
+          "type": "string"
+        },
+        "days": {
+          "description": "Days in the window (30)",
+          "title": "Days",
+          "type": "integer"
+        },
+        "end": {
+          "description": "The window's last day: today, UTC",
+          "title": "End",
+          "type": "string"
+        },
+        "points": {
+          "description": "One point per day, oldest first",
+          "items": {
+            "$ref": "#/components/schemas/TrendPoint"
+          },
+          "title": "Points",
+          "type": "array"
+        },
+        "start": {
+          "description": "The window's first day, YYYY-MM-DD (UTC)",
+          "title": "Start",
+          "type": "string"
+        },
+        "symbol": {
+          "description": "The canonical ticker",
+          "title": "Symbol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "api_version",
+        "symbol",
+        "days",
+        "start",
+        "end",
+        "points"
+      ],
+      "title": "SentimentTrendResponse",
+      "type": "object"
+    },
     "StaleSource": {
       "properties": {
         "age_seconds": {
@@ -1718,6 +2257,88 @@
         "url"
       ],
       "title": "SummarySource",
+      "type": "object"
+    },
+    "TopArticle": {
+      "properties": {
+        "headline": {
+          "title": "Headline",
+          "type": "string"
+        },
+        "label": {
+          "description": "positive, neutral or negative",
+          "title": "Label",
+          "type": "string"
+        },
+        "outlet": {
+          "description": "The publisher, as Finnhub names it",
+          "title": "Outlet",
+          "type": "string"
+        },
+        "published_at": {
+          "description": "ISO 8601 UTC",
+          "title": "Published At",
+          "type": "string"
+        },
+        "rank": {
+          "description": "1 for the heaviest article",
+          "title": "Rank",
+          "type": "integer"
+        },
+        "share": {
+          "description": "Its weight over all counted articles' weight, to 4 places",
+          "title": "Share",
+          "type": "number"
+        },
+        "url": {
+          "description": "The article's stored link (http or https)",
+          "title": "Url",
+          "type": "string"
+        },
+        "weight": {
+          "description": "The final weight the tally gave it (source credibility x age x relevance), to 6 places",
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "rank",
+        "headline",
+        "outlet",
+        "url",
+        "published_at",
+        "label",
+        "weight",
+        "share"
+      ],
+      "title": "TopArticle",
+      "type": "object"
+    },
+    "TrendPoint": {
+      "properties": {
+        "date": {
+          "description": "A UTC calendar day, YYYY-MM-DD",
+          "title": "Date",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "That day's stored reading, -1 to +1, to 4 places; null when nothing was tallied or scored that day (a gap, not zero)",
+          "title": "Value"
+        }
+      },
+      "required": [
+        "date",
+        "value"
+      ],
+      "title": "TrendPoint",
       "type": "object"
     },
     "WatchlistResponse": {

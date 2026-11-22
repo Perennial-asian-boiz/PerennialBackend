@@ -13,7 +13,7 @@ reader can see *why*, not that the decision is final.
 ## The read API may read daily price snapshots from licensed providers
 
 **Status:** Accepted
-**Date:** 2026-11-18 (decision 115)
+**Date:** 2026-11-21 (decision 118, S3-01)
 **Code:** `development/database/ops/provision_roles.py` (`API_COLUMNS["daily_prices"]`), `development/backend/src/api/licensed_price_providers.json`
 
 ### Decision
@@ -28,7 +28,110 @@ It never gets `row_number` (the batch's internal order) or `quoted_at` (the prov
 
 Reading a price isn't the same as displaying it. The route serves only rows whose `provider` is listed in `licensed_price_providers.json`, with a link to its terms and who approved it. Decision 95 found no source licensed for display; Finnhub is the first listed, approved by Bryan on 2026-11-16 for its free plan's quote and 52-week range. Any other provider, such as FMP, is left out before the route computes anything, the same way decision 112 drops market caps.
 
-This is the second exception to "published data only", after decision 113's `fundamentals`. A new column on `daily_prices` isn't granted by default, so it needs its own decision.
+Like decision 113's `fundamentals` and S3-02's Sentiment Pulse columns (decisions 115 to 117), it's an exception to "published data only". A new column on `daily_prices` isn't granted by default, so it needs its own decision.
+
+---
+
+## Sentiment Pulse top articles: the API reads five news_articles columns
+
+**Status:** Accepted
+**Date:** 2026-11-21 (decision 117, S3-02 AC3)
+**Code:** `development/backend/src/api/sentiment.py` (`top_articles`), `GET /v1/securities/{symbol}/sentiment/articles`,
+`development/database/ops/provision_roles.py`
+**Spec:** `docs/technical-specs/SENTIMENT_PULSE.md` §14
+
+### Decision
+
+AC3 lists the top 5 contributing articles of the current reading with headline, source,
+credibility weight and label, each linking to the original. The route ranks the reading's
+stored news items by the final weight the tally used and joins their articles.
+`perennial_api` is granted `news_articles(id, headline, outlet, url, published_at)` and
+`ticker_sentiment_items.news_article_id`. It is still refused `summary`, `finnhub_id`,
+`match_rule` and `content_hash`, and every score.
+
+### Why
+
+Until now the read API never read source tables beyond fundamentals (decision 113). AC3
+needs exactly the headline, publisher, date and link, which are public facts about a
+published article, so the grant is limited to those columns. The weight is shown as a
+share of the reading's total weight, because the raw product (tier x decay x relevance) has
+no meaning on its own. Social posts are not listed: they have no headline or link.
+
+---
+
+## Sentiment Pulse 30-day trend: one stored value per day
+
+**Status:** Accepted
+**Date:** 2026-11-19 (decision 116, S3-02 AC2)
+**Code:** `development/backend/src/api/sentiment.py` (`trend`), `GET /v1/securities/{symbol}/sentiment/trend`
+**Spec:** `docs/technical-specs/SENTIMENT_PULSE.md` §13
+
+### Decision
+
+The trend serves the last 30 UTC days ending today, one point per day: the stored
+`ticker_sentiment.value` of the row tallied that day (`tallied_on`), the newest batch
+when a day was tallied twice. A day with no row, or a row that counted nothing
+(`value` NULL), is `null`, and the page draws no bar. `perennial_api` is granted
+`ticker_sentiment.value` for this.
+
+### Why
+
+AC2 asks for "that day's stored reading" with gaps, never zero, so the API serves
+the stored value as is (no recomputation) and keeps "nothing scored" distinct from a
+real 0. The value is the company's combined reading, so the chart is the same on the
+News and Social tabs. It is a separate route so the breakdown's `unavailable` states
+don't hide a month of history.
+
+---
+
+## Sentiment Pulse breakdown: stored items and social labels
+
+**Status:** Accepted
+**Date:** 2026-11-18 (decision 115, S3-02 piece 1)
+**Code:** `development/database/migrations/versions/20261118_0026_sentiment_breakdown.py`,
+`development/backend/src/services/credibility/labels.py`, `.../credibility/job.py`,
+`.../credibility/social.py`, `development/backend/src/ingestion/importer.py` (`CHILD_TABLES`),
+`development/backend/src/api/sentiment.py`
+**Spec:** `docs/technical-specs/SENTIMENT_PULSE.md`
+
+### Decision
+
+The Company page's Sentiment Pulse shows, per channel, the share of positive,
+neutral and negative items behind the current `ticker_sentiment` reading. To
+build that from exactly what the tally counted:
+
+1. The weighting run stores every counted article and post as a
+   `ticker_sentiment_items` row with its row: the score, label and **final
+   weight** (tier x age decay x relevance) it used. The importer writes them in
+   the batch's transaction, and they are part of the record, so of the batch's
+   content hash.
+2. News bars are **weighted** shares (sum of a label's weights / sum of weights);
+   social bars are **plain** shares (count / count). A channel with fewer than 3
+   items says "Not enough coverage".
+3. Social posts get a stored `label`, written by the pipeline (`run_social`) with
+   the **article cutoffs** (<= -0.2 negative, >= 0.2 positive), now shared in
+   `labels.py`. Existing rows are backfilled by 0026, and a CHECK keeps each label
+   equal to its score's.
+4. "Current" is the newest `ticker_sentiment` batch, not the one `current_scores`
+   cites, so the pulse shows the freshest tally.
+5. The read API may read `ticker_sentiment(id, batch_id, security_id, tallied_on)`
+   and `ticker_sentiment_items(id, ticker_sentiment_id, kind, label, weight,
+   item_at)`, nothing else of the sentiment sources.
+
+### Why
+
+- Recomputing weights at read time would duplicate the job's weighting and drift
+  from the stored value when `source_weights.json` changes; stored items can't.
+- The same items will serve S3-02's later "top 5 contributing articles" (AC 3).
+- One label rule for both channels makes the two tabs mean the same thing.
+
+### Consequences
+
+- Readings tallied before 0026 have no items: the API reports `no_breakdown`
+  until the pipeline runs once after deploy.
+- Each `ticker_sentiment` batch payload also carries its items (they are part of
+  the records), so payloads grow with the counted items.
+- Downgrading 0026 is refused while any item exists.
 
 ---
 

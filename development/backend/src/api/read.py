@@ -42,7 +42,7 @@ from sqlalchemy.engine import Connection, Engine
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from src.api import financials, market_status, price
+from src.api import financials, market_status, price, sentiment
 from src.api.financials import FinancialsResponse
 from src.api.price import PriceResponse
 from src.api.rate_limit import (
@@ -51,6 +51,11 @@ from src.api.rate_limit import (
     RateLimitConfigError,
     RateLimiter,
     client_key,
+)
+from src.api.sentiment import (
+    SentimentArticlesResponse,
+    SentimentResponse,
+    SentimentTrendResponse,
 )
 from src.db import models as m
 from src.ingestion.schemas import _TICKER
@@ -1027,6 +1032,87 @@ def get_price(symbol: str, request: Request) -> Response:
         if found is None:
             raise APIError(404, "unknown_security", "no security has that ticker")
         served, etag = price.served(conn, int(found.id), today)
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    body = {"api_version": API_VERSION, "symbol": found.symbol, **served}
+    return CanonicalJSONResponse(body, headers=headers)
+
+
+@router.get(
+    "/securities/{symbol}/sentiment",
+    response_model=SentimentResponse,
+    responses=SCORE_RESPONSES,
+)
+def get_sentiment(symbol: str, request: Request) -> Response:
+    """A security's Sentiment Pulse breakdown (S3-02): the share of positive,
+    neutral and negative items behind its newest ticker_sentiment reading, for
+    news (weighted by source credibility and age) and social posts (plain).
+
+    200 with status "unavailable" when the newest tally has no row for it
+    (no_reading) or its row has no stored items (no_breakdown); 404 only for an
+    unknown ticker.
+    """
+    wanted = symbol.strip().upper()
+    if not _TICKER.fullmatch(wanted):
+        raise APIError(422, "invalid_request", "symbol is not a valid ticker")
+    with read_transaction(_engine(request)) as conn:
+        found = _security(conn, wanted)
+        if found is None:
+            raise APIError(404, "unknown_security", "no security has that ticker")
+        served, etag = sentiment.served(conn, int(found.id))
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    body = {"api_version": API_VERSION, "symbol": found.symbol, **served}
+    return CanonicalJSONResponse(body, headers=headers)
+
+
+@router.get(
+    "/securities/{symbol}/sentiment/trend",
+    response_model=SentimentTrendResponse,
+    responses=SCORE_RESPONSES,
+)
+def get_sentiment_trend(symbol: str, request: Request) -> Response:
+    """A security's 30-day Sentiment Pulse trend (S3-02 AC2): one point per UTC day
+    ending today, each the value of that day's stored ticker_sentiment reading, or
+    null for a day with no reading (a gap, never zero). 404 only for an unknown
+    ticker.
+    """
+    wanted = symbol.strip().upper()
+    if not _TICKER.fullmatch(wanted):
+        raise APIError(422, "invalid_request", "symbol is not a valid ticker")
+    with read_transaction(_engine(request)) as conn:
+        found = _security(conn, wanted)
+        if found is None:
+            raise APIError(404, "unknown_security", "no security has that ticker")
+        served, etag = sentiment.trend(conn, int(found.id), sentiment.today())
+    headers = {"ETag": etag, "Cache-Control": "no-cache"}
+    if _etag_matches(request.headers.get("if-none-match"), etag):
+        return Response(status_code=304, headers=headers)
+    body = {"api_version": API_VERSION, "symbol": found.symbol, **served}
+    return CanonicalJSONResponse(body, headers=headers)
+
+
+@router.get(
+    "/securities/{symbol}/sentiment/articles",
+    response_model=SentimentArticlesResponse,
+    responses=SCORE_RESPONSES,
+)
+def get_sentiment_articles(symbol: str, request: Request) -> Response:
+    """The top 5 news articles behind a security's current Sentiment Pulse reading
+    (S3-02 AC3): headline, outlet, link, label and credibility weight, heaviest
+    first. The same reading as /sentiment; 200 status "unavailable" like it, 404 only
+    for an unknown ticker.
+    """
+    wanted = symbol.strip().upper()
+    if not _TICKER.fullmatch(wanted):
+        raise APIError(422, "invalid_request", "symbol is not a valid ticker")
+    with read_transaction(_engine(request)) as conn:
+        found = _security(conn, wanted)
+        if found is None:
+            raise APIError(404, "unknown_security", "no security has that ticker")
+        served, etag = sentiment.top_articles(conn, int(found.id))
     headers = {"ETag": etag, "Cache-Control": "no-cache"}
     if _etag_matches(request.headers.get("if-none-match"), etag):
         return Response(status_code=304, headers=headers)

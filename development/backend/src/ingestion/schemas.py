@@ -29,6 +29,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic.functional_validators import BeforeValidator
 from typing_extensions import Annotated
 
+from src.services.credibility.labels import LABELS as SENTIMENT_LABELS
+from src.services.credibility.labels import label_for
+
 PLACEHOLDER_TICKERS = frozenset({"N/A", "NONE", "NULL", "--", "NAN"})
 BIGINT_MAX = 2**63 - 1
 MAX_NUMBER_TEXT = 64
@@ -273,6 +276,10 @@ class ContractRecord(BaseModel):
 
     def db_values(self) -> Dict[str, Any]:
         return {name: getattr(self, name) for name in self.DB_COLUMNS}
+
+    def child_rows(self) -> List[Dict[str, Any]]:
+        """Rows of the source's child table (importer.CHILD_TABLES), if it has one."""
+        return []
 
 
 class GlobalRecord(ContractRecord):
@@ -886,13 +893,15 @@ def _between(v: Optional[Decimal], lo: int, hi: int) -> Optional[Decimal]:
 
 
 class SocialPost(SourceRecord):
-    """One scored social post or comment about one security, in [-1, 1]."""
+    """One scored social post or comment about one security, in [-1, 1], with the
+    label its score falls in (0026, labels.label_for)."""
 
-    DB_COLUMNS = ("platform", "post_id", "score")
+    DB_COLUMNS = ("platform", "post_id", "score", "label")
 
     platform: Annotated[str, BeforeValidator(_text_validator(16, required=True))]
     post_id: Annotated[str, BeforeValidator(_text_validator(500, required=True))]
     score: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
+    label: Annotated[str, BeforeValidator(_text_validator(8, required=True))]
 
     @field_validator("platform")
     @classmethod
@@ -906,6 +915,12 @@ class SocialPost(SourceRecord):
     def _score(cls, v: Decimal) -> Decimal:
         _between(v, -1, 1)
         return v
+
+    @model_validator(mode="after")
+    def _label_of_score(self) -> "SocialPost":
+        if self.label != label_for(self.score):
+            raise ValueError("label must be the one the score falls in")
+        return self
 
 
 class ArticleSentiment(SourceRecord):
@@ -992,6 +1007,43 @@ def _known(value: Optional[str], allowed: frozenset[str], what: str) -> Optional
     return value
 
 
+class TickerSentimentItem(BaseModel):
+    """One article or post a ticker_sentiment record counted (0026): the score,
+    label and final weight the weighting used, and the item's date. Stored in
+    ticker_sentiment_items by the importer, with its record's row."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: str
+    news_article_id: Optional[int] = Field(
+        default=None, gt=0, le=BIGINT_MAX, strict=True
+    )
+    social_post_id: Optional[int] = Field(
+        default=None, gt=0, le=BIGINT_MAX, strict=True
+    )
+    score: Annotated[Decimal, BeforeValidator(_required_signed(4, 5))]
+    label: str
+    weight: Annotated[Decimal, BeforeValidator(_required_signed(10, 12))]
+    item_at: datetime
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "TickerSentimentItem":
+        if self.kind not in ("news", "social"):
+            raise ValueError("unknown kind")
+        if (self.kind == "news") != (self.news_article_id is not None) or (
+            self.kind == "social"
+        ) != (self.social_post_id is not None):
+            raise ValueError("a news item names its article, a social item its post")
+        _between(self.score, -1, 1)
+        if self.label not in SENTIMENT_LABELS:
+            raise ValueError("unknown label")
+        if self.weight < 0:
+            raise ValueError("weight must not be negative")
+        if self.item_at.tzinfo is None:
+            raise ValueError("item_at must be timezone-aware")
+        return self
+
+
 class TickerSentiment(SourceRecord):
     """One security's credibility-weighted sentiment over the window: PR #85's record
     plus model_version (decision 108). Nothing counted means no value and no dates.
@@ -1029,6 +1081,13 @@ class TickerSentiment(SourceRecord):
         Optional[Decimal], BeforeValidator(_signed_decimal(4, 5))
     ] = None
     tallied_on: date
+    # 0026: what was counted, stored as ticker_sentiment_items rows (not columns).
+    # Part of the record, so of the batch identity: an identical rerun reuses the
+    # batch together with its items.
+    items: List[TickerSentimentItem] = Field(default_factory=list)
+
+    def child_rows(self) -> List[Dict[str, Any]]:
+        return [item.model_dump() for item in self.items]
 
     @field_validator("value", "plain_average", "social_sentiment")
     @classmethod
@@ -1054,6 +1113,10 @@ class TickerSentiment(SourceRecord):
             raise ValueError("model_version is present exactly when news is counted")
         if self.social_sentiment and self.social_count == 0:
             raise ValueError("social_sentiment without social posts must be 0")
+        if self.items:  # records from before 0026 (and some tests) carry none
+            news = sum(item.kind == "news" for item in self.items)
+            if (news, len(self.items) - news) != (self.news_count, self.social_count):
+                raise ValueError("items must be exactly the counted news and posts")
         return self
 
 
