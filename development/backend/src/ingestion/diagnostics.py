@@ -85,6 +85,7 @@ UNIT_KINDS = frozenset(
         "market-cap tickers",
         "SEC filers",
         "news tickers",
+        "price tickers",
         "upstream files",
     }
 )

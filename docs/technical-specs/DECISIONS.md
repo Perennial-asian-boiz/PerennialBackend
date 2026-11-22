@@ -10,6 +10,28 @@ reader can see *why*, not that the decision is final.
 
 ---
 
+## The read API may read daily price snapshots from licensed providers
+
+**Status:** Accepted
+**Date:** 2026-11-21 (decision 118, S3-01)
+**Code:** `development/database/ops/provision_roles.py` (`API_COLUMNS["daily_prices"]`), `development/backend/src/api/licensed_price_providers.json`
+
+### Decision
+
+`perennial_api` gets column-level SELECT on twelve columns of `perennial.daily_prices`, for the S3-01 Price Breakdown endpoint:
+- `id`, `batch_id` and `security_id`;
+- `trading_date`, `close` and `previous_close`;
+- `high_52w`, `high_52w_date`, `low_52w` and `low_52w_date`;
+- `currency` and `provider`.
+
+It never gets `row_number` (the batch's internal order) or `quoted_at` (the provider's exact quote time; the API serves the trading day). There's no table-level grant and no write.
+
+Reading a price isn't the same as displaying it. The route serves only rows whose `provider` is listed in `licensed_price_providers.json`, with a link to its terms and who approved it. Decision 95 found no source licensed for display; Finnhub is the first listed, approved by Bryan on 2026-11-16 for its free plan's quote and 52-week range. Any other provider, such as FMP, is left out before the route computes anything, the same way decision 112 drops market caps.
+
+Like decision 113's `fundamentals` and S3-02's Sentiment Pulse columns (decisions 115 to 117), it's an exception to "published data only". A new column on `daily_prices` isn't granted by default, so it needs its own decision.
+
+---
+
 ## Sentiment Pulse top articles: the API reads five news_articles columns
 
 **Status:** Accepted

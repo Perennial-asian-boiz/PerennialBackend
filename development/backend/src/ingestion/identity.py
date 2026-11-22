@@ -50,6 +50,8 @@ CANONICAL_ONLY_SOURCES |= {"news_articles"}
 CANONICAL_ONLY_SOURCES |= {"ticker_sentiment", "company_scores", "score_explanations"}
 # S1-05: social posts are filtered to stored canonical tickers before import.
 CANONICAL_ONLY_SOURCES |= {"social_posts", "article_sentiment"}
+# S3-01 prices plan from the published watchlist too.
+CANONICAL_ONLY_SOURCES |= {"daily_prices"}
 
 UNRESOLVED = "unresolved"
 INACTIVE = "inactive_security"
