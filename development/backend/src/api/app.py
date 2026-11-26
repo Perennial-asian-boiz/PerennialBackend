@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from src.api import read
+from src.api import market_status, price, read
 from src.api.accounts import get_engine, router
 from src.api.dashboard import (
     DashboardResponse,
@@ -211,12 +211,18 @@ def dashboard_watchlist(
         # Name and sector from the security and its profile, for every ticker in
         # one statement. Granted columns only: never legal_name.
         s, p = models.securities, models.company_profiles
+        found = connection.execute(
+            select(s.c.id, s.c.symbol, s.c.name, p.c.sector)
+            .select_from(s.outerjoin(p, p.c.id == s.c.company_profile_id))
+            .where(s.c.symbol.in_(tickers))
+        ).all()
+        # Each one's latest licensed close, in one more statement (S3-01).
+        today = market_status.now().astimezone(market_status.ET).date()
+        closes = price.latest_closes(connection, [row.id for row in found], today)
         display = {
-            row.symbol: Display(name=row.name, sector=row.sector)
-            for row in connection.execute(
-                select(s.c.symbol, s.c.name, p.c.sector)
-                .select_from(s.outerjoin(p, p.c.id == s.c.company_profile_id))
-                .where(s.c.symbol.in_(tickers))
+            row.symbol: Display(
+                name=row.name, sector=row.sector, price=closes.get(row.id)
             )
+            for row in found
         }
     return dashboard_response_from_publication(published, display)

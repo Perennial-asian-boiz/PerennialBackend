@@ -21,8 +21,10 @@ def test_company_adapter_preserves_available_display_fields():
     assert company.ticker == "AAPL"
     assert company.name == "Apple"
     assert company.sector == "Technology"
-    assert company.price is None  # decision 95 (L5 a): no price is shown
-    assert company.change_percent == 1.25
+    # Decision 95 (L5 a): a record's price and change are never shown; only a
+    # licensed close is (test_dashboard_licensed_price.py).
+    assert company.price is None
+    assert company.change_percent is None
     assert company.confidence_score == 84
     assert company.sentiment == "Positive"
 
