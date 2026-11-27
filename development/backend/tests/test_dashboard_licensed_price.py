@@ -1,5 +1,5 @@
 """The dashboard shows the licensed close (S3-01, decision 118 extended to
-GET /api/watchlist; proposed in DECISIONS.md, pending Bryan). Synthetic rows only.
+GET /api/watchlist; decision 119). Synthetic rows only.
 
 Pinned:
 - A row's price and change_percent are its security's newest daily_prices row
