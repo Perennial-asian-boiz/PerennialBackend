@@ -1,5 +1,5 @@
 {
-  "_comment": "S3-01 AC 3: the only providers whose prices GET /v1/securities/{symbol}/price serves. A provider not listed here is never served, even when its rows are stored (as decision 112 drops market caps). Adding one needs its terms link and the approver; removing one stops serving it on the next deploy without touching stored rows.",
+  "_comment": "S3-01 AC 3: the only providers whose prices GET /v1/securities/{symbol}/price and the dashboard's GET /api/watchlist serve. A provider not listed here is never served, even when its rows are stored (as decision 112 drops market caps). Adding one needs its terms link and the approver; removing one stops serving it on the next deploy without touching stored rows.",
   "providers": [
     {
       "provider": "finnhub",

@@ -47,10 +47,12 @@ def dashboard_sector(value: str | None) -> str:
 
 @dataclass(frozen=True)
 class Display:
-    """What the database says about a ticker: securities.name and the profile sector."""
+    """What the database says about a ticker: securities.name, the profile sector
+    and its latest licensed close (price.latest_closes' body), if any."""
 
     name: str | None
     sector: str | None
+    price: Mapping[str, Any] | None = None
 
 
 class DashboardCompanyResponse(BaseModel):
@@ -72,6 +74,11 @@ class DashboardCompanyResponse(BaseModel):
     public_float: float | None = None
     public_float_as_of: str | None = None
     size_caution: bool = False
+    # The licensed close behind price and change_percent: its provider, trading
+    # day and whether it is more than a week old. All empty without one.
+    price_source: str | None = None
+    price_as_of: str | None = None
+    price_stale: bool = False
 
 
 class DashboardResponse(BaseModel):
@@ -119,9 +126,14 @@ def company_from_record(
     With ``display`` (the database lookup), name and sector come from the
     security and its profile, and a ticker it lacks is Unclassified. Without
     it, a record-carried name and sector are kept.
+
+    price and change_percent come only from the lookup's licensed close
+    (decision 118, extended to the dashboard): never from the record, which may
+    carry an unlicensed price or ARK's share price (decision 95).
     """
 
     ticker = _ticker(record)
+    quote: Mapping[str, Any] = {}
     if display is None:
         name = str(record.get("name") or ticker)
         sector = str(record.get("sector") or UNCLASSIFIED)
@@ -129,6 +141,7 @@ def company_from_record(
         found = display.get(ticker)
         name = (found.name if found else None) or ticker
         sector = dashboard_sector(found.sector if found else None)
+        quote = (found.price if found else None) or {}
     signals = record.get("signals")
     if not isinstance(signals, Mapping):
         signals = {}
@@ -145,15 +158,17 @@ def company_from_record(
         name=name,
         ticker=ticker,
         sector=sector,
-        # Decision 95 (L5 a): no licence to display a price, so none is shown.
-        price=None,
-        change_percent=_number(record.get("change_percent")),
+        price=_number(quote.get("close")),
+        change_percent=_number(quote.get("change_percent")),
         confidence_score=_number(record.get("confidence_score")),
         sentiment="Watch" if has_warning else ("Positive" if has_signal else "Neutral"),
         reason=_reason(bucket, signals, warnings),
         public_float=_number(record.get("public_float")),
         public_float_as_of=as_of if isinstance(as_of, str) else None,
         size_caution=isinstance(size_flags, list) and bool(size_flags),
+        price_source=quote.get("source"),
+        price_as_of=quote.get("as_of"),
+        price_stale=bool(quote.get("stale")),
     )
 
 

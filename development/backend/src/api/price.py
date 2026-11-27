@@ -1,4 +1,5 @@
-"""S3-01: a security's latest close, for GET /v1/securities/{symbol}/price.
+"""S3-01: a security's latest close, for GET /v1/securities/{symbol}/price
+and, through latest_closes, the dashboard's price column.
 
 Serves the security's newest daily_prices row from a licensed provider
 (licensed_price_providers.json, AC 3). Rows from any other provider are left
@@ -117,32 +118,9 @@ def _day(value: date | None) -> str | None:
     return None if value is None else value.isoformat()
 
 
-def served(
-    conn: Connection,
-    security_id: int,
-    today: date,
-    licensed: dict[str, str] | None = None,
-) -> tuple[dict[str, Any], str]:
-    """(body without api_version and symbol, ETag). Rows never change, so the row
-    id names the price; the licences and the stale flag complete the ETag."""
-    licensed = LICENSED if licensed is None else licensed
-    digest = hashlib.sha256(",".join(sorted(licensed)).encode()).hexdigest()[:8]
-    p = m.daily_prices
-    row = (
-        conn.execute(
-            select(*(p.c[name] for name in COLUMNS))
-            .where(p.c.security_id == security_id, p.c.provider.in_(list(licensed)))
-            .order_by(p.c.batch_id.desc())
-            .limit(1)
-        ).one_or_none()
-        if licensed
-        else None
-    )
-    if row is None:
-        return dict(UNAVAILABLE), f'"v1-price-0-{digest}"'
+def _body(row: Any, today: date, licensed: dict[str, str]) -> dict[str, Any]:
     change = None if row.previous_close is None else row.close - row.previous_close
-    stale = (today - row.trading_date).days > STALE_AFTER_DAYS
-    body = {
+    return {
         "status": "ok",
         "source": licensed[row.provider],
         "as_of": row.trading_date.isoformat(),
@@ -157,6 +135,60 @@ def served(
         "high_52w_date": _day(row.high_52w_date),
         "low_52w": _served(row.low_52w),
         "low_52w_date": _day(row.low_52w_date),
-        "stale": stale,
+        "stale": (today - row.trading_date).days > STALE_AFTER_DAYS,
     }
-    return body, f'"v1-price-{row.id}-{digest}-{int(stale)}"'
+
+
+def _licensed_rows(licensed: dict[str, str]) -> Any:
+    p = m.daily_prices
+    return select(*(p.c[name] for name in COLUMNS)).where(
+        p.c.provider.in_(list(licensed))
+    )
+
+
+def served(
+    conn: Connection,
+    security_id: int,
+    today: date,
+    licensed: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """(body without api_version and symbol, ETag). Rows never change, so the row
+    id names the price; the licences and the stale flag complete the ETag."""
+    licensed = LICENSED if licensed is None else licensed
+    digest = hashlib.sha256(",".join(sorted(licensed)).encode()).hexdigest()[:8]
+    p = m.daily_prices
+    row = (
+        conn.execute(
+            _licensed_rows(licensed)
+            .where(p.c.security_id == security_id)
+            .order_by(p.c.batch_id.desc())
+            .limit(1)
+        ).one_or_none()
+        if licensed
+        else None
+    )
+    if row is None:
+        return dict(UNAVAILABLE), f'"v1-price-0-{digest}"'
+    body = _body(row, today, licensed)
+    return body, f'"v1-price-{row.id}-{digest}-{int(body["stale"])}"'
+
+
+def latest_closes(
+    conn: Connection,
+    security_ids: list[int],
+    today: date,
+    licensed: dict[str, str] | None = None,
+) -> dict[int, dict[str, Any]]:
+    """security id -> served's "ok" body, for every security with a licensed row,
+    in one statement. A security without one is left out."""
+    licensed = LICENSED if licensed is None else licensed
+    if not licensed or not security_ids:
+        return {}
+    p = m.daily_prices
+    rows = conn.execute(
+        _licensed_rows(licensed)
+        .where(p.c.security_id.in_(security_ids))
+        .distinct(p.c.security_id)
+        .order_by(p.c.security_id, p.c.batch_id.desc())
+    )
+    return {row.security_id: _body(row, today, licensed) for row in rows}

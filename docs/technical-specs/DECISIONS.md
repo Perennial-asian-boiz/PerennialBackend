@@ -10,6 +10,23 @@ reader can see *why*, not that the decision is final.
 
 ---
 
+## The dashboard may show the same licensed daily close
+
+**Status:** Accepted (Bryan, 2026-11-27), for the MVP review audience only
+**Date:** 2026-11-25 (decision 119, extends decision 118, S3-01)
+**Code:** `development/backend/src/api/price.py` (`latest_closes`), `development/backend/src/api/dashboard.py` (`company_from_record`), `development/backend/src/api/app.py` (`dashboard_watchlist`)
+
+### Decision
+
+Decision 118 lets the read API read `daily_prices` "for the S3-01 Price Breakdown endpoint". This extends that use to `GET /api/watchlist`: each dashboard row's `price` and `change_percent` are the Price Breakdown's `close` and `change_percent` for that security, with its source, trading day and stale flag.
+
+Nothing else changes:
+- **No new grant:** the same twelve columns and the same `perennial_api` login.
+- **The same licence rule:** only providers listed in `licensed_price_providers.json` (today Finnhub, approved for its free plan's quote) are shown, and rows from any other provider are left out first.
+- **Decision 95 still holds:** a price, change or ARK share price carried in a publication's record is never served.
+
+The approval covers the team and the course's MVP review, not the public. A public launch needs its own decision first: whether Finnhub's free-plan terms cover a public dashboard listing many companies' quotes has not been checked. That check belongs with the provider terms review still open in the rig's decision register (D8).
+
 ## The read API may read daily price snapshots from licensed providers
 
 **Status:** Accepted

@@ -6,13 +6,18 @@ docs/licensing-map @ 84e795e) found no licence to display the price
 GET /api/watchlist served: a record's "price", or else ARK's share_price
 (src/api/dashboard.py company_from_record). L5 (a): don't show a price.
 
+Since S3-01 the dashboard shows a licensed close from daily_prices (decision
+118 extended to the dashboard, test_dashboard_licensed_price.py). What this file
+pins still holds: no price the record carries is ever served.
+
 Pinned:
 - DashboardCompanyResponse keeps its price field (nullable) so the frontend
-  doesn't break, but every company's price is null: whatever the record or its
-  ARK signal carries.
-- Through the route, in publication mode as the provisioned API login, every
-  served company has "price": null, and no stored price appears anywhere in the
-  body. Every other field is unchanged (test_dashboard_sector covers them).
+  doesn't break, and a record's price, change_percent and ARK share price are
+  never served: without a licensed close, price and change_percent are null.
+- Through the route, in publication mode as the provisioned API login, with no
+  daily_prices rows, every served company has "price": null, and no stored
+  price appears anywhere in the body. Every other field is unchanged
+  (test_dashboard_sector covers them).
 - Fixture mode (the labelled demo data, dashboard_fixture.py) serves null too,
   so the frontend sees the same contract in both modes. The coordinator asked
   whether the fixture should follow; this is the test-maker's recommendation,
@@ -91,8 +96,8 @@ def test_the_route_serves_a_null_price_for_every_company(
         assert "price" in company and company["price"] is None, ticker
     for number in ("225.5", "12.75", "987.25"):
         assert number not in response.text
-    # Other fields still come through.
-    assert served["ZZPC"]["change_percent"] == -1.5
+    # The record's change is a price figure too; other fields still come through.
+    assert served["ZZPC"]["change_percent"] is None
     assert served["ZZPC"]["confidence_score"] == 61
 
 
